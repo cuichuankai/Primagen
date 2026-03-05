@@ -21,10 +21,12 @@ This is a pure C implementation of the original nanobot project.
   - `agent/`: Agent loop
   - `bus/`: Message bus
   - `context/`: Context builder
-  - `memory/`: Memory management
+  - `memory/`: Memory management (Long-term/Short-term Memory, not RAM)
   - `providers/`: LLM providers
   - `session/`: Session management
   - `tools/`: Tool registry
+  - `subagent/`: Subagent manager
+  - `cron/`: Cron service
   - `common.h/c`, `message.h/c`, `main.c`: Common files
 - `build/`: Build directory for object files and executable
 - `Makefile`: Build script
@@ -34,10 +36,16 @@ This is a pure C implementation of the original nanobot project.
 - Agent Loop with ReAct Paradigm
 - MessageBus for decoupling channels and agent core
 - ContextBuilder for assembling prompts
-- Tool registration mechanism
+- Tool registration mechanism (Filesystem, Shell, Web, Subagent, Cron)
 - Session persistence in JSONL format
-- Memory management (short and long term)
-- Basic error handling
+- Memory management (short and long term context)
+- Subagent Manager for background tasks
+- Cron Service for scheduled tasks
+- Real LLM Provider (OpenAI/Brave integration)
+
+**Note on Channels**: Currently, only the CLI (Command Line Interface) channel is implemented. Configuration structures for Telegram/WhatsApp exist but are not yet connected to real APIs.
+
+**Note on CLI Arguments**: The application currently loads configuration from `.nanobot/config.json` by default and does not yet support command-line arguments override (unlike the original nanobot).
 
 ## Compilation
 ```bash
@@ -46,15 +54,19 @@ make
 
 ## Running
 ```bash
+# Ensure API keys are set
+export OPENAI_API_KEY="sk-..."
+export BRAVE_API_KEY="your-brave-key"
+
 ./build/primagen
 ```
 
-The program simulates an inbound message and prints the response.
+The program runs an interactive CLI agent loop.
 
 ## Verification
-Compare the logic with the original Python code. The agent loop processes messages, builds context, calls LLM (stub), executes tools, and responds.
+Compare the logic with the original Python code. The agent loop processes messages, builds context, calls LLM, executes tools, and responds.
 
 ## Notes
-- LLM provider is a stub; integrate real API calls for full functionality.
-- JSON parsing is simplified; use a proper library for production.
-- HTTP client not implemented; add for web tools.
+- **Memory**: Refers to the AI's "Memory" (Context/Knowledge), distinct from system RAM.
+- **LLM**: Uses `libcurl` to make real requests to OpenAI API.
+- **Tools**: Includes `exec`, `read_file`, `write_file`, `web_search` etc.

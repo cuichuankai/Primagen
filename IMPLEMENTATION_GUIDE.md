@@ -54,14 +54,15 @@
   - 会话保存到文件
   - 会话索引管理
 
-#### ✓ Memory System（内存系统）
-- **nanobot**: `nanobot/agent/memory.py` - 两层内存架构
+#### ✓ Memory System（记忆系统）
+- **nanobot**: `nanobot/agent/memory.py` - 两层记忆架构
 - **Primagen**: `src/memory/memory.c`
 - 功能：
-  - MEMORY.md（长期事实）
-  - HISTORY.md（可grep搜索的日志）
-  - 内存加载/保存
-  - 内存巩固（consolidation）任务
+  - MEMORY.md（长期事实记忆）
+  - HISTORY.md（可grep搜索的日志历史）
+  - 记忆加载/保存
+  - 记忆巩固（consolidation）任务
+- **注**：此处 Memory 指代 Agent 的长期与短期记忆，而非计算机内存 (RAM)。
 
 #### ✓ Subagent Manager（子代理管理器）
 - **nanobot**: `nanobot/agent/subagent.py` - 后台任务执行
@@ -106,7 +107,7 @@
 - **nanobot**: `nanobot/providers/` - 多个LLM提供者
 - **Primagen**: `src/providers/llm_provider.c`
 - 功能：
-  - LLM 调用接口
+  - LLM 调用接口 (OpenAI Compatible)
   - 工具定义传递
   - 响应解析
   - 模型参数配置
@@ -119,7 +120,16 @@
   - Tool 配置（执行、Web 搜索、约束等）
   - Channel 配置（Telegram、WhatsApp 等）
   - Heartbeat 配置
-  - 热重载支持
+  - **差异**: 目前仅支持硬编码路径加载 (`.nanobot/config.json`)，未实现命令行参数覆盖。
+
+### 待实现/部分实现模块
+
+#### ○ Channels (通信通道)
+- **nanobot**: 支持 Telegram, WhatsApp, Discord 等
+- **Primagen**:
+  - 配置结构已就绪 (`src/config/config.c`)
+  - 实际通信层目前仅实现 **CLI (命令行交互)**
+  - Telegram/WhatsApp 等 API 接入层尚未实现
 
 ### 工具实现
 
@@ -215,7 +225,7 @@
 3. **Context Builder** - 综合的上下文和提示词组装
 4. **Tool Registry** - 动态工具注册和执行
 5. **Session Manager** - 会话和历史管理
-6. **Memory System** - 两层内存架构
+6. **Memory System** - 两层记忆架构
 7. **Subagent Manager** - 后台任务执行
 8. **Cron Service** - 定时任务调度
 9. **Heartbeat Service** - 周期性操作
@@ -240,11 +250,11 @@
 
 ### 可选的增强功能
 
-1. **Channel Implementation** - 实现 Telegram、WhatsApp、Discord 等通道
-2. **Real LLM Integration** - 集成真实的 LLM API（OpenAI、Claude等）
-3. **HTTP Client** - 实现 Web 搜索和获取功能
+1. **Channel Implementation** - 实现 Telegram、WhatsApp、Discord 等通道的真实 API 对接
+2. **CLI Arguments** - 实现与 nanobot 一致的命令行参数解析 (如 `--config`, `--workspace` 等)
+3. **HTTP Client** - 增强 Web 工具的鲁棒性
 4. **JSON Parser** - 增强配置文件解析
-5. **Database** - 改进的会话和内存持久化
+5. **Database** - 改进的会话和记忆持久化
 6. **Error Handling** - 更详细的错误处理和恢复
 7. **Performance** - 内存池、对象缓存等优化
 8. **Testing** - 单元测试和集成测试框架
@@ -255,7 +265,7 @@
 
 - ✓ ReAct 推理-行动范式
 - ✓ 动态工具执行
-- ✓ 多层次内存系统
+- ✓ 多层次记忆系统
 - ✓ 后台任务管理
 - ✓ 定时任务调度
 - ✓ 可扩展技能系统
@@ -268,4 +278,3 @@
 - AI 代理框架的轻量级实现
 - 性能关键场景下的替代方案
 - 快速原型开发的基础
-

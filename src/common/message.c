@@ -1,5 +1,7 @@
 #include "message.h"
 #include "common.h"
+#include <stdlib.h>
+#include <string.h>
 
 Message* message_new(MessageRole role, const char* content) {
     Message* msg = malloc(sizeof(Message));
@@ -18,19 +20,24 @@ void message_free(Message* msg) {
     if (!msg) return;
     string_free(&msg->content);
     string_free(&msg->timestamp);
-    for (size_t i = 0; i < msg->tool_calls_count; i++) {
-        string_free(&msg->tool_calls[i].id);
-        string_free(&msg->tool_calls[i].name);
-        string_free(&msg->tool_calls[i].arguments);
+    if (msg->tool_calls) {
+        for (size_t i = 0; i < msg->tool_calls_count; i++) {
+            string_free(&msg->tool_calls[i].id);
+            string_free(&msg->tool_calls[i].name);
+            string_free(&msg->tool_calls[i].arguments);
+        }
+        free(msg->tool_calls);
     }
-    free(msg->tool_calls);
     string_free(&msg->tool_call_id);
     string_free(&msg->name);
     free(msg);
 }
 
 void message_add_tool_call(Message* msg, const char* id, const char* name, const char* args) {
-    msg->tool_calls = realloc(msg->tool_calls, (msg->tool_calls_count + 1) * sizeof(ToolCall));
+    ToolCall* new_calls = realloc(msg->tool_calls, (msg->tool_calls_count + 1) * sizeof(ToolCall));
+    if (!new_calls) return;
+    msg->tool_calls = new_calls;
+    
     msg->tool_calls[msg->tool_calls_count].id = string_new(id);
     msg->tool_calls[msg->tool_calls_count].name = string_new(name);
     msg->tool_calls[msg->tool_calls_count].arguments = string_new(args);

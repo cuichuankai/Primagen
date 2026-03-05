@@ -1,33 +1,24 @@
 #ifndef SUBAGENT_H
 #define SUBAGENT_H
 
-#include <pthread.h>
-#include <stdbool.h>
 #include "common.h"
-#include "message.h"
-#include "../tools/tool.h"
+#include "config.h"
 
 typedef struct SubagentManager SubagentManager;
 
 typedef struct {
-    char* task;
-    char* label;
-    char* origin_channel;
-    char* origin_chat_id;
-    char* session_key;
+    const char* task;
+    const char* label;
+    const char* origin_channel;
+    const char* origin_chat_id;
 } SubagentSpawnRequest;
 
+// Functions
 SubagentManager* subagent_manager_create(
-    void* provider,  // LLMProvider stub
+    void* provider,
     const char* workspace,
-    void* bus,       // MessageBus stub
-    const char* model,
-    double temperature,
-    int max_tokens,
-    const char* reasoning_effort,
-    const char* brave_api_key,
-    const char* web_proxy,
-    bool restrict_to_workspace
+    void* bus,
+    Config* config
 );
 
 void subagent_manager_destroy(SubagentManager* manager);

@@ -21,7 +21,7 @@ void tool_registry_free(ToolRegistry* reg) {
     free(reg);
 }
 
-Error tool_registry_register(ToolRegistry* reg, const char* name, const char* desc, const char* params_schema, ToolExecuteFunc exec) {
+Error tool_registry_register(ToolRegistry* reg, const char* name, const char* desc, const char* params_schema, ToolExecuteFunc exec, void* user_data) {
     if (reg->count >= reg->capacity) {
         reg->capacity *= 2;
         reg->tools = realloc(reg->tools, reg->capacity * sizeof(Tool));
@@ -31,6 +31,7 @@ Error tool_registry_register(ToolRegistry* reg, const char* name, const char* de
     tool->def.description = string_new(desc);
     tool->def.parameters = string_new(params_schema);
     tool->execute = exec;
+    tool->user_data = user_data;
     reg->count++;
     return error_new(ERR_NONE, "");
 }
@@ -52,5 +53,5 @@ Error tool_registry_execute(ToolRegistry* reg, const char* name, const char* arg
     if (!tool) {
         return error_new(ERR_TOOL, "Tool not found");
     }
-    return tool->execute(args_json, result);
+    return tool->execute(tool->user_data, args_json, result);
 }

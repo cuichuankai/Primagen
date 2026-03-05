@@ -4,10 +4,10 @@
 #include <stdbool.h>
 #include "common.h"
 
-typedef struct Config Config;
-
 typedef struct {
     char* model;
+    char* api_key;
+    char* api_base;
     double temperature;
     int max_tokens;
     int max_tool_iterations;
@@ -50,6 +50,53 @@ typedef struct {
 
 typedef struct {
     bool enabled;
+    char* imap_host;
+    int imap_port;
+    char* imap_username;
+    char* imap_password;
+    bool imap_use_ssl;
+    char* smtp_host;
+    int smtp_port;
+    char* smtp_username;
+    char* smtp_password;
+    bool smtp_use_ssl;
+    bool smtp_use_tls;
+    char* from_address;
+    StringArray allow_from;
+} EmailChannelConfig;
+
+typedef struct {
+    bool enabled;
+    char* token;
+    char* gateway_url;
+    int intents;
+    StringArray allow_from;
+} DiscordChannelConfig;
+
+typedef struct {
+    bool enabled;
+    char* bot_token;
+    char* app_token;
+    char* mode;
+    StringArray allow_from;
+} SlackChannelConfig;
+
+typedef struct {
+    bool enabled;
+    char* client_id;
+    char* client_secret;
+    StringArray allow_from;
+} DingTalkChannelConfig;
+
+typedef struct {
+    bool enabled;
+    char* app_id;
+    char* app_secret;
+    StringArray allow_from;
+} FeishuChannelConfig;
+
+typedef struct {
+    bool enabled;
     char* bridge_url;
     char* bridge_token;
     StringArray allow_from;
@@ -57,10 +104,22 @@ typedef struct {
 
 typedef struct {
     TelegramChannelConfig telegram;
+    EmailChannelConfig email;
+    DiscordChannelConfig discord;
+    SlackChannelConfig slack;
+    DingTalkChannelConfig dingtalk;
+    FeishuChannelConfig feishu;
     WhatsAppChannelConfig whatsapp;
     bool send_progress;
     bool send_tool_hints;
 } ChannelsConfig;
+
+typedef struct Config {
+    AgentConfig agent;
+    ToolConfig tools;
+    HeartbeatConfig heartbeat;
+    ChannelsConfig channels;
+} Config;
 
 Config* config_create();
 void config_destroy(Config* cfg);

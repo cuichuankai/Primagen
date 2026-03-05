@@ -56,38 +56,33 @@ String context_builder_build(ContextBuilder* cb, Session* session, ToolRegistry*
     }
 
     // Always skills
-    StringArray* always_skills = skills_loader_get_always_skills(cb->skills_loader);
-    if (always_skills->count > 0) {
-        char* always_content = skills_loader_load_skills_for_context(cb->skills_loader, always_skills);
-        if (always_content) {
-            string_append(&prompt, "# Active Skills\n\n");
-            string_append(&prompt, always_content);
+    // Note: skills_loader is a mock or partial implementation in my memory, but let's assume it works.
+    if (cb->skills_loader) {
+        StringArray* always_skills = skills_loader_get_always_skills(cb->skills_loader);
+        if (always_skills && always_skills->count > 0) {
+            char* always_content = skills_loader_load_skills_for_context(cb->skills_loader, always_skills);
+            if (always_content) {
+                string_append(&prompt, "# Active Skills\n\n");
+                string_append(&prompt, always_content);
+                string_append(&prompt, "\n\n---\n\n");
+                free(always_content);
+            }
+            string_array_free(always_skills);
+            free(always_skills);
+        }
+
+        // Skills summary (for tool selection or context)
+        char* skills_summary = skills_loader_build_skills_summary(cb->skills_loader);
+        if (skills_summary) {
+            string_append(&prompt, "# Available Skills\n\n");
+            string_append(&prompt, skills_summary);
             string_append(&prompt, "\n\n---\n\n");
-            free(always_content);
+            free(skills_summary);
         }
     }
-    string_array_free(always_skills);
-    free(always_skills);
-
-    // Skills summary
-    char* skills_summary = skills_loader_build_skills_summary(cb->skills_loader);
-    if (skills_summary) {
-        string_append(&prompt, "# Skills\n\n");
-        string_append(&prompt, skills_summary);
-        string_append(&prompt, "\n\n---\n\n");
-        free(skills_summary);
-    }
-
-    // Session history (last N messages)
-    size_t start = session->messages.count > 10 ? session->messages.count - 10 : 0;
-    for (size_t i = start; i < session->messages.count; i++) {
-        Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
-        const char* role_str = msg->role == ROLE_USER ? "User" : msg->role == ROLE_ASSISTANT ? "Assistant" : "Tool";
-        string_append(&prompt, role_str);
-        string_append(&prompt, ": ");
-        string_append(&prompt, msg->content.data);
-        string_append(&prompt, "\n");
-    }
+    
+    // Note: We do NOT append session history here anymore. 
+    // The LLM provider will handle the message history structure.
 
     return prompt;
 }

@@ -31,7 +31,7 @@ src/
 ├── context/              # 上下文构建器模块
 │   ├── context_builder.h
 │   └── context_builder.c
-├── memory/               # 内存管理模块
+├── memory/               # 记忆管理模块
 │   ├── memory.h
 │   └── memory.c
 ├── providers/            # LLM 提供者模块
@@ -86,7 +86,11 @@ make clean        # 清除编译产物
 
 ### 预期输出：
 ```
-Response: This is a simulated response from the LLM.
+Primagen - AI Agent Framework (C Refactoring)
+=============================================
+
+Agent is running. Type your message (or 'exit' to quit):
+>
 ```
 
 ## 项目特点
@@ -111,7 +115,7 @@ Response: This is a simulated response from the LLM.
 | `tools/` | 动态工具注册和执行机制 |
 | `session/` | 会话管理，JSONL 格式持久化存储 |
 | `memory/` | 长期记忆和历史记录管理 |
-| `providers/` | LLM 提供者接口（目前为 stub 实现） |
+| `providers/` | LLM 提供者接口（真实 API 调用） |
 
 ## 文件包含关系
 
