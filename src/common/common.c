@@ -24,6 +24,14 @@ String string_copy(const String* s) {
     return string_new(s->data);
 }
 
+void string_append(String* s, const char* str) {
+    size_t str_len = strlen(str);
+    s->data = realloc(s->data, s->len + str_len + 1);
+    if (!s->data) return;
+    strcpy(s->data + s->len, str);
+    s->len += str_len;
+}
+
 int string_equals(const String* a, const String* b) {
     return strcmp(a->data, b->data) == 0;
 }

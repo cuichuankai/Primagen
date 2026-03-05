@@ -51,6 +51,7 @@ typedef struct {
 String string_new(const char* str);
 void string_free(String* s);
 String string_copy(const String* s);
+void string_append(String* s, const char* str);
 int string_equals(const String* a, const String* b);
 
 StringArray string_array_new();
