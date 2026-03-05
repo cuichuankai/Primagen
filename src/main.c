@@ -4,6 +4,7 @@
 #include "session/session.h"
 #include "context/context_builder.h"
 #include "tools/tool.h"
+#include "tools/tools_impl.h"
 #include "agent/agent_loop.h"
 #include "providers/llm_provider.h"
 #include <pthread.h>
