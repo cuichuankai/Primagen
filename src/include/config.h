@@ -92,6 +92,7 @@ typedef struct {
     bool enabled;
     char* app_id;
     char* app_secret;
+    bool use_card;
     StringArray allow_from;
 } FeishuChannelConfig;
 

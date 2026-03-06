@@ -2,6 +2,7 @@
 #include "../include/config.h"
 #include "../bus/message_bus.h"
 #include "../include/message.h"
+#include "../include/logger.h"
 #include "../vendor/cJSON/cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,22 +69,22 @@ static void refresh_token(FeishuChannelData* data) {
                 cJSON* code = cJSON_GetObjectItem(resp, "code");
                 if (code && code->valueint != 0) {
                     cJSON* msg = cJSON_GetObjectItem(resp, "msg");
-                    fprintf(stderr, "[Feishu] Token refresh failed: %d - %s\n", 
+                    log_error("[Feishu] Token refresh failed: %d - %s", 
                             code->valueint, msg ? msg->valuestring : "Unknown error");
                 } else {
                     cJSON* token = cJSON_GetObjectItem(resp, "tenant_access_token");
                     if (cJSON_IsString(token)) {
                         if (data->access_token) free(data->access_token);
                         data->access_token = strdup(token->valuestring);
-                        // printf("[Feishu] Token refreshed successfully\n");
+                        // log_info("[Feishu] Token refreshed successfully");
                     }
                 }
                 cJSON_Delete(resp);
             } else {
-                fprintf(stderr, "[Feishu] Failed to parse token response\n");
+                log_error("[Feishu] Failed to parse token response");
             }
         } else {
-            fprintf(stderr, "[Feishu] Token request failed: %s\n", curl_easy_strerror(res));
+            log_error("[Feishu] Token request failed: %s", curl_easy_strerror(res));
         }
         
         free(chunk.memory);
@@ -132,7 +133,7 @@ static char* get_ws_url(FeishuChannelData* data) {
                         cJSON* url = cJSON_GetObjectItem(dataObj, "URL"); // Case sensitive: "URL"
                         if (cJSON_IsString(url)) {
                             ws_url = strdup(url->valuestring);
-                            // printf("[Feishu] Got WS URL: %s\n", ws_url);
+                            // log_debug("[Feishu] Got WS URL: %s", ws_url);
                             
                             // Hack: Try to force V1 if possible, or check if V2 supports JSON
                             // Currently V2 is Protobuf. 
@@ -146,7 +147,7 @@ static char* get_ws_url(FeishuChannelData* data) {
                     }
                 } else {
                     cJSON* msg = cJSON_GetObjectItem(resp, "msg");
-                    fprintf(stderr, "[Feishu] Get WS URL failed: %d - %s\n", 
+                    log_error("[Feishu] Get WS URL failed: %d - %s", 
                             code ? code->valueint : -1, msg ? msg->valuestring : "Unknown");
                 }
                 cJSON_Delete(resp);
@@ -235,7 +236,7 @@ static char* create_streaming_card(FeishuChannelData* data, const char* content)
                     }
                 } else {
                     cJSON* msg = cJSON_GetObjectItem(resp, "msg");
-                    fprintf(stderr, "[Feishu] Create Card failed: %d - %s\n", 
+                    log_error("[Feishu] Create Card failed: %d - %s", 
                             code ? code->valueint : -1, msg ? msg->valuestring : "Unknown");
                 }
             }
@@ -388,7 +389,7 @@ static char* upload_file(FeishuChannelData* data, const char* filepath, const ch
 
 static void on_feishu_message(const char* chat_id, const char* content, const char* sender_id, void* user_data) {
     FeishuChannelData* data = (FeishuChannelData*)user_data;
-    printf("[Feishu] Received from %s: %s\n", sender_id, content);
+    log_info("[Feishu] Received from %s: %s", sender_id, content);
     
     // Create InboundMessage
     InboundMessage* msg = inbound_message_new("feishu", chat_id, content);
@@ -401,13 +402,13 @@ static void* feishu_receive_loop(void* arg) {
     while (data->running) {
         char* url = get_ws_url(data);
         if (url) {
-            printf("[Feishu] Connecting to WebSocket...\n");
+            log_info("[Feishu] Connecting to WebSocket...");
             data->ws = feishu_ws_create();
             if (feishu_ws_connect(data->ws, url)) {
-                printf("[Feishu] WebSocket connected.\n");
+                log_info("[Feishu] WebSocket connected.");
                 feishu_ws_run(data->ws, on_feishu_message, data);
             } else {
-                fprintf(stderr, "[Feishu] WebSocket connect failed.\n");
+                log_error("[Feishu] WebSocket connect failed.");
             }
             feishu_ws_destroy(data->ws);
             data->ws = NULL;
@@ -456,6 +457,11 @@ static void feishu_send(Channel* self, OutboundMessage* msg) {
     if (strcmp(msg->channel.data, "feishu") != 0) return;
 
     if (!data->access_token) refresh_token(data);
+
+    if (!data->access_token) {
+        log_error("[Feishu] Not connected (no token)");
+        return;
+    }
 
     CURL* curl = curl_easy_init();
     if (curl) {
@@ -535,60 +541,38 @@ static void feishu_send(Channel* self, OutboundMessage* msg) {
                 free(key);
              }
         } else {
-            // Use Interactive Card via CardKit (supports streaming)
-            // First create the card
-            char* card_id = create_streaming_card(data, msg->content.data);
-            
-            if (card_id) {
-                // Send message with card_id
-                cJSON_AddStringToObject(json, "msg_type", "interactive");
+            bool sent_card = false;
+            if (data->config->use_card) {
+                char* card_id = create_streaming_card(data, msg->content.data);
+                if (card_id) {
+                    cJSON_AddStringToObject(json, "msg_type", "interactive");
+                    cJSON* contentObj = cJSON_CreateObject();
+                    cJSON_AddStringToObject(contentObj, "type", "card");
+                    cJSON* cardObj = cJSON_CreateObject();
+                    cJSON_AddStringToObject(cardObj, "card_id", card_id);
+                    cJSON_AddItemToObject(contentObj, "data", cardObj);
+                    char* content_str = cJSON_PrintUnformatted(contentObj);
+                    cJSON_AddStringToObject(json, "content", content_str);
+                    free(content_str);
+                    cJSON_Delete(contentObj);
+                    free(card_id);
+                    sent_card = true;
+                }
+            }
+
+            if (!sent_card) {
+                cJSON_AddStringToObject(json, "msg_type", "text");
                 cJSON* contentObj = cJSON_CreateObject();
-                cJSON_AddStringToObject(contentObj, "type", "card");
-                cJSON* dataObj = cJSON_CreateObject();
-                cJSON_AddStringToObject(dataObj, "card_id", card_id);
-                cJSON_AddItemToObject(contentObj, "data", dataObj);
-                
+                cJSON_AddStringToObject(contentObj, "text", msg->content.data);
                 char* content_str = cJSON_PrintUnformatted(contentObj);
                 cJSON_AddStringToObject(json, "content", content_str);
                 free(content_str);
                 cJSON_Delete(contentObj);
-                
-                free(card_id);
-            } else {
-                // Fallback to old interactive card
-                cJSON_AddStringToObject(json, "msg_type", "interactive");
-                
-                cJSON* card = cJSON_CreateObject();
-                cJSON* cardConfig = cJSON_CreateObject();
-                cJSON_AddBoolToObject(cardConfig, "wide_screen_mode", true);
-                cJSON_AddItemToObject(card, "config", cardConfig);
-
-                cJSON* header = cJSON_CreateObject();
-                cJSON* title = cJSON_CreateObject();
-                cJSON_AddStringToObject(title, "tag", "plain_text");
-                cJSON_AddStringToObject(title, "content", "Primagen");
-                cJSON_AddItemToObject(header, "title", title);
-                cJSON_AddStringToObject(header, "template", "blue");
-                cJSON_AddItemToObject(card, "header", header);
-
-                cJSON* elements = cJSON_CreateArray();
-                cJSON* div = cJSON_CreateObject();
-                cJSON_AddStringToObject(div, "tag", "div");
-                cJSON* text = cJSON_CreateObject();
-                cJSON_AddStringToObject(text, "tag", "lark_md");
-                cJSON_AddStringToObject(text, "content", msg->content.data);
-                cJSON_AddItemToObject(div, "text", text);
-                cJSON_AddItemToArray(elements, div);
-                cJSON_AddItemToObject(card, "elements", elements);
-
-                char* content_str = cJSON_PrintUnformatted(card);
-                cJSON_AddStringToObject(json, "content", content_str);
-                free(content_str);
-                cJSON_Delete(card);
             }
         }
 
         char* json_str = cJSON_PrintUnformatted(json);
+        log_debug("[Feishu Debug] Sending Payload: %s", json_str);
 
         struct MemoryStruct chunk;
         chunk.memory = malloc(1);
@@ -603,14 +587,15 @@ static void feishu_send(Channel* self, OutboundMessage* msg) {
 
         CURLcode res = curl_easy_perform(curl);
         if (res != CURLE_OK) {
-            fprintf(stderr, "[Feishu] Send failed: %s\n", curl_easy_strerror(res));
+            log_error("[Feishu] Send failed: %s", curl_easy_strerror(res));
         } else {
+            log_debug("[Feishu Debug] Response: %s", chunk.memory);
             cJSON* resp = cJSON_Parse(chunk.memory);
             if (resp) {
                 cJSON* code = cJSON_GetObjectItem(resp, "code");
                 if (code && code->valueint != 0) {
                     cJSON* msg_item = cJSON_GetObjectItem(resp, "msg");
-                    fprintf(stderr, "[Feishu] API Error: %d - %s\n", 
+                    log_error("[Feishu] API Error: %d - %s", 
                             code->valueint, msg_item ? msg_item->valuestring : "Unknown");
                      if (code->valueint == 99991668 || code->valueint == 99991663) {
                         if (data->access_token) {
@@ -619,7 +604,7 @@ static void feishu_send(Channel* self, OutboundMessage* msg) {
                         }
                     }
                 } else {
-                    printf("[Feishu] Sent to %s\n", msg->chat_id.data);
+                    log_info("[Feishu] Sent to %s", msg->chat_id.data);
                 }
                 cJSON_Delete(resp);
             }
@@ -637,6 +622,7 @@ static void feishu_destroy(Channel* self) {
     FeishuChannelData* data = (FeishuChannelData*)self->user_data;
     if (data) {
         if (data->access_token) free(data->access_token);
+        // if (data->ws) feishu_ws_destroy(data->ws);
         free(data);
     }
     free(self);

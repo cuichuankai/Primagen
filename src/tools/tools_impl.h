@@ -5,12 +5,14 @@
 #include "../bus/message_bus.h"
 #include "../include/subagent.h"
 #include "../include/cron.h"
+#include "../include/skills.h"
 #include "tool.h"
 
 typedef struct {
     MessageBus* bus;
     SubagentManager* subagent_mgr;
     CronService* cron_service;
+    SkillsLoader* skills_loader;
 } ToolContext;
 
 // Helper to register all standard tools
@@ -37,5 +39,8 @@ Error tool_spawn(void* user_data, const char* args_json, String* result);
 
 // Cron tool
 Error tool_cron(void* user_data, const char* args_json, String* result);
+
+// Skill tool
+Error tool_skill(void* user_data, const char* args_json, String* result);
 
 #endif // FILESYSTEM_TOOLS_H

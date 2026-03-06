@@ -120,9 +120,57 @@ void register_all_tools(ToolRegistry* reg, ToolContext* ctx) {
     tool_registry_register(reg, "spawn_subagent", "Spawn subagent", 
         "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"task\"]}", 
         tool_spawn, ctx);
-    tool_registry_register(reg, "cron", "Schedule a job", 
-        "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"payload\":{\"type\":\"string\"},\"schedule\":{\"type\":\"string\"}},\"required\":[\"name\",\"payload\",\"schedule\"]}", 
+    tool_registry_register(reg, "cron", "Schedule a job. Formats: '@every N' (recurring seconds), '@in N' (once after N seconds), '@at N' (once at timestamp)", 
+        "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"payload\":{\"type\":\"string\"},\"schedule\":{\"type\":\"string\"},\"channel\":{\"type\":\"string\"},\"chat_id\":{\"type\":\"string\"}},\"required\":[\"name\",\"payload\",\"schedule\"]}", 
         tool_cron, ctx);
+    tool_registry_register(reg, "skill", "Manage skills", 
+        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"load\",\"unload\"]},\"name\":{\"type\":\"string\"}},\"required\":[\"action\"]}", 
+        tool_skill, ctx);
+}
+
+Error tool_skill(void* user_data, const char* args_json, String* result) {
+    ToolContext* ctx = (ToolContext*)user_data;
+    if (!ctx || !ctx->skills_loader) {
+        return error_new(ERR_INVALID_PARAM, "SkillsLoader not available in tool context");
+    }
+
+    cJSON* json = cJSON_Parse(args_json);
+    if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
+    
+    char* action = get_json_string(json, "action");
+    if (!action) {
+        cJSON_Delete(json);
+        return error_new(ERR_INVALID_PARAM, "Missing 'action' argument");
+    }
+    
+    if (strcmp(action, "list") == 0) {
+        // List all skills (xml summary)
+        char* summary = skills_loader_build_skills_summary(ctx->skills_loader);
+        *result = string_new(summary);
+        free(summary);
+    } else if (strcmp(action, "load") == 0) {
+        char* name = get_json_string(json, "name");
+        if (!name) {
+            cJSON_Delete(json);
+            return error_new(ERR_INVALID_PARAM, "Missing 'name' argument for load action");
+        }
+        
+        char* content = skills_loader_load_skill(ctx->skills_loader, name);
+        if (content) {
+            *result = string_new(content);
+            free(content);
+        } else {
+            *result = string_new("Skill not found");
+        }
+    } else if (strcmp(action, "unload") == 0) {
+        *result = string_new("Unload not implemented (skills are stateless for now)");
+    } else {
+        cJSON_Delete(json);
+        return error_new(ERR_INVALID_PARAM, "Unknown action");
+    }
+    
+    cJSON_Delete(json);
+    return error_new(ERR_NONE, "");
 }
 
 Error tool_read_file(void* user_data, const char* args_json, String* result) {
@@ -584,6 +632,8 @@ Error tool_cron(void* user_data, const char* args_json, String* result) {
     char* name = get_json_string(json, "name");
     char* payload = get_json_string(json, "payload");
     char* schedule = get_json_string(json, "schedule");
+    char* channel = get_json_string(json, "channel");
+    char* chat_id = get_json_string(json, "chat_id");
     
     if (!name || !payload || !schedule) {
         cJSON_Delete(json);
@@ -595,9 +645,9 @@ Error tool_cron(void* user_data, const char* args_json, String* result) {
     job.name = name;
     job.payload_message = payload;
     job.schedule = schedule;
-    // Defaults
-    job.channel = "cli";
-    job.to = "local_user";
+    // Defaults or user provided
+    job.channel = channel ? channel : "cli";
+    job.to = chat_id ? chat_id : "current";
     job.deliver = true;
     
     char* job_id = cron_service_add_job(ctx->cron_service, &job);

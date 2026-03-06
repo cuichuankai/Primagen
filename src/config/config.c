@@ -116,6 +116,7 @@ Config* config_create() {
     cfg->channels.feishu.enabled = false;
     cfg->channels.feishu.app_id = strdup("");
     cfg->channels.feishu.app_secret = strdup("");
+    cfg->channels.feishu.use_card = false;
     cfg->channels.feishu.allow_from = string_array_new();
 
     cfg->channels.whatsapp.enabled = false;
@@ -356,6 +357,7 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
             if ((item = cJSON_GetObjectItem(feishu, "enabled"))) cfg->channels.feishu.enabled = get_json_bool(item, false);
             if ((item = cJSON_GetObjectItem(feishu, "app_id"))) { free(cfg->channels.feishu.app_id); cfg->channels.feishu.app_id = get_json_string(item, ""); }
             if ((item = cJSON_GetObjectItem(feishu, "app_secret"))) { free(cfg->channels.feishu.app_secret); cfg->channels.feishu.app_secret = get_json_string(item, ""); }
+            if ((item = cJSON_GetObjectItem(feishu, "useCard"))) cfg->channels.feishu.use_card = get_json_bool(item, false);
             load_string_array(cJSON_GetObjectItem(feishu, "allow_from"), &cfg->channels.feishu.allow_from);
         }
         

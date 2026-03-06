@@ -1,4 +1,5 @@
 #include "feishu_ws.h"
+#include "../include/logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,8 @@ struct FeishuWS {
     bool running;
     char buffer[4096];
     size_t buffer_len;
+    char* recent_msg_ids[20]; // Ring buffer for deduplication
+    int msg_id_idx;
 };
 
 FeishuWS* feishu_ws_create() {
@@ -18,12 +21,17 @@ FeishuWS* feishu_ws_create() {
     ws->curl = NULL;
     ws->running = false;
     ws->buffer_len = 0;
+    ws->msg_id_idx = 0;
+    for (int i = 0; i < 20; i++) ws->recent_msg_ids[i] = NULL;
     return ws;
 }
 
 void feishu_ws_destroy(FeishuWS* ws) {
     if (ws) {
         if (ws->curl) curl_easy_cleanup(ws->curl);
+        for (int i = 0; i < 20; i++) {
+            if (ws->recent_msg_ids[i]) free(ws->recent_msg_ids[i]);
+        }
         free(ws);
     }
 }
@@ -32,7 +40,7 @@ static size_t ws_send(FeishuWS* ws, const void* data, size_t len) {
     size_t sent = 0;
     CURLcode res = curl_easy_send(ws->curl, data, len, &sent);
     if (res != CURLE_OK) {
-        fprintf(stderr, "WS send failed: %s\n", curl_easy_strerror(res));
+        log_error("WS send failed: %s", curl_easy_strerror(res));
         return 0;
     }
     return sent;
@@ -82,7 +90,7 @@ bool feishu_ws_connect(FeishuWS* ws, const char* url) {
 
     CURLcode res = curl_easy_perform(ws->curl);
     if (res != CURLE_OK) {
-        fprintf(stderr, "Connect failed: %s\n", curl_easy_strerror(res));
+        log_error("Connect failed: %s", curl_easy_strerror(res));
         return false;
     }
 
@@ -211,6 +219,7 @@ static void write_bytes_field(unsigned char* buf, size_t* offset, int field_num,
 // Minimal Map Encoder for Headers
 // repeated FrameHeader headers = 1;
 // message FrameHeader { string key = 1; string value = 2; }
+/*
 static void write_header_entry(unsigned char* buf, size_t* offset, const char* key, const char* value) {
     // size_t start = *offset;
     // We don't know length yet, reserve varint space (assume < 128 for total entry len)
@@ -230,42 +239,136 @@ static void write_header_entry(unsigned char* buf, size_t* offset, const char* k
     size_t content_len = *offset - content_start;
     buf[len_offset] = content_len; // Write length
 }
+*/
 
 static void feishu_ws_send_ack(FeishuWS* ws, const char* message_id) {
-    unsigned char buf[1024];
-    size_t offset = 0;
+    // Construct JSON Frame
+    // Structure:
+    // {
+    //   "headers": {
+    //     "message_id": "...",
+    //     "type": "ack" // or "response"? Go SDK uses "type": "ack" in headers
+    //   },
+    //   "payload": { // If the user says "Payload.code=200", maybe payload is an object?
+    //     "code": 200,
+    //     "headers": {}, // Empty headers for the response payload
+    //     "data": ""     // Empty data or object?
+    //   }
+    // }
+    
+    // However, Go SDK defines Frame with Payload as []byte.
+    // If we are sending JSON, maybe "payload" field is just the data?
+    // But the user said: "Return data... is structure: Frame{Headers[],Payload{code,headers[],data}}"
+    // And "Payload.code=200".
+    
+    // Let's assume the Frame is a JSON object.
+    
+    cJSON* frame = cJSON_CreateObject();
     
     // 1. Headers
-    // Key: message_id, Value: <id>
-    write_header_entry(buf, &offset, "message_id", message_id);
-    // Key: type, Value: ack
-    write_header_entry(buf, &offset, "type", "ack");
+    cJSON* headers = cJSON_CreateObject();
+    cJSON_AddStringToObject(headers, "message_id", message_id);
+    cJSON_AddStringToObject(headers, "type", "ack");
+    cJSON_AddNumberToObject(headers, "biz_rt", 10);
+    // cJSON_AddStringToObject(headers, "status_code", "200"); // Maybe not needed if code is in payload?
+    cJSON_AddItemToObject(frame, "headers", headers);
     
-    // 2. Payload Type: "empty" (Field 2)
-    write_bytes_field(buf, &offset, 2, "empty", 5);
+    // 2. Payload
+    // The user said "Payload{code,headers[],data}".
+    // This looks like a structured object, not raw bytes.
+    // If the frame is JSON, payload can be an object.
     
-    // 3. Payload: [] (Field 3) - Empty bytes
-    write_bytes_field(buf, &offset, 3, "", 0);
+    /*
+      Wait, if Go SDK uses Protobuf, Frame.Payload is bytes.
+      If I send JSON, Frame.payload might be expected to be a string?
+      Or an object?
+      
+      If I assume the user is right about "Entire frame is JSON", then:
+    */
     
-    // Send Binary Frame
-    unsigned char frame[10];
-    frame[0] = 0x82; // FIN + BINARY
+    cJSON* payload = cJSON_CreateObject();
+    cJSON_AddNumberToObject(payload, "code", 200);
+    cJSON_AddObjectToObject(payload, "headers");
+    // cJSON_AddObjectToObject(payload, "data"); // Empty data
+    // Or data should be empty string? "data": ""
+    cJSON_AddStringToObject(payload, "data", "");
+    
+    // Now, do we add 'payload' as an object or as a JSON-stringified string?
+    // Go SDK "Payload []byte" suggests it might be a string in JSON representation.
+    // BUT the user described the structure "Payload{code...}" which implies structure.
+    // Let's try adding it as an object first.
+    // cJSON_AddItemToObject(frame, "payload", payload);
+    
+    // Correction: Go SDK Frame definition usually has "payload_type" too.
+    // cJSON_AddStringToObject(frame, "payload_type", "json"); // ?
+    
+    // But let's stick to what the user explicitly said about structure:
+    // Frame{Headers[], Payload{code,headers[],data}}
+    // It seems Payload is a direct field.
+    
+    // Actually, if I look at how some JSON-RPC over WS works...
+    // But Feishu might be special.
+    
+    // Let's try to stringify the payload object, because "Payload" in Frame is usually bytes/string.
+    char* payload_str = cJSON_PrintUnformatted(payload);
+    cJSON_AddStringToObject(frame, "payload", payload_str);
+    cJSON_AddStringToObject(frame, "payload_type", "json"); // Guessing
+    free(payload_str);
+    
+    // Wait, if I stringify it, it's a string.
+    // If I add it as object, it's an object.
+    // Given "Entire frame is JSON", maybe it's just a nested object.
+    // cJSON_AddItemToObject(frame, "payload", payload); 
+    
+    // Let's try adding it as a JSON string for "payload" field, which is safer if the receiver expects bytes/string.
+    // But the user said "Payload.code=200", implying we construct that structure.
+    
+    // Let's try the safest JSON approach:
+    // Frame = { headers: {...}, payload: "{\"code\":200...}" }
+    // This matches the "Frame" having a "Payload" field which contains the data.
+    
+    // But maybe the user means the Frame IS the Payload?
+    // No, "Frame{Headers...}"
+    
+    // Let's go with: Frame is JSON object, Payload is a JSON string inside it.
+    
+    // Re-creating payload to match exact user desc: Payload{code,headers[],data}
+    cJSON_Delete(payload); // clear previous
+    payload = cJSON_CreateObject();
+    cJSON_AddNumberToObject(payload, "code", 200);
+    cJSON_AddObjectToObject(payload, "headers");
+    cJSON_AddStringToObject(payload, "data", "");
+    
+    char* inner_payload = cJSON_PrintUnformatted(payload);
+    cJSON_AddStringToObject(frame, "payload", inner_payload);
+    free(inner_payload);
+    cJSON_Delete(payload);
+    
+    char* frame_json = cJSON_PrintUnformatted(frame);
+    cJSON_Delete(frame);
+    
+    size_t len = strlen(frame_json);
+    
+    // Send TEXT Frame (0x81)
+    unsigned char frame_head[10];
+    frame_head[0] = 0x82; // FIN + TEXT
     size_t header_len = 2;
-    if (offset < 126) {
-        frame[1] = 0x80 | offset; // Masked
-    } else if (offset < 65536) {
-        frame[1] = 0x80 | 126;
-        frame[2] = (offset >> 8) & 0xFF;
-        frame[3] = offset & 0xFF;
+    if (len < 126) {
+        frame_head[1] = 0x80 | len; // Masked
+    } else if (len < 65536) {
+        frame_head[1] = 0x80 | 126;
+        frame_head[2] = (len >> 8) & 0xFF;
+        frame_head[3] = len & 0xFF;
         header_len = 4;
     }
     
-    unsigned char mask[4] = {0, 0, 0, 0}; // Null mask
+    unsigned char mask[4] = {0, 0, 0, 0};
     
-    // Send Frame
-    ws_send(ws, frame, header_len);
+    ws_send(ws, frame_head, header_len);
     ws_send(ws, mask, 4);
-    ws_send(ws, buf, offset); // Payload masked with 0
+    ws_send(ws, frame_json, len); // Masked with 0
+    
+    free(frame_json);
 }
 
 // Helper to read Varint
@@ -434,7 +537,7 @@ void feishu_ws_run(FeishuWS* ws, FeishuWSMessageCallback callback, void* user_da
                             
                             pb_offset = end;
                         }
-                    } else if (field_num == 8 && wire_type == 2) {
+                    } else if (field_num == 3 && wire_type == 2) {
                         uint64_t data_len = read_varint(payload, payload_len, &pb_offset);
                         
                         if (pb_offset + data_len <= payload_len) {
@@ -447,13 +550,18 @@ void feishu_ws_run(FeishuWS* ws, FeishuWSMessageCallback callback, void* user_da
                             event_json[data_len] = 0;
                             pb_offset += data_len;
                         }
-                    } else if (field_num == 3 && wire_type == 2) {
-                        // Keep checking Field 3 just in case, but logs showed it was Wire 0
+                    } else if (field_num == 8 && wire_type == 2) {
                         uint64_t data_len = read_varint(payload, payload_len, &pb_offset);
-                         if (pb_offset + data_len <= payload_len) {
-                            // ...
-                            pb_offset += data_len;
-                         }
+                        if (pb_offset + data_len <= payload_len) {
+                             // This might also be payload in some versions?
+                             // Let's treat it same as Field 3 if Field 3 wasn't found
+                             if (!event_json) {
+                                event_json = malloc(data_len + 1);
+                                memcpy(event_json, payload + pb_offset, data_len);
+                                event_json[data_len] = 0;
+                             }
+                             pb_offset += data_len;
+                        }
                     } else {
                         skip_field(payload, payload_len, &pb_offset, wire_type);
                     }
@@ -463,6 +571,7 @@ void feishu_ws_run(FeishuWS* ws, FeishuWSMessageCallback callback, void* user_da
                 if (message_id) {
                     feishu_ws_send_ack(ws, message_id);
                     free(message_id);
+                    message_id = NULL; // Prevent double free or reuse
                 }
 
                 if (event_json) {
@@ -475,7 +584,31 @@ void feishu_ws_run(FeishuWS* ws, FeishuWSMessageCallback callback, void* user_da
                         
                         if (header) {
                             cJSON* event_type = cJSON_GetObjectItem(header, "event_type");
+                            cJSON* event_id = cJSON_GetObjectItem(header, "event_id"); // Use event_id for deduplication
                             
+                            if (event_id && event_id->valuestring) {
+                                // Deduplication check using event_id
+                                bool duplicate = false;
+                                for (int i = 0; i < 20; i++) {
+                                    if (ws->recent_msg_ids[i] && strcmp(ws->recent_msg_ids[i], event_id->valuestring) == 0) {
+                                        duplicate = true;
+                                        break;
+                                    }
+                                }
+                                
+                                if (!duplicate) {
+                                    if (ws->recent_msg_ids[ws->msg_id_idx]) free(ws->recent_msg_ids[ws->msg_id_idx]);
+                                    ws->recent_msg_ids[ws->msg_id_idx] = strdup(event_id->valuestring);
+                                    ws->msg_id_idx = (ws->msg_id_idx + 1) % 20;
+                                } else {
+                                    // It's a duplicate!
+                                    cJSON_Delete(root);
+                                    free(event_json);
+                                    goto next_frame;
+                                }
+                            }
+
+                            // Check for message event v1
                             if (event_type && strcmp(event_type->valuestring, "im.message.receive_v1") == 0) {
                                 // ... (Process V2 Event)
                                 cJSON* event = cJSON_GetObjectItem(root, "event");
@@ -491,13 +624,15 @@ void feishu_ws_run(FeishuWS* ws, FeishuWSMessageCallback callback, void* user_da
                                         
                                         if (chat_id && content && open_id) {
                                             char* text = NULL;
-                                            cJSON* inner = cJSON_Parse(content->valuestring);
-                                            if (inner) {
-                                                cJSON* txt = cJSON_GetObjectItem(inner, "text");
-                                                if (txt) text = strdup(txt->valuestring);
-                                                cJSON_Delete(inner);
-                                            } else {
-                                                text = strdup(content->valuestring);
+                                            if (cJSON_IsString(content) && content->valuestring) {
+                                                cJSON* inner = cJSON_Parse(content->valuestring);
+                                                if (inner) {
+                                                    cJSON* txt = cJSON_GetObjectItem(inner, "text");
+                                                    if (txt && cJSON_IsString(txt) && txt->valuestring) {
+                                                        text = strdup(txt->valuestring);
+                                                    }
+                                                    cJSON_Delete(inner);
+                                                }
                                             }
 
                                             if (text) {
@@ -590,6 +725,7 @@ void feishu_ws_run(FeishuWS* ws, FeishuWSMessageCallback callback, void* user_da
                 ws->running = false;
             }
 
+        next_frame:
             offset += header_size + payload_len;
         }
     }

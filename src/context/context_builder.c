@@ -70,11 +70,21 @@ String context_builder_build(ContextBuilder* cb, Session* session, ToolRegistry*
             string_array_free(always_skills);
             free(always_skills);
         }
+    }
 
-        // Skills summary (for tool selection or context)
+    // Skills summary (for tool selection or context)
+    if (cb->skills_loader) {
         char* skills_summary = skills_loader_build_skills_summary(cb->skills_loader);
         if (skills_summary) {
             string_append(&prompt, "# Available Skills\n\n");
+            string_append(&prompt, "<skills_instructions>\n");
+            string_append(&prompt, "When users ask you to perform tasks, check if any of the available skills below can help complete the task more effectively. Skills provide specialized capabilities and domain knowledge.\n");
+            string_append(&prompt, "How to use skills:\n");
+            string_append(&prompt, "- Invoke skills using the `skill` tool with the `load` action.\n");
+            string_append(&prompt, "- Example: `skill(action=\"load\", name=\"weather\")` - loads the weather skill\n");
+            string_append(&prompt, "- Once loaded, the skill's instructions will be added to your context, teaching you how to use specific tools or patterns.\n");
+            string_append(&prompt, "- Do NOT try to call the skill name as a tool directly (e.g. do NOT call `weather(...)`). Always load it first.\n");
+            string_append(&prompt, "</skills_instructions>\n\n");
             string_append(&prompt, skills_summary);
             string_append(&prompt, "\n\n---\n\n");
             free(skills_summary);

@@ -11,6 +11,7 @@ all: $(OBJDIR)/primagen
 
 OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/common/message.o \
+      $(OBJDIR)/common/logger.o \
       $(OBJDIR)/tools/tool.o \
       $(OBJDIR)/tools/tools_impl.o \
       $(OBJDIR)/session/session.o \

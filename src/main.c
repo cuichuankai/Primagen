@@ -1,4 +1,5 @@
 #include "include/common.h"
+#include "include/logger.h"
 #include "include/message.h"
 #include "bus/message_bus.h"
 #include "session/session.h"
@@ -10,6 +11,7 @@
 #include "include/config.h"
 #include "include/subagent.h"
 #include "include/cron.h"
+#include "include/skills.h"
 #include "include/channel.h"
 #include "include/commands.h"
 #include <pthread.h>
@@ -31,15 +33,15 @@ static int channel_count = 0;
 void cron_callback(CronJob* job) {
     if (!global_bus) return;
     
-    printf("\n[Cron] Triggering job: %s\n", job->name);
+    log_info("[Cron] Triggering job: %s", job->name);
     
-    // Inject message into bus
-    InboundMessage* msg = inbound_message_new(
+    // Inject message into bus (Outbound for direct delivery)
+    OutboundMessage* msg = outbound_message_new(
         job->channel ? job->channel : "cli",
         job->to ? job->to : "local_user",
         job->payload_message ? job->payload_message : "Cron trigger"
     );
-    message_bus_send_inbound(global_bus, msg);
+    message_bus_send_outbound(global_bus, msg);
 }
 
 void* agent_thread(void* arg) {
@@ -185,11 +187,15 @@ int main(int argc, char* argv[]) {
 
 // Extracted logic for running the agent loop
 int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_message) {
-    printf("Primagen - AI Agent Framework (C Refactoring)\n");
-    printf("=============================================\n\n");
+    log_info("Primagen - AI Agent Framework (C Refactoring)");
+    log_info("=============================================");
 
     // Initialize Global Libraries
     curl_global_init(CURL_GLOBAL_ALL);
+
+    char full_log_path[512];
+    snprintf(full_log_path, sizeof(full_log_path), "%s/primagen.log", workspace_path);
+    logger_init(full_log_path);
 
     // 2. Initialize Components
     MessageBus* bus = message_bus_new();
@@ -213,10 +219,10 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         Channel* telegram = channel_create_telegram();
         if (telegram->init(telegram, cfg, bus)) {
             channels[channel_count++] = telegram;
-            printf("[System] Telegram channel initialized.\n");
+            log_info("[System] Telegram channel initialized.");
         } else {
             telegram->destroy(telegram);
-            printf("[System] Telegram channel disabled or failed to init.\n");
+            log_error("[System] Telegram channel disabled or failed to init.");
         }
     }
 
@@ -225,7 +231,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         Channel* email = channel_create_email();
         if (email->init(email, cfg, bus)) {
             channels[channel_count++] = email;
-            printf("[System] Email channel initialized.\n");
+            log_info("[System] Email channel initialized.");
         } else {
             email->destroy(email);
         }
@@ -236,7 +242,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         Channel* discord = channel_create_discord();
         if (discord->init(discord, cfg, bus)) {
             channels[channel_count++] = discord;
-            printf("[System] Discord channel initialized.\n");
+            log_info("[System] Discord channel initialized.");
         } else {
             discord->destroy(discord);
         }
@@ -247,7 +253,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         Channel* slack = channel_create_slack();
         if (slack->init(slack, cfg, bus)) {
             channels[channel_count++] = slack;
-            printf("[System] Slack channel initialized.\n");
+            log_info("[System] Slack channel initialized.");
         } else {
             slack->destroy(slack);
         }
@@ -258,7 +264,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         Channel* dingtalk = channel_create_dingtalk();
         if (dingtalk->init(dingtalk, cfg, bus)) {
             channels[channel_count++] = dingtalk;
-            printf("[System] DingTalk channel initialized.\n");
+            log_info("[System] DingTalk channel initialized.");
         } else {
             dingtalk->destroy(dingtalk);
         }
@@ -269,15 +275,17 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         Channel* feishu = channel_create_feishu();
         if (feishu->init(feishu, cfg, bus)) {
             channels[channel_count++] = feishu;
-            printf("[System] Feishu channel initialized.\n");
+            log_info("[System] Feishu channel initialized.");
         } else {
             feishu->destroy(feishu);
         }
     }
 
     // Start Channels
+    log_info("[System] Active Channels (%d):", channel_count);
     for (int i = 0; i < channel_count; i++) {
         if (channels[i]->start) channels[i]->start(channels[i]);
+        log_info("  - %s", channels[i]->name);
     }
 
     // Initialize Subagent Manager
@@ -290,16 +298,20 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     
     // Initialize Cron Service
     char cron_path[512];
-    snprintf(cron_path, sizeof(cron_path), "%s/.primagen/cron_store.json", workspace_path);
+    snprintf(cron_path, sizeof(cron_path), "%s/cron_store.json", workspace_path);
     CronService* cron_service = cron_service_create(cron_path);
     cron_service_set_callback(cron_service, cron_callback);
     cron_service_start(cron_service);
+
+    // Initialize Skills Loader
+    SkillsLoader* skills_loader = skills_loader_create(workspace_path);
 
     // Create Tool Context
     ToolContext* tool_ctx = malloc(sizeof(ToolContext));
     tool_ctx->bus = bus;
     tool_ctx->subagent_mgr = subagent_mgr;
     tool_ctx->cron_service = cron_service;
+    tool_ctx->skills_loader = skills_loader;
 
     // 3. Register Tools
     register_all_tools(tool_reg, tool_ctx);
@@ -323,7 +335,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
 
     // Inject initial message if provided
     if (initial_message) {
-        printf("[System] Injecting initial message: %s\n", initial_message);
+        log_info("[System] Injecting initial message: %s", initial_message);
         // Use "cli" channel and "user" chat_id
         InboundMessage* msg = inbound_message_new("cli", "local_user", initial_message);
         message_bus_send_inbound(bus, msg);
@@ -343,9 +355,11 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     cron_service_stop(cron_service);
     cron_service_destroy(cron_service);
     subagent_manager_destroy(subagent_mgr);
+    skills_loader_destroy(skills_loader);
     free(tool_ctx);
 
     curl_global_cleanup();
+    logger_cleanup();
     
     return 0;
 }
