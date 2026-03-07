@@ -126,6 +126,67 @@ void register_all_tools(ToolRegistry* reg, ToolContext* ctx) {
     tool_registry_register(reg, "skill", "Manage skills", 
         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"load\",\"unload\"]},\"name\":{\"type\":\"string\"}},\"required\":[\"action\"]}", 
         tool_skill, ctx);
+    tool_registry_register(reg, "memory", "Manage long-term memory. Use this to consolidate conversation history into persistent memory.", 
+        "{\"type\":\"object\",\"properties\":{\"history_entry\":{\"type\":\"string\",\"description\":\"A paragraph summarizing key events/decisions. Start with [YYYY-MM-DD HH:MM].\"},\"memory_update\":{\"type\":\"string\",\"description\":\"Full updated long-term memory content (facts). Return unchanged if no new facts.\"}},\"required\":[\"history_entry\"]}", 
+        tool_memory, ctx);
+}
+
+Error tool_memory(void* user_data, const char* args_json, String* result) {
+    ToolContext* ctx = (ToolContext*)user_data;
+    if (!ctx || !ctx->memory || !ctx->workspace) {
+        return error_new(ERR_INVALID_PARAM, "Memory or Workspace not available in tool context");
+    }
+
+    cJSON* json = cJSON_Parse(args_json);
+    if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
+    
+    char* history_entry = get_json_string(json, "history_entry");
+    char* memory_update = get_json_string(json, "memory_update");
+    
+    // Fallback for backward compatibility or simple usage
+    char* content = get_json_string(json, "content");
+    
+    if (!history_entry && !memory_update && !content) {
+        cJSON_Delete(json);
+        return error_new(ERR_INVALID_PARAM, "Missing arguments: provide 'history_entry' and/or 'memory_update'");
+    }
+    
+    // Handle simple content (treat as fact)
+    if (content && !memory_update) {
+        memory_add_fact(ctx->memory, content);
+    }
+    
+    // Handle history entry
+    if (history_entry) {
+        memory_add_history(ctx->memory, history_entry);
+    }
+    
+    // Handle memory update (full replacement/update of facts)
+    if (memory_update) {
+        // We need a way to replace the memory content
+        // memory_add_fact appends, but here we might want to replace if the LLM gives us the full new state
+        // For now, let's assume we replace the whole memory_md if provided
+        // But wait, memory_add_fact appends. Let's check memory.c
+        // We should probably add a memory_update_facts function
+        
+        // Direct manipulation for now since we are in C and struct is exposed in header (or not?)
+        // Memory struct definition is in memory.h? No, it's in memory.h but fields are String.
+        // Let's implement a replace helper in memory.c or just direct access if possible.
+        // Direct access:
+        string_free(&ctx->memory->memory_md);
+        ctx->memory->memory_md = string_new(memory_update);
+    }
+    
+    // Persist immediately
+    Error err = memory_save(ctx->memory, ctx->workspace);
+    if (err.code != ERR_NONE) {
+        cJSON_Delete(json);
+        return err;
+    }
+    
+    *result = string_new("Memory consolidated/updated successfully");
+    cJSON_Delete(json);
+    return error_new(ERR_NONE, "");
 }
 
 Error tool_skill(void* user_data, const char* args_json, String* result) {

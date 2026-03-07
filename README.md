@@ -1,4 +1,7 @@
-# Primagen
+# Primagen  
+<p align="center">
+  <img src="Primagen.png" alt="Primagen logo" width="300">
+</p>  
 
 My original intention was Primitive Genesis(元婴), BUT ...  
 Primagen, the ancient cosmic creature imprisoned in the underground city, harbors an ambition to annihilate the universe, driven by an extreme lust for power.  
@@ -18,34 +21,45 @@ This is a pure C implementation of the original nanobot project.
 
 ## Project Structure
 - `src/`: Source code
-  - `agent/`: Agent loop
+  - `agent/`: Agent loop (ReAct)
   - `bus/`: Message bus
+  - `channels/`: Communication channels
+  - `cli/`: CLI commands
+  - `common/`: Common implementations
+  - `config/`: Configuration loader
   - `context/`: Context builder
-  - `memory/`: Memory management (Long-term/Short-term Memory, not RAM)
+  - `cron/`: Cron service
+  - `heartbeat/`: Heartbeat service
+  - `memory/`: Memory management
   - `providers/`: LLM providers
   - `session/`: Session management
-  - `tools/`: Tool registry
+  - `skills/`: Skills loader
   - `subagent/`: Subagent manager
-  - `cron/`: Cron service
-  - `common.h/c`, `message.h/c`, `main.c`: Common files
+  - `tools/`: Tool registry
+  - `vendor/`: Third-party libraries (cJSON)
+  - `include/`: Common headers
+  - `main.c`: Entry point
 - `build/`: Build directory for object files and executable
 - `Makefile`: Build script
 - `README.md`: This file
+- `.primagen/`: Default workspace (logs, memory, config)
 
 ## Features Implemented
-- Agent Loop with ReAct Paradigm
+- Agent Loop with multi-turn ReAct Paradigm
 - MessageBus for decoupling channels and agent core
-- ContextBuilder for assembling prompts
-- Tool registration mechanism (Filesystem, Shell, Web, Subagent, Cron)
-- Session persistence in JSONL format
-- Memory management (short and long term context)
+- ContextBuilder for assembling prompts from Identity, Memory, Skills, and History
+- Tool registration mechanism (Filesystem, Shell, Web, Subagent, Cron, Skill, Memory)
+- Session persistence in JSONL format (filtered for clarity)
+- Two-layer Memory System (Long-term facts & Short-term history)
 - Subagent Manager for background tasks
 - Cron Service for scheduled tasks
 - Real LLM Provider (OpenAI/Brave integration)
+- Flexible Configuration System
+- Comprehensive Logging
 
-**Note on Channels**: Currently, only the CLI (Command Line Interface) channel is implemented. Configuration structures for Telegram/WhatsApp exist but are not yet connected to real APIs.
+**Note on Channels**: The CLI (Command Line Interface) channel is fully implemented. Code structure for Telegram, WhatsApp, Feishu, etc. exists but requires API configuration.
 
-**Note on CLI Arguments**: The application currently loads configuration from `.nanobot/config.json` by default and does not yet support command-line arguments override (unlike the original nanobot).
+**Note on CLI Arguments**: The application loads configuration from `.primagen/config.json` by default.
 
 ## Compilation
 ```bash
@@ -54,19 +68,16 @@ make
 
 ## Running
 ```bash
-# Ensure API keys are set
-export OPENAI_API_KEY="sk-..."
-export BRAVE_API_KEY="your-brave-key"
+./build/primagen onboard
+# Ensure API keys are set in primagen/config.json
 
 ./build/primagen
 ```
 
 The program runs an interactive CLI agent loop.
 
-## Verification
-Compare the logic with the original Python code. The agent loop processes messages, builds context, calls LLM, executes tools, and responds.
-
 ## Notes
-- **Memory**: Refers to the AI's "Memory" (Context/Knowledge), distinct from system RAM.
+- **Memory**: Refers to the AI's "Memory" (Context/Knowledge), stored in `.primagen/memory/`.
+- **Logs**: Application logs are stored in `.primagen/log/`.
 - **LLM**: Uses `libcurl` to make real requests to OpenAI API.
-- **Tools**: Includes `exec`, `read_file`, `write_file`, `web_search` etc.
+- **Tools**: Includes `exec`, `read_file`, `write_file`, `web_search`, `skill`, `memory` etc.

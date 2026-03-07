@@ -15,6 +15,7 @@
   - 消息历史管理
   - 最大迭代次数限制
   - LLM 集成接口
+  - 多轮 ReAct 循环支持
 
 #### ✓ Message Bus（消息总线）
 - **nanobot**: `nanobot/bus/queue.py` - 异步消息队列
@@ -51,17 +52,18 @@
 - 功能：
   - 会话创建/加载
   - 消息历史存储
-  - 会话保存到文件
+  - 会话保存到文件 (JSONL 格式)
   - 会话索引管理
+  - 智能过滤（不保存冗余的工具调用详情）
 
 #### ✓ Memory System（记忆系统）
 - **nanobot**: `nanobot/agent/memory.py` - 两层记忆架构
 - **Primagen**: `src/memory/memory.c`
 - 功能：
-  - MEMORY.md（长期事实记忆）
-  - HISTORY.md（可grep搜索的日志历史）
+  - MEMORY.md（长期事实记忆，位于 `.primagen/memory/`）
+  - HISTORY.md（可grep搜索的日志历史，位于 `.primagen/memory/`）
   - 记忆加载/保存
-  - 记忆巩固（consolidation）任务
+  - 记忆巩固（consolidation）工具支持 (`memory` tool)
 - **注**：此处 Memory 指代 Agent 的长期与短期记忆，而非计算机内存 (RAM)。
 
 #### ✓ Subagent Manager（子代理管理器）
@@ -79,7 +81,7 @@
 - **Primagen**: `src/cron/cron.c`
 - 功能：
   - 任务调度
-  - 任务存储 (cron/jobs.json)
+  - 任务存储 (`.primagen/cron_store.json`)
   - 周期性执行
   - 任务状态查询
 
@@ -102,6 +104,7 @@
   - SKILL.md 文件格式
   - 依赖检查
   - 元数据解析
+  - `skill` 工具支持 (load/list)
 
 #### ✓ LLM Provider（LLM提供者）
 - **nanobot**: `nanobot/providers/` - 多个LLM提供者
@@ -111,6 +114,8 @@
   - 工具定义传递
   - 响应解析
   - 模型参数配置
+  - 请求/响应日志记录
+  - 历史消息滑动窗口
 
 #### ✓ Configuration System（配置系统）
 - **nanobot**: `nanobot/config/schema.py` - Pydantic 配置
@@ -120,7 +125,7 @@
   - Tool 配置（执行、Web 搜索、约束等）
   - Channel 配置（Telegram、WhatsApp 等）
   - Heartbeat 配置
-  - **差异**: 目前仅支持硬编码路径加载 (`.nanobot/config.json`)，未实现命令行参数覆盖。
+  - **差异**: 目前仅支持硬编码路径加载 (`.primagen/config.json`)。
 
 ### 待实现/部分实现模块
 
@@ -128,8 +133,8 @@
 - **nanobot**: 支持 Telegram, WhatsApp, Discord 等
 - **Primagen**:
   - 配置结构已就绪 (`src/config/config.c`)
-  - 实际通信层目前仅实现 **CLI (命令行交互)**
-  - Telegram/WhatsApp 等 API 接入层尚未实现
+  - 核心通信层 **CLI (命令行交互)** 已完整实现
+  - 多个通道 (Telegram, Email, Discord, Slack, DingTalk, Feishu) 已有基础实现代码，等待真实 API 配置和测试。
 
 ### 工具实现
 
@@ -147,6 +152,8 @@
 | MessageTool | ✓ 实现 | 发送消息到特定通道 |
 | SpawnTool | ✓ 实现 | 执行子代理任务 |
 | CronTool | ✓ 实现 | 定时任务管理 |
+| SkillTool | ✓ 实现 | 动态加载和管理技能 |
+| MemoryTool | ✓ 实现 | 管理长期记忆和历史 |
 | MCPTools | ○ 存根 | Model Context Protocol 工具 |
 
 ### 数据结构
@@ -186,6 +193,8 @@
     ├─ Message Sending
     ├─ Subagent Spawning
     ├─ Cron Task Management
+    ├─ Skill Management
+    ├─ Memory Management
     └─ Others
     ↓
 [Response Generation]
@@ -193,8 +202,8 @@
 [OutboundMessage] → MessageBus → Channel → User
     ↓
 [Session Persistence]
-    ├─ Session Save
-    ├─ Memory Consolidation
+    ├─ Session Save (JSONL)
+    ├─ Memory Consolidation (MEMORY.md/HISTORY.md)
     └─ History Logging
 ```
 
@@ -204,11 +213,11 @@
 
 | 指标 | 数值 |
 |---|---|
-| C 源文件 | 15+ |
-| 头文件 | 12+ |
-| C 模块数 | 12+ |
-| 总代码行数 | ~5000+ |
-| 编译结果 | 42KB 可执行文件 |
+| C 源文件 | 20+ |
+| 头文件 | 15+ |
+| C 模块数 | 15+ |
+| 总代码行数 | ~6000+ |
+| 编译结果 | 可执行文件 |
 
 ### 编译系统
 
@@ -234,7 +243,7 @@
 
 ### ✓ 能够运行
 
-- 完整编译无错误（仅轻微警告）
+- 完整编译无错误
 - 可执行文件成功运行
 - 所有模块正确集成
 
@@ -250,7 +259,7 @@
 
 ### 可选的增强功能
 
-1. **Channel Implementation** - 实现 Telegram、WhatsApp、Discord 等通道的真实 API 对接
+1. **Channel Implementation** - 完善 Telegram、WhatsApp、Discord 等通道的真实 API 对接
 2. **CLI Arguments** - 实现与 nanobot 一致的命令行参数解析 (如 `--config`, `--workspace` 等)
 3. **HTTP Client** - 增强 Web 工具的鲁棒性
 4. **JSON Parser** - 增强配置文件解析

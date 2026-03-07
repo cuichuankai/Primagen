@@ -1,3 +1,5 @@
 build/
 tests/
 .primagen/
+.DS_Store
+.vscode/

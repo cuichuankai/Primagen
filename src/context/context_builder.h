@@ -12,6 +12,7 @@ typedef struct {
     StringArray bootstrap_files;
     Memory* memory;
     SkillsLoader* skills_loader;
+    char* workspace;
 } ContextBuilder;
 
 // Functions

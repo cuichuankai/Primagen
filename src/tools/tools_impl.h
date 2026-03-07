@@ -6,6 +6,7 @@
 #include "../include/subagent.h"
 #include "../include/cron.h"
 #include "../include/skills.h"
+#include "../memory/memory.h"
 #include "tool.h"
 
 typedef struct {
@@ -13,6 +14,8 @@ typedef struct {
     SubagentManager* subagent_mgr;
     CronService* cron_service;
     SkillsLoader* skills_loader;
+    Memory* memory;
+    const char* workspace;
 } ToolContext;
 
 // Helper to register all standard tools
@@ -42,5 +45,8 @@ Error tool_cron(void* user_data, const char* args_json, String* result);
 
 // Skill tool
 Error tool_skill(void* user_data, const char* args_json, String* result);
+
+// Memory tool
+Error tool_memory(void* user_data, const char* args_json, String* result);
 
 #endif // FILESYSTEM_TOOLS_H

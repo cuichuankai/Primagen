@@ -1,5 +1,6 @@
 #include "llm_provider.h"
 #include "../include/common.h"
+#include "../include/logger.h"
 #include "../vendor/cJSON/cJSON.h"
 #include <curl/curl.h>
 #include <stdlib.h>
@@ -95,7 +96,22 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
     
     // 2. Session History
     if (session) {
-        for (size_t i = 0; i < session->messages.count; i++) {
+        size_t start_idx = 0;
+        // Simple sliding window: keep last 30 messages to manage context
+        // In a real implementation, this should be token-based
+        size_t max_history = 30; 
+        
+        if (session->messages.count > max_history) {
+            start_idx = session->messages.count - max_history;
+            
+            // Add a system note about truncation
+            cJSON *note = cJSON_CreateObject();
+            cJSON_AddStringToObject(note, "role", "system");
+            cJSON_AddStringToObject(note, "content", "(Note: Older conversation history has been truncated. Use the 'memory' tool to access long-term history or consolidate important details.)");
+            cJSON_AddItemToArray(messages, note);
+        }
+        
+        for (size_t i = start_idx; i < session->messages.count; i++) {
             Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
             cJSON *json_msg = cJSON_CreateObject();
             
@@ -170,6 +186,7 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
     }
     
     char *json_str = cJSON_PrintUnformatted(root);
+    log_info("LLM Request Payload: %s", json_str);
     cJSON_Delete(root);
     
     // Endpoint
@@ -204,6 +221,8 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
         return error_new(ERR_NETWORK, curl_easy_strerror(res));
     }
     
+    log_info("LLM Response Payload: %s", chunk.memory);
+
     cJSON *json_response = cJSON_Parse(chunk.memory);
     
     if (!json_response) {

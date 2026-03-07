@@ -42,6 +42,12 @@ void agent_loop_run(AgentLoop* loop) {
             continue;
         }
         
+        // Skip empty messages
+        if (inbound->content.len == 0) {
+            inbound_message_free(inbound);
+            continue;
+        }
+        
         // Get or create session
         char key[256];
         snprintf(key, sizeof(key), "%s:%s", inbound->channel.data, inbound->chat_id.data);
@@ -159,6 +165,7 @@ void agent_loop_run(AgentLoop* loop) {
             session_manager_save(loop->session_mgr, session);
         }
         
-        inbound_message_free(inbound);
+        inbound_message_free(inbound); // Free inbound message after full conversation loop
+
     }
 }

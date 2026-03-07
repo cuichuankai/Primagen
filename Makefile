@@ -5,9 +5,12 @@ LDFLAGS = -lcurl
 OBJDIR = build
 SRCDIR = src
 
-.PHONY: all clean test test_tools
+.PHONY: all clean package dirs
 
-all: $(OBJDIR)/primagen
+dirs:
+	@mkdir -p $(OBJDIR)
+
+all: dirs $(OBJDIR)/primagen
 
 OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/common/message.o \
@@ -108,20 +111,15 @@ $(OBJDIR)/main.o: $(SRCDIR)/main.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Test targets
-test: test_agent_loop test_tools
 
-test_agent_loop: $(OBJDIR)/test_agent_loop
-	./$(OBJDIR)/test_agent_loop
-
-test_tools: $(OBJDIR)/test_tools
-	./$(OBJDIR)/test_tools
-
-$(OBJDIR)/test_agent_loop: tests/test_agent_loop.c $(filter-out $(OBJDIR)/main.o $(OBJDIR)/channels/console.o $(OBJDIR)/channels/telegram.o $(OBJDIR)/cli/commands.o, $(OBJ))
-	$(CC) $(CFLAGS) -o $@ $< $(filter-out $(OBJDIR)/main.o $(OBJDIR)/channels/console.o $(OBJDIR)/channels/telegram.o $(OBJDIR)/cli/commands.o, $(OBJ)) $(LDFLAGS)
-
-$(OBJDIR)/test_tools: tests/test_tools.c $(filter-out $(OBJDIR)/main.o $(OBJDIR)/channels/console.o $(OBJDIR)/channels/telegram.o $(OBJDIR)/cli/commands.o, $(OBJ))
-	$(CC) $(CFLAGS) -o $@ $< $(filter-out $(OBJDIR)/main.o $(OBJDIR)/channels/console.o $(OBJDIR)/channels/telegram.o $(OBJDIR)/cli/commands.o, $(OBJ)) $(LDFLAGS)
+package: all
+	@echo "Creating self-extracting installer package..."
+	cp install.sh $(OBJDIR)/primagen_install.sh
+	mkdir -p $(OBJDIR)/.primagen
+	cp -r skills $(OBJDIR)/.primagen/
+	cd $(OBJDIR);tar -czf - ./primagen ./.primagen >> primagen_install.sh;cd -
+	chmod +x $(OBJDIR)/primagen_install.sh
+	@echo "Package created: $(OBJDIR)/primagen_install.sh"
 
 clean:
 	rm -rf $(OBJDIR)

@@ -9,6 +9,7 @@ ContextBuilder* context_builder_new(const char* workspace) {
     cb->bootstrap_files = string_array_new();
     cb->memory = NULL;
     cb->skills_loader = skills_loader_create(workspace);
+    cb->workspace = strdup(workspace);
     return cb;
 }
 
@@ -17,6 +18,7 @@ void context_builder_free(ContextBuilder* cb) {
     string_free(&cb->identity);
     string_array_free(&cb->bootstrap_files);
     skills_loader_destroy(cb->skills_loader);
+    free(cb->workspace);
     free(cb);
 }
 
@@ -50,9 +52,15 @@ String context_builder_build(ContextBuilder* cb, Session* session, ToolRegistry*
     }
 
     // Memory
-    if (cb->memory) {
+    if (cb->memory && cb->workspace) {
+        // Reload memory to ensure latest content
+        memory_load(cb->memory, cb->workspace);
+        
         string_append(&prompt, cb->memory->memory_md.data);
         string_append(&prompt, "\n\n---\n\n");
+    } else {
+        // Fallback if memory not set (should not happen in prod)
+        string_append(&prompt, "# Long-term Memory\n\n(No memory loaded)\n\n---\n\n");
     }
 
     // Always skills

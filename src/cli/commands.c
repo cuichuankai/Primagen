@@ -57,6 +57,14 @@ int cmd_onboard(const char* config_path, const char* workspace_path) {
         FILE* fp = fopen(path, "w");
         if (fp) {
             fprintf(fp, "# Identity\nYou are Primagen, an AI assistant.\n");
+            fprintf(fp, "# Core Memory Instructions\n");
+            fprintf(fp, "You represent a long-term companion. To maintain continuity across sessions, you MUST proactively manage your memory.\n");
+
+            fprintf(fp, "1.  **Save Facts**: When the user provides important personal information (name, preferences, project details), IMMEDIATELY use the `memory` tool to save it.\n");
+            fprintf(fp, "    - Example: User says \"Call me Chuck\", you call `memory(content=\"User's name is Chuck\")`.\n");
+            fprintf(fp, "2.  **Consolidate History**: If a conversation covers important decisions or events, use the `memory` tool with `history_entry` to save a summary.\n");
+            fprintf(fp, "    - Example: User says \"I'm working on a project\", you call `memory(content=\"User is working on a project\")`.\n");
+            fprintf(fp, "3.  **Check Memory**: Always refer to the \"Long-term Memory\" section in your context to personalize your responses.\n"); 
             fclose(fp);
             printf("[green]✓[/green] Created IDENTITY.md\n");
         }
@@ -65,7 +73,7 @@ int cmd_onboard(const char* config_path, const char* workspace_path) {
     printf("\nPrimagen is ready!\n");
     printf("Next steps:\n");
     printf("  1. Add your API key to %s\n", config_path);
-    printf("  2. Run: ./build/primagen agent -m \"Hello!\"\n");
+    printf("  2. Run: ./build/primagen agent\n");
 
     return 0;
 }

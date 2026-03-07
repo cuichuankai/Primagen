@@ -1,158 +1,194 @@
-# Primagen C 项目结构
+# Primagen C Project Structure
 
-## 目录组织
+## Directory Organization
 
-### 根目录 (/)
+### Root Directory (/)
 ```
 /workspaces/Primagen/
-├── Makefile              # 编译配置文件
-├── README.md             # 项目说明
-├── PROJECT_STRUCTURE.md  # 项目结构说明
-├── src/                  # 源代码目录
-└── build/                # 编译输出目录（中间产物和可执行文件）
+├── Makefile              # Compilation configuration
+├── README.md             # Project documentation
+├── PROJECT_STRUCTURE.md  # This file
+├── IMPLEMENTATION_GUIDE.md # Implementation status and guide
+├── src/                  # Source code directory
+└── build/                # Build output directory (artifacts and executable)
 ```
 
-### 源代码目录 (src/)
+### Source Code Directory (src/)
 ```
 src/
-├── include/              # 头文件目录（通用头文件）
-│   ├── common.h          # 公共数据结构和工具函数声明
-│   └── message.h         # 消息数据结构声明
-├── common/               # 通用实现模块
-│   ├── common.c          # 公共模块实现
-│   └── message.c         # 消息模块实现
-├── main.c                # 主程序入口
-├── agent/                # 代理循环模块
+├── include/              # Header directory (Common headers)
+│   ├── channel.h         # Channel interface
+│   ├── commands.h        # CLI commands interface
+│   ├── common.h          # Common data structures and utilities
+│   ├── config.h          # Configuration structures
+│   ├── cron.h            # Cron service interface
+│   ├── heartbeat.h       # Heartbeat service interface
+│   ├── logger.h          # Logger interface
+│   ├── message.h         # Message data structures
+│   ├── skills.h          # Skills loader interface
+│   └── subagent.h        # Subagent manager interface
+├── agent/                # Agent Loop Module
 │   ├── agent_loop.h
 │   └── agent_loop.c
-├── bus/                  # 消息总线模块
+├── bus/                  # Message Bus Module
 │   ├── message_bus.h
 │   └── message_bus.c
-├── context/              # 上下文构建器模块
+├── channels/             # Communication Channels Module
+│   ├── console.c         # CLI Console channel
+│   ├── dingtalk.c
+│   ├── discord.c
+│   ├── email.c
+│   ├── feishu.c
+│   ├── feishu_ws.c       # Feishu WebSocket implementation
+│   ├── feishu_ws.h
+│   ├── slack.c
+│   └── telegram.c
+├── cli/                  # CLI Commands Module
+│   └── commands.c
+├── common/               # Common Implementations
+│   ├── common.c          # Common utilities
+│   ├── logger.c          # Logging implementation
+│   └── message.c         # Message handling implementation
+├── config/               # Configuration Module
+│   └── config.c
+├── context/              # Context Builder Module
 │   ├── context_builder.h
 │   └── context_builder.c
-├── memory/               # 记忆管理模块
+├── cron/                 # Cron Service Module
+│   └── cron.c
+├── heartbeat/            # Heartbeat Service Module
+│   └── heartbeat.c
+├── memory/               # Memory Management Module
 │   ├── memory.h
 │   └── memory.c
-├── providers/            # LLM 提供者模块
+├── providers/            # LLM Providers Module
 │   ├── llm_provider.h
 │   └── llm_provider.c
-├── session/              # 会话管理模块
+├── session/              # Session Management Module
 │   ├── session.h
 │   └── session.c
-└── tools/                # 工具注册模块
-    ├── tool.h
-    └── tool.c
+├── skills/               # Skills Management Module
+│   └── skills.c
+├── subagent/             # Subagent Management Module
+│   └── subagent.c
+├── tools/                # Tools Registry & Implementation
+│   ├── tool.h            # Tool registry interface
+│   ├── tool.c            # Tool registry implementation
+│   ├── tools_impl.h      # Concrete tools declaration
+│   └── tools_impl.c      # Concrete tools implementation (fs, shell, web, etc.)
+├── vendor/               # Third-party Libraries
+│   └── cJSON/
+│       ├── cJSON.h
+│       └── cJSON.c
+└── main.c                # Main Entry Point
 ```
 
-### 编译输出目录 (build/)
+### Build Output Directory (build/)
 ```
 build/
-├── primagen               # 最终可执行文件
+├── primagen               # Final Executable
 ├── common/
-│   ├── common.o          # 对象文件
+│   ├── common.o
+│   ├── logger.o
 │   └── message.o
 ├── main.o
 ├── agent/
 │   └── agent_loop.o
 ├── bus/
 │   └── message_bus.o
+├── channels/
+│   ├── console.o
+│   ├── ... (other channels)
+├── cli/
+│   └── commands.o
+├── config/
+│   └── config.o
 ├── context/
 │   └── context_builder.o
+├── cron/
+│   └── cron.o
+├── heartbeat/
+│   └── heartbeat.o
 ├── memory/
 │   └── memory.o
 ├── providers/
 │   └── llm_provider.o
 ├── session/
 │   └── session.o
-└── tools/
-    └── tool.o
+├── skills/
+│   └── skills.o
+├── subagent/
+│   └── subagent.o
+├── tools/
+│   ├── tool.o
+│   └── tools_impl.o
+└── vendor/
+    └── cJSON/
+        └── cJSON.o
 ```
 
-## 编译方法
+## Compilation
 
-### 从项目根目录执行：
+### From Root Directory:
 ```bash
-cd /workspaces/Primagen
-make              # 编译项目
-make clean        # 清除编译产物
+make              # Compile project
+make clean        # Clean build artifacts
 ```
 
-## 运行方法
+## Running
 
 ```bash
 ./build/primagen
 ```
 
-### 预期输出：
+### Workspace Structure (.primagen/)
+When running, the application creates/uses a workspace directory (default `.primagen`):
 ```
-Primagen - AI Agent Framework (C Refactoring)
-=============================================
-
-Agent is running. Type your message (or 'exit' to quit):
->
-```
-
-## 项目特点
-
-1. **模块化设计**：按功能将代码分为不同的模块（agent, bus, context, memory 等）
-2. **头文件集中**：所有通用头文件统一放在 include 目录
-3. **实现分离**：基础实现（common.c, message.c）与头文件分离，放在 common 目录
-4. **清晰的目录结构**：模拟原始 Python 项目的组织方式
-5. **编译产物隔离**：所有中间文件和可执行文件都在 build/ 目录中
-6. **源码保持纯净**：只有源代码文件在 src/ 目录中，没有编译产物污染
-7. **灵活的 Makefile**：支持增量编译和清除功能
-
-## 核心功能说明
-
-| 模块 | 功能 |
-|------|------|
-| `include/` | 公共头文件目录 |
-| `common/` | 基础实现（common.c, message.c） |
-| `agent/` | 核心 ReAct 代理循环实现 |
-| `bus/` | 异步消息队列，解耦通道和代理核心 |
-| `context/` | 构建系统提示，包含身份、引导文件、记忆和技能 |
-| `tools/` | 动态工具注册和执行机制 |
-| `session/` | 会话管理，JSONL 格式持久化存储 |
-| `memory/` | 长期记忆和历史记录管理 |
-| `providers/` | LLM 提供者接口（真实 API 调用） |
-
-## 文件包含关系
-
-```
-main.c
-├── include/common.h
-├── include/message.h
-├── agent/agent_loop.h
-├── bus/message_bus.h
-├── context/context_builder.h
-├── tools/tool.h
-├── session/session.h
-├── memory/memory.h
-└── providers/llm_provider.h
-    └── (各模块内部相对引用)
-    
-include/message.h
-└── include/common.h
-
-common/
-├── common.c
-│   └── include/common.h
-└── message.c
-    ├── include/common.h
-    └── include/message.h
+.primagen/
+├── config.json           # Configuration file
+├── cron_store.json       # Persisted cron jobs
+├── log/
+│   └── primagen.log      # Application logs
+├── memory/
+│   ├── MEMORY.md         # Long-term memory facts
+│   └── HISTORY.md        # Consolidated conversation history
+├── sessions/
+│   └── console:local_user.jsonl  # Session history (JSONL format)
+├── skills/               # Skills directory (loaded by SkillsLoader)
+│   └── ...
+├── IDENTITY.md           # Agent Identity
+├── AGENTS.md             # Sub-agents definition
+├── SOUL.md               # Core directives
+├── USER.md               # User profile
+└── TOOLS.md              # Tools documentation
 ```
 
-## 编译配置
+## Project Features
 
-- **编译器**：gcc
-- **标准**：C99
-- **编译标志**：-Wall -Wextra -pthread
-- **包含路径**：`-I src/include -I src` (在编译时自动添加)
+1.  **Modular Design**: Code separated by function (agent, bus, context, memory, etc.).
+2.  **Header Organization**: Common headers in `src/include/`.
+3.  **Clean Separation**: Implementation details hidden in `.c` files.
+4.  **ReAct Loop**: Full implementation of Reasoning + Acting loop in C.
+5.  **Persistent Memory**: File-based long-term memory (`MEMORY.md`).
+6.  **Tool System**: Extensible tool registration system.
+7.  **Real-world Integration**:
+    - **LLM**: libcurl integration with OpenAI/Brave.
+    - **Channels**: Architecture supports multiple channels (Telegram, Feishu, etc.).
+    - **Cron**: Persistent scheduling.
 
-## 验证步骤
+## Core Module Functions
 
-1. 执行 `make` 编译项目
-2. 检查 `build/` 目录中是否生成对应的 `.o` 文件和 `primagen` 可执行文件
-3. 运行 `./build/primagen` 验证功能
-4. 对比输出与原始 Python 项目的行为一致
+| Module | Function |
+|---|---|
+| `agent` | Implements the main ReAct loop, handling multi-turn tool execution. |
+| `bus` | Asynchronous message bus for decoupling components. |
+| `channels` | Implementation of various communication channels. |
+| `config` | Loads configuration from JSON files. |
+| `context` | Builds the system prompt from identity, memory, skills, and history. |
+| `cron` | Manages scheduled tasks. |
+| `memory` | Manages long-term (facts) and short-term (history) memory. |
+| `providers` | Interface for LLM API calls (OpenAI compatible). |
+| `session` | Manages active sessions and their persistence. |
+| `skills` | Loads and manages dynamic skills from the filesystem. |
+| `subagent` | Manages spawning of sub-agents for tasks. |
+| `tools` | Registry and implementation of all agent capabilities (tools). |

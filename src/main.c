@@ -21,6 +21,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <curl/curl.h>
+#include <sys/stat.h>
 
 // Global bus reference for cron callback
 static MessageBus* global_bus = NULL;
@@ -194,7 +195,9 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     curl_global_init(CURL_GLOBAL_ALL);
 
     char full_log_path[512];
-    snprintf(full_log_path, sizeof(full_log_path), "%s/primagen.log", workspace_path);
+    snprintf(full_log_path, sizeof(full_log_path), "%s/log", workspace_path);
+    mkdir(full_log_path, 0755);
+    snprintf(full_log_path, sizeof(full_log_path), "%s/log/primagen.log", workspace_path);
     logger_init(full_log_path);
 
     // 2. Initialize Components
@@ -203,6 +206,42 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     
     SessionManager* session_mgr = session_manager_new(workspace_path); 
     ContextBuilder* ctx_builder = context_builder_new(workspace_path); 
+    
+    // Initialize Memory
+    Memory* memory = memory_new();
+    context_builder_set_memory(ctx_builder, memory);
+    
+    // Load Bootstrap Files (Identity & Docs)
+    char bootstrap_path[512];
+    const char* bootstrap_files[] = {"IDENTITY.md", "AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"};
+    size_t bootstrap_count = sizeof(bootstrap_files) / sizeof(bootstrap_files[0]);
+
+    for (size_t i = 0; i < bootstrap_count; i++) {
+        snprintf(bootstrap_path, sizeof(bootstrap_path), "%s/%s", workspace_path, bootstrap_files[i]);
+        FILE* fp = fopen(bootstrap_path, "r");
+        if (fp) {
+            fseek(fp, 0, SEEK_END);
+            long len = ftell(fp);
+            fseek(fp, 0, SEEK_SET);
+            if (len > 0) {
+                char* content = malloc(len + 1);
+                if (content) {
+                    fread(content, 1, len, fp);
+                    content[len] = '\0';
+                    
+                    if (strcmp(bootstrap_files[i], "IDENTITY.md") == 0) {
+                        context_builder_set_identity(ctx_builder, content);
+                    } else {
+                        context_builder_add_bootstrap(ctx_builder, content);
+                    }
+                    free(content);
+                    log_info("[System] Loaded bootstrap file: %s", bootstrap_files[i]);
+                }
+            }
+            fclose(fp);
+        }
+    }
+
     ToolRegistry* tool_reg = tool_registry_new();
 
     // Initialize Channels
@@ -312,6 +351,8 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     tool_ctx->subagent_mgr = subagent_mgr;
     tool_ctx->cron_service = cron_service;
     tool_ctx->skills_loader = skills_loader;
+    tool_ctx->memory = memory;
+    tool_ctx->workspace = workspace_path;
 
     // 3. Register Tools
     register_all_tools(tool_reg, tool_ctx);
@@ -356,6 +397,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     cron_service_destroy(cron_service);
     subagent_manager_destroy(subagent_mgr);
     skills_loader_destroy(skills_loader);
+    memory_free(memory);
     free(tool_ctx);
 
     curl_global_cleanup();
