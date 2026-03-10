@@ -16,7 +16,11 @@ typedef struct {
     SkillsLoader* skills_loader;
     Memory* memory;
     const char* workspace;
+    const char* current_channel;
+    const char* current_chat_id;
 } ToolContext;
+
+void tool_context_set_route(ToolContext* ctx, const char* channel, const char* chat_id);
 
 // Helper to register all standard tools
 void register_all_tools(ToolRegistry* reg, ToolContext* ctx);

@@ -1,36 +1,41 @@
 #include "tools_impl.h"
 #include "../vendor/cJSON/cJSON.h"
 #include "../bus/message_bus.h"
+#include "../vendor/mongoose/mongoose.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
-#include <curl/curl.h>
 #include <ctype.h>
 
 #define MAX_READ_SIZE 128000
 
-// Helper struct for curl response
+// Helper struct for mongoose response
 struct MemoryStruct {
     char *memory;
     size_t size;
+    bool done;
 };
 
-static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
-    size_t realsize = size * nmemb;
-    struct MemoryStruct *mem = (struct MemoryStruct *)userp;
-    
-    char *ptr = realloc(mem->memory, mem->size + realsize + 1);
-    if(!ptr) return 0; // Out of memory
-    
-    mem->memory = ptr;
-    memcpy(&(mem->memory[mem->size]), contents, realsize);
-    mem->size += realsize;
-    mem->memory[mem->size] = 0;
-    
-    return realsize;
+static void fn(struct mg_connection *c, int ev, void *ev_data) {
+  struct MemoryStruct *ms = (struct MemoryStruct *) c->fn_data;
+  if (ev == MG_EV_HTTP_MSG) {
+    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+    size_t new_size = ms->size + hm->body.len;
+    ms->memory = realloc(ms->memory, new_size + 1);
+    // mongoose 7.x uses buf/len for mg_str but some versions use ptr.
+    // Let's check mongoose.h. It seems to be 'buf' or 'ptr' depending on version.
+    // If 'ptr' error, likely it is 'buf' (const char* buf).
+    memcpy(ms->memory + ms->size, hm->body.buf, hm->body.len);
+    ms->size = new_size;
+    ms->memory[ms->size] = '\0';
+    c->is_closing = 1;
+    ms->done = true;
+  } else if (ev == MG_EV_ERROR) {
+      ms->done = true;
+  }
 }
 
 // Helper to get string from JSON
@@ -48,6 +53,39 @@ static int get_json_int(cJSON* root, const char* key, int default_val) {
         return item->valueint;
     }
     return default_val;
+}
+
+static bool is_placeholder_value(const char* s) {
+    if (!s || s[0] == '\0') return true;
+    if (strcmp(s, "current") == 0 || strcmp(s, "chat") == 0 ||
+        strcmp(s, "user") == 0 || strcmp(s, "assistant") == 0) return true;
+    if (strncmp(s, "_user_", 6) == 0 || strncmp(s, "_assistant_", 11) == 0) return true;
+    return false;
+}
+
+static bool is_known_channel(const char* s) {
+    return s && (strcmp(s, "console") == 0 || strcmp(s, "telegram") == 0 ||
+                 strcmp(s, "email") == 0 || strcmp(s, "discord") == 0 ||
+                 strcmp(s, "slack") == 0 || strcmp(s, "dingtalk") == 0 ||
+                 strcmp(s, "feishu") == 0 || strcmp(s, "system") == 0);
+}
+
+static const char* resolve_channel(ToolContext* ctx, const char* channel) {
+    if (!is_placeholder_value(channel) && is_known_channel(channel)) return channel;
+    if (ctx && ctx->current_channel && ctx->current_channel[0]) return ctx->current_channel;
+    return "cli";
+}
+
+static const char* resolve_chat_id(ToolContext* ctx, const char* chat_id) {
+    if (!is_placeholder_value(chat_id)) return chat_id;
+    if (ctx && ctx->current_chat_id && ctx->current_chat_id[0]) return ctx->current_chat_id;
+    return "current";
+}
+
+void tool_context_set_route(ToolContext* ctx, const char* channel, const char* chat_id) {
+    if (!ctx) return;
+    ctx->current_channel = channel;
+    ctx->current_chat_id = chat_id;
 }
 
 // Helper to create directories recursively
@@ -163,16 +201,7 @@ Error tool_memory(void* user_data, const char* args_json, String* result) {
     
     // Handle memory update (full replacement/update of facts)
     if (memory_update) {
-        // We need a way to replace the memory content
-        // memory_add_fact appends, but here we might want to replace if the LLM gives us the full new state
-        // For now, let's assume we replace the whole memory_md if provided
-        // But wait, memory_add_fact appends. Let's check memory.c
-        // We should probably add a memory_update_facts function
-        
-        // Direct manipulation for now since we are in C and struct is exposed in header (or not?)
-        // Memory struct definition is in memory.h? No, it's in memory.h but fields are String.
-        // Let's implement a replace helper in memory.c or just direct access if possible.
-        // Direct access:
+
         string_free(&ctx->memory->memory_md);
         ctx->memory->memory_md = string_new(memory_update);
     }
@@ -486,42 +515,67 @@ Error tool_web_search(void* user_data, const char* args_json, String* result) {
         return error_new(ERR_INVALID_PARAM, "BRAVE_API_KEY not set");
     }
     
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-        cJSON_Delete(json);
-        return error_new(ERR_NETWORK, "Failed to init CURL");
+    struct mg_mgr mgr;
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.memory[0] = '\0';
+    
+    mg_mgr_init(&mgr);
+
+    char url[1024];
+    // Simple URL encoding manually or use mg_url_encode if available, 
+    // but mongoose doesn't expose a simple string encode helper easily.
+    // Let's just put query as is for now or implement simple encoder.
+    // Actually, Brave API expects query param.
+    // We should encode spaces at least.
+    
+    // Quick and dirty URL encoder for spaces
+    char encoded_query[2048] = {0};
+    size_t qlen = strlen(query);
+    size_t eidx = 0;
+    for (size_t i=0; i<qlen && eidx < sizeof(encoded_query)-4; i++) {
+        if (isalnum(query[i]) || query[i] == '-' || query[i] == '_' || query[i] == '.' || query[i] == '~') {
+            encoded_query[eidx++] = query[i];
+        } else {
+            snprintf(encoded_query + eidx, 4, "%%%02X", (unsigned char)query[i]);
+            eidx += 3;
+        }
     }
     
-    char url[512];
-    char* encoded_query = curl_easy_escape(curl, query, 0);
     snprintf(url, sizeof(url), "https://api.search.brave.com/res/v1/web/search?q=%s&count=%d", encoded_query, count);
-    curl_free(encoded_query);
     
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, "Accept: application/json");
-    char auth_header[256];
-    snprintf(auth_header, sizeof(auth_header), "X-Subscription-Token: %s", api_key);
-    headers = curl_slist_append(headers, auth_header);
+    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
+    if (!c) {
+        cJSON_Delete(json);
+        mg_mgr_free(&mgr);
+        free(chunk.memory);
+        return error_new(ERR_NETWORK, "Failed to connect to Search provider");
+    }
     
-    struct MemoryStruct chunk;
-    chunk.memory = malloc(1);
-    chunk.size = 0;
+    // struct mg_tls_opts opts = {0};
+    // opts.ca = mg_str("ca.pem");
+
+    struct mg_str host = mg_url_host(url);
+    mg_printf(c, 
+        "GET %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "Accept: application/json\r\n"
+        "X-Subscription-Token: %s\r\n"
+        "\r\n",
+        mg_url_uri(url), 
+        (int)host.len, host.buf,
+        api_key
+    );
+
+    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+    mg_mgr_free(&mgr);
     
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
-    
-    CURLcode res = curl_easy_perform(curl);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-    
-    if (res != CURLE_OK) {
+    if (chunk.size == 0) {
         free(chunk.memory);
         cJSON_Delete(json);
-        return error_new(ERR_NETWORK, curl_easy_strerror(res));
+        return error_new(ERR_NETWORK, "Empty response from Search provider");
     }
-    
+
     cJSON* resp = cJSON_Parse(chunk.memory);
     free(chunk.memory);
     
@@ -576,29 +630,41 @@ Error tool_web_fetch(void* user_data, const char* args_json, String* result) {
         return error_new(ERR_INVALID_PARAM, "Missing 'url' argument");
     }
     
-    CURL *curl = curl_easy_init();
-    if (!curl) {
+    struct mg_mgr mgr;
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.memory[0] = '\0';
+    
+    mg_mgr_init(&mgr);
+    
+    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
+    if (!c) {
         cJSON_Delete(json);
-        return error_new(ERR_NETWORK, "Failed to init CURL");
+        mg_mgr_free(&mgr);
+        free(chunk.memory);
+        return error_new(ERR_NETWORK, "Failed to connect to URL");
     }
     
-    struct MemoryStruct chunk;
-    chunk.memory = malloc(1);
-    chunk.size = 0;
+    // struct mg_tls_opts opts = {0};
+    // opts.ca = mg_str("ca.pem");
+
+    struct mg_str host = mg_url_host(url);
+    mg_printf(c, 
+        "GET %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36\r\n"
+        "\r\n",
+        mg_url_uri(url), 
+        (int)host.len, host.buf
+    );
     
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+    mg_mgr_free(&mgr);
     
-    CURLcode res = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    
-    if (res != CURLE_OK) {
+    if (chunk.size == 0) {
         free(chunk.memory);
         cJSON_Delete(json);
-        return error_new(ERR_NETWORK, curl_easy_strerror(res));
+        return error_new(ERR_NETWORK, "Empty response or network error");
     }
     
     char* text = malloc(chunk.size + 1);
@@ -630,8 +696,8 @@ Error tool_send_message(void* user_data, const char* args_json, String* result) 
     char* channel = get_json_string(json, "channel");
     char* chat_id = get_json_string(json, "chat_id");
     
-    if (!channel) channel = "cli";
-    if (!chat_id) chat_id = "current";
+    channel = (char*) resolve_channel(ctx, channel);
+    chat_id = (char*) resolve_chat_id(ctx, chat_id);
     
     if (!content) {
         cJSON_Delete(json);
@@ -666,8 +732,8 @@ Error tool_spawn(void* user_data, const char* args_json, String* result) {
     SubagentSpawnRequest req;
     req.task = task;
     req.label = label;
-    req.origin_channel = "cli"; // simplified
-    req.origin_chat_id = "current"; // simplified
+    req.origin_channel = (ctx->current_channel && ctx->current_channel[0]) ? ctx->current_channel : "cli";
+    req.origin_chat_id = (ctx->current_chat_id && ctx->current_chat_id[0]) ? ctx->current_chat_id : "current";
     
     char* resp = subagent_manager_spawn(ctx->subagent_mgr, &req);
     if (resp) {
@@ -707,8 +773,8 @@ Error tool_cron(void* user_data, const char* args_json, String* result) {
     job.payload_message = payload;
     job.schedule = schedule;
     // Defaults or user provided
-    job.channel = channel ? channel : "cli";
-    job.to = chat_id ? chat_id : "current";
+    job.channel = (char*) resolve_channel(ctx, channel);
+    job.to = (char*) resolve_chat_id(ctx, chat_id);
     job.deliver = true;
     
     char* job_id = cron_service_add_job(ctx->cron_service, &job);

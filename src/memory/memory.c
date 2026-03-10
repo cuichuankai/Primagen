@@ -43,7 +43,7 @@ Error memory_load(Memory* mem, const char* workspace_path) {
         fclose(f);
     } else {
         // Create with default template if not exists
-        const char* default_mem = "# Long-term Memory\n\nThis file stores important information that should persist across sessions.\n\n## User Information\n\n## Preferences\n\n## Project Context\n\n## Important Notes\n";
+        const char* default_mem = "# Long-term Memory\n\nThis file stores important information that should persist across sessions.\n\n## User Information\n\n(Important facts about the user)\n\n## Preferences\n\n(User preferences learned over time)\n\n## Important Notes\n\n(Things to remember)\n";
         f = fopen(path, "w");
         if (f) {
             fputs(default_mem, f);
@@ -97,11 +97,55 @@ Error memory_save(Memory* mem, const char* workspace_path) {
 }
 
 void memory_add_fact(Memory* mem, const char* fact) {
-    // Append to memory_md
-    char* new_data = malloc(mem->memory_md.len + strlen(fact) + 2);
-    strcpy(new_data, mem->memory_md.data);
+    const char* section = "## Important Notes";
+    char* pos = strstr(mem->memory_md.data, section);
+    
+    // Default to appending at the end
+    size_t insert_idx = mem->memory_md.len;
+    
+    if (pos) {
+        // Move pos to end of section header
+        pos += strlen(section);
+        
+        // Find next section
+        char* next = strstr(pos, "\n## ");
+        if (next) {
+            insert_idx = next - mem->memory_md.data;
+        }
+    }
+    
+    // Calculate lengths
+    size_t fact_len = strlen(fact);
+    // Determine padding needed before fact
+    bool need_newline = (insert_idx > 0 && mem->memory_md.data[insert_idx-1] != '\n');
+    
+    // Total new length: original + padding + "\n- " + fact + "\n" + null
+    // Padding: 1 char if needed
+    // "\n- ": 3 chars (or "- " if already newlined)
+    // "\n": 1 char (trailing)
+    // Safety margin: 10
+    size_t new_total_len = mem->memory_md.len + fact_len + 20;
+    
+    char* new_data = malloc(new_total_len);
+    if (!new_data) return;
+    
+    // Copy prefix
+    if (insert_idx > 0) {
+        memcpy(new_data, mem->memory_md.data, insert_idx);
+    }
+    new_data[insert_idx] = '\0';
+    
+    // Append fact
+    if (need_newline) strcat(new_data, "\n");
+    strcat(new_data, "- ");
     strcat(new_data, fact);
     strcat(new_data, "\n");
+    
+    // Append suffix (rest of the file)
+    if (insert_idx < mem->memory_md.len) {
+        strcat(new_data, mem->memory_md.data + insert_idx);
+    }
+    
     string_free(&mem->memory_md);
     mem->memory_md = string_new(new_data);
     free(new_data);

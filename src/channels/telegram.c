@@ -5,7 +5,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
-#include <curl/curl.h>
+#include "../vendor/mongoose/mongoose.h"
 
 typedef struct {
     MessageBus* bus;
@@ -15,22 +15,26 @@ typedef struct {
     long last_update_id;
 } TelegramData;
 
-// Curl helper (reused from tools)
 struct MemoryStruct {
     char *memory;
     size_t size;
+    bool done;
 };
 
-static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
-    size_t realsize = size * nmemb;
-    struct MemoryStruct *mem = (struct MemoryStruct *)userp;
-    char *ptr = realloc(mem->memory, mem->size + realsize + 1);
-    if(!ptr) return 0;
-    mem->memory = ptr;
-    memcpy(&(mem->memory[mem->size]), contents, realsize);
-    mem->size += realsize;
-    mem->memory[mem->size] = 0;
-    return realsize;
+static void fn(struct mg_connection *c, int ev, void *ev_data) {
+  struct MemoryStruct *ms = (struct MemoryStruct *) c->fn_data;
+  if (ev == MG_EV_HTTP_MSG) {
+    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+    size_t new_size = ms->size + hm->body.len;
+    ms->memory = realloc(ms->memory, new_size + 1);
+    memcpy(ms->memory + ms->size, hm->body.buf, hm->body.len);
+    ms->size = new_size;
+    ms->memory[ms->size] = '\0';
+    c->is_closing = 1;
+    ms->done = true;
+  } else if (ev == MG_EV_ERROR) {
+      ms->done = true;
+  }
 }
 
 static void* telegram_poller(void* arg) {
@@ -40,22 +44,35 @@ static void* telegram_poller(void* arg) {
     printf("[Telegram] Polling started...\n");
     
     while (data->running) {
-        CURL *curl = curl_easy_init();
-        if (curl) {
-            char url[512];
-            snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/getUpdates?offset=%ld&timeout=30", 
-                     data->token, data->last_update_id + 1);
+        struct mg_mgr mgr;
+        struct MemoryStruct chunk = {0};
+        chunk.memory = malloc(1);
+        chunk.memory[0] = '\0';
+        
+        mg_mgr_init(&mgr);
+
+        char url[512];
+        snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/getUpdates?offset=%ld&timeout=30", 
+                 data->token, data->last_update_id + 1);
+        
+        struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
+        if (c) {
+            // struct mg_tls_opts opts = {0};
+            // opts.ca = mg_str("ca.pem");
+            // if (mg_url_is_ssl(url)) c->tls_opts = opts;
+
+            struct mg_str host = mg_url_host(url);
+            mg_printf(c, 
+                "GET %s HTTP/1.0\r\n"
+                "Host: %.*s\r\n"
+                "\r\n",
+                mg_url_uri(url), 
+                (int)host.len, host.buf
+            );
+
+            while (!chunk.done) mg_mgr_poll(&mgr, 1000);
             
-            struct MemoryStruct chunk;
-            chunk.memory = malloc(1);
-            chunk.size = 0;
-            
-            curl_easy_setopt(curl, CURLOPT_URL, url);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
-            
-            CURLcode res = curl_easy_perform(curl);
-            if (res == CURLE_OK) {
+            if (chunk.size > 0) {
                 cJSON *json = cJSON_Parse(chunk.memory);
                 if (json) {
                     cJSON *result = cJSON_GetObjectItem(json, "result");
@@ -73,7 +90,6 @@ static void* telegram_poller(void* arg) {
                                 
                                 if (text && chat_id_json) {
                                     char chat_id_str[64];
-                                    // Handle int or string chat_id
                                     if (cJSON_IsNumber(chat_id_json)) 
                                         snprintf(chat_id_str, sizeof(chat_id_str), "%lld", (long long)chat_id_json->valuedouble);
                                     else
@@ -89,15 +105,16 @@ static void* telegram_poller(void* arg) {
                     }
                     cJSON_Delete(json);
                 }
-            } else {
-                fprintf(stderr, "[Telegram] Poll failed: %s\n", curl_easy_strerror(res));
-                sleep(5); // Backoff
             }
-            
-            free(chunk.memory);
-            curl_easy_cleanup(curl);
+        } else {
+            fprintf(stderr, "[Telegram] Poll failed: connection error\n");
+            sleep(5);
         }
-        usleep(100000); // Small pause
+        
+        free(chunk.memory);
+        mg_mgr_free(&mgr);
+        
+        usleep(100000); 
     }
     return NULL;
 }
@@ -137,34 +154,61 @@ static void telegram_send(Channel* self, OutboundMessage* msg) {
     // Only process messages meant for this channel
     if (strcmp(msg->channel.data, "telegram") != 0) return;
     
-    CURL *curl = curl_easy_init();
-    if (curl) {
-        char url[512];
-        snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/sendMessage", data->token);
-        
-        cJSON *json = cJSON_CreateObject();
-        cJSON_AddStringToObject(json, "chat_id", msg->chat_id.data);
-        cJSON_AddStringToObject(json, "text", msg->content.data);
-        char *json_str = cJSON_PrintUnformatted(json);
-        
-        struct curl_slist *headers = NULL;
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-        
-        curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_str);
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        
-        // Fire and forget for now (or log error)
-        CURLcode res = curl_easy_perform(curl);
-        if (res != CURLE_OK) {
-            fprintf(stderr, "[Telegram] Send failed: %s\n", curl_easy_strerror(res));
-        }
-        
+    struct mg_mgr mgr;
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.memory[0] = '\0';
+    
+    mg_mgr_init(&mgr);
+
+    char url[512];
+    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/sendMessage", data->token);
+    
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "chat_id", msg->chat_id.data);
+    cJSON_AddStringToObject(json, "text", msg->content.data);
+    char *json_str = cJSON_PrintUnformatted(json);
+    
+    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
+    if (!c) {
+        fprintf(stderr, "[Telegram] Send failed: connection error\n");
         free(json_str);
         cJSON_Delete(json);
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
+        mg_mgr_free(&mgr);
+        free(chunk.memory);
+        return;
     }
+    
+    // We cannot set c->tls_opts directly in recent Mongoose unless we use mg_tls_init
+    // But since we use MG_TLS_BUILTIN and wss/https, it should just work.
+    // We skip manual CA setting for now to fix build.
+    // struct mg_tls_opts opts = {0};
+    // opts.ca = mg_str("ca.pem");
+    
+    struct mg_str host = mg_url_host(url);
+    mg_printf(c, 
+        "POST %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
+        "%s",
+        mg_url_uri(url), 
+        (int)host.len, host.buf,
+        (int)strlen(json_str),
+        json_str
+    );
+
+    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+    
+    if (chunk.size == 0) {
+        fprintf(stderr, "[Telegram] Send failed: empty response\n");
+    }
+    
+    free(json_str);
+    cJSON_Delete(json);
+    mg_mgr_free(&mgr);
+    free(chunk.memory);
 }
 
 static void telegram_destroy(Channel* self) {

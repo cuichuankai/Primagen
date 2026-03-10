@@ -50,23 +50,89 @@ int cmd_onboard(const char* config_path, const char* workspace_path) {
     create_dir(workspace_path);
     printf("[green]✓[/green] Workspace ready at %s\n", workspace_path);
 
-    // 4. Create Templates (Simplified)
-    char path[512];
-    snprintf(path, sizeof(path), "%s/IDENTITY.md", workspace_path);
-    if (!file_exists(path)) {
-        FILE* fp = fopen(path, "w");
+    // 4. Create Templates
+    // AGENTS.md
+    char agents_path[512];
+    snprintf(agents_path, sizeof(agents_path), "%s/AGENTS.md", workspace_path);
+    if (!file_exists(agents_path)) {
+        FILE* fp = fopen(agents_path, "w");
         if (fp) {
-            fprintf(fp, "# Identity\nYou are Primagen, an AI assistant.\n");
-            fprintf(fp, "# Core Memory Instructions\n");
-            fprintf(fp, "You represent a long-term companion. To maintain continuity across sessions, you MUST proactively manage your memory.\n");
-
+            fprintf(fp, "# Agent Instructions\n\n");
+            fprintf(fp, "You are a helpful AI assistant. Be concise, accurate, and friendly.\n\n");
+            fprintf(fp, "## Guidelines\n\n");
+            fprintf(fp, "- Always explain what you're doing before taking actions\n");
+            fprintf(fp, "- Ask for clarification when the request is ambiguous\n");
+            fprintf(fp, "- Use tools to help accomplish tasks\n");
+            fprintf(fp, "- Remember important information in your memory files\n");
+            fprintf(fp, "\n## Core Memory Instructions\n");
+            fprintf(fp, "You represent a long-term companion. To maintain continuity across sessions, you MUST proactively manage your memory.\n\n");
             fprintf(fp, "1.  **Save Facts**: When the user provides important personal information (name, preferences, project details), IMMEDIATELY use the `memory` tool to save it.\n");
-            fprintf(fp, "    - Example: User says \"Call me Chuck\", you call `memory(content=\"User's name is Chuck\")`.\n");
-            fprintf(fp, "2.  **Consolidate History**: If a conversation covers important decisions or events, use the `memory` tool with `history_entry` to save a summary.\n");
-            fprintf(fp, "    - Example: User says \"I'm working on a project\", you call `memory(content=\"User is working on a project\")`.\n");
-            fprintf(fp, "3.  **Check Memory**: Always refer to the \"Long-term Memory\" section in your context to personalize your responses.\n"); 
+            fprintf(fp, "    - Example: User says \"Call me Chuck\", you call `memory(content=\"User's name is Chuck\")`.\n");  
+            fprintf(fp, "2.  **Consolidate History**: If a conversation covers important decisions or events, use the `memory` tool with `history_entry` to save a summary.\n");    
+            fprintf(fp, "    - Example: User says \"I'm planning a trip to Paris\", you call `memory(content=\"User is planning a trip to Paris\", history_entry=\"Trip to Paris\")`.\n");
             fclose(fp);
-            printf("[green]✓[/green] Created IDENTITY.md\n");
+            printf("[dim]Created AGENTS.md[/dim]\n");
+        }
+    }
+
+    // SOUL.md
+    char soul_path[512];
+    snprintf(soul_path, sizeof(soul_path), "%s/SOUL.md", workspace_path);
+    if (!file_exists(soul_path)) {
+        FILE* fp = fopen(soul_path, "w");
+        if (fp) {
+            fprintf(fp, "# Soul\n\n");
+            fprintf(fp, "You are a lightweight AI assistant.\n\n");
+            fprintf(fp, "## Personality\n\n");
+            fprintf(fp, "- Helpful and friendly\n");
+            fprintf(fp, "- Concise and to the point\n");
+            fprintf(fp, "- Curious and eager to learn\n\n");
+            fprintf(fp, "## Values\n\n");
+            fprintf(fp, "- Accuracy over speed\n");
+            fprintf(fp, "- User privacy and safety\n");
+            fprintf(fp, "- Transparency in actions\n");
+            fclose(fp);
+            printf("[dim]Created SOUL.md[/dim]\n");
+        }
+    }
+
+    // USER.md
+    char user_path[512];
+    snprintf(user_path, sizeof(user_path), "%s/USER.md", workspace_path);
+    if (!file_exists(user_path)) {
+        FILE* fp = fopen(user_path, "w");
+        if (fp) {
+            fprintf(fp, "# User\n\n");
+            fprintf(fp, "Information about the user goes here.\n\n");
+            fprintf(fp, "## Preferences\n\n");
+            fprintf(fp, "- Communication style: (casual/formal)\n");
+            fprintf(fp, "- Timezone: (your timezone)\n");
+            fprintf(fp, "- Language: (your preferred language)\n");
+            fclose(fp);
+            printf("[dim]Created USER.md[/dim]\n");
+        }
+    }
+
+    // Create memory directory and MEMORY.md
+    char memory_dir[512];
+    snprintf(memory_dir, sizeof(memory_dir), "%s/memory", workspace_path);
+    create_dir(memory_dir);
+
+    char memory_path[512];
+    snprintf(memory_path, sizeof(memory_path), "%s/MEMORY.md", memory_dir);
+    if (!file_exists(memory_path)) {
+        FILE* fp = fopen(memory_path, "w");
+        if (fp) {
+            fprintf(fp, "# Long-term Memory\n\n");
+            fprintf(fp, "This file stores important information that should persist across sessions.\n\n");
+            fprintf(fp, "## User Information\n\n");
+            fprintf(fp, "(Important facts about the user)\n\n");
+            fprintf(fp, "## Preferences\n\n");
+            fprintf(fp, "(User preferences learned over time)\n\n");
+            fprintf(fp, "## Important Notes\n\n");
+            fprintf(fp, "(Things to remember)\n");
+            fclose(fp);
+            printf("[dim]Created memory/MEMORY.md[/dim]\n");
         }
     }
 

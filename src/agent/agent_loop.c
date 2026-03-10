@@ -1,6 +1,7 @@
 #include "agent_loop.h"
 #include "../include/common.h"
 #include "../include/logger.h"
+#include "../tools/tools_impl.h"
 
 AgentLoop* agent_loop_new(SessionManager* session_mgr, ContextBuilder* ctx_builder, ToolRegistry* tool_reg, MessageBus* bus, Config* config) {
     AgentLoop* loop = malloc(sizeof(AgentLoop));
@@ -42,6 +43,13 @@ void agent_loop_run(AgentLoop* loop) {
             continue;
         }
         
+        // Check for exit command
+        if (strcmp(inbound->channel.data, "system") == 0 && strcmp(inbound->content.data, "exit") == 0) {
+            loop->running = false;
+            inbound_message_free(inbound);
+            break;
+        }
+
         // Skip empty messages
         if (inbound->content.len == 0) {
             inbound_message_free(inbound);
@@ -61,6 +69,14 @@ void agent_loop_run(AgentLoop* loop) {
         session_add_message(session, user_msg);
         
         // Multi-turn loop for tool calls
+        {
+            Tool* cron_tool = tool_registry_get(loop->tool_reg, "cron");
+            if (cron_tool && cron_tool->user_data) {
+                tool_context_set_route((ToolContext*) cron_tool->user_data,
+                                       inbound->channel.data, inbound->chat_id.data);
+            }
+        }
+
         int max_turns = 10;
         int turn = 0;
         bool conversation_turn_done = false;

@@ -21,6 +21,11 @@ typedef struct {
 } HeartbeatConfig;
 
 typedef struct {
+    char* level;
+    bool console_output;
+} LogConfig;
+
+typedef struct {
     bool enabled;
     char* api_key;
 } WebSearchConfig;
@@ -120,6 +125,7 @@ typedef struct Config {
     ToolConfig tools;
     HeartbeatConfig heartbeat;
     ChannelsConfig channels;
+    LogConfig log;
 } Config;
 
 Config* config_create();

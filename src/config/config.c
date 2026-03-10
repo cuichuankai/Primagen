@@ -1,5 +1,6 @@
 #include "../include/config.h"
 #include "../vendor/cJSON/cJSON.h"
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -76,6 +77,10 @@ Config* config_create() {
     cfg->heartbeat.enabled = true;
     cfg->heartbeat.interval_s = 300;
 
+    // Default log config
+    cfg->log.level = strdup("INFO");
+    cfg->log.console_output = false;
+
     // Default channels config
     cfg->channels.telegram.enabled = false;
     cfg->channels.telegram.token = strdup("");
@@ -139,6 +144,8 @@ void config_destroy(Config* cfg) {
     free(cfg->tools.exec.path_append);
     free(cfg->tools.web.search.api_key);
     free(cfg->tools.web.proxy);
+    
+    free(cfg->log.level);
     
     free(cfg->channels.telegram.token);
     string_array_free(&cfg->channels.telegram.allow_from);
@@ -291,6 +298,17 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
         if ((item = cJSON_GetObjectItem(heartbeat, "interval_s"))) cfg->heartbeat.interval_s = get_json_int(item, 300);
     }
     
+    // Log Config
+    cJSON* log = cJSON_GetObjectItem(json, "log");
+    if (log) {
+        cJSON* item;
+        if ((item = cJSON_GetObjectItem(log, "level"))) {
+            free(cfg->log.level);
+            cfg->log.level = get_json_string(item, "INFO");
+        }
+        if ((item = cJSON_GetObjectItem(log, "consoleOutput"))) cfg->log.console_output = get_json_bool(item, true);
+    }
+
     // Channels Config
     cJSON* channels = cJSON_GetObjectItem(json, "channels");
     if (channels) {
@@ -421,6 +439,12 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
     cJSON_AddNumberToObject(heartbeat, "interval_s", cfg->heartbeat.interval_s);
     cJSON_AddItemToObject(json, "heartbeat", heartbeat);
     
+    // Log
+    cJSON* log = cJSON_CreateObject();
+    cJSON_AddStringToObject(log, "level", cfg->log.level);
+    cJSON_AddBoolToObject(log, "consoleOutput", cfg->log.console_output);
+    cJSON_AddItemToObject(json, "log", log);
+
     // Channels
     cJSON* channels = cJSON_CreateObject();
     cJSON_AddBoolToObject(channels, "sendProgress", cfg->channels.send_progress);

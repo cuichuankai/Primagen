@@ -8,6 +8,15 @@
 
 static FILE* log_file = NULL;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int current_log_level = 1; // 0=DEBUG, 1=INFO, 2=ERROR
+static bool console_enabled = true;
+
+static int get_level_int(const char* level) {
+    if (strcmp(level, "DEBUG") == 0) return 0;
+    if (strcmp(level, "INFO") == 0) return 1;
+    if (strcmp(level, "ERROR") == 0) return 2;
+    return 1; // Default INFO
+}
 
 void logger_init(const char* log_file_path) {
     if (log_file) return;
@@ -16,6 +25,13 @@ void logger_init(const char* log_file_path) {
     if (!log_file) {
         fprintf(stderr, "Failed to open log file: %s\n", log_file_path);
     }
+}
+
+void logger_set_config(const char* level, bool console_output) {
+    pthread_mutex_lock(&log_mutex);
+    current_log_level = get_level_int(level ? level : "INFO");
+    console_enabled = console_output;
+    pthread_mutex_unlock(&log_mutex);
 }
 
 void logger_cleanup() {
@@ -28,6 +44,13 @@ void logger_cleanup() {
 static void log_v(const char* level, const char* fmt, va_list args) {
     pthread_mutex_lock(&log_mutex);
     
+    // Check level
+    int msg_level = get_level_int(level);
+    if (msg_level < current_log_level) {
+        pthread_mutex_unlock(&log_mutex);
+        return;
+    }
+    
     // Timestamp
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -36,22 +59,35 @@ static void log_v(const char* level, const char* fmt, va_list args) {
     char timestamp[64];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
     
-    // Format message
-    char message[4096];
-    vsnprintf(message, sizeof(message), fmt, args);
+    // Calculate required size
+    va_list args_copy;
+    va_copy(args_copy, args);
+    int len = vsnprintf(NULL, 0, fmt, args_copy);
+    va_end(args_copy);
     
-    // Remove trailing newline if present, as we add one
-    size_t len = strlen(message);
+    if (len < 0) {
+        pthread_mutex_unlock(&log_mutex);
+        return; 
+    }
+    
+    char* message = malloc(len + 1);
+    if (!message) {
+        pthread_mutex_unlock(&log_mutex);
+        return;
+    }
+    
+    vsnprintf(message, len + 1, fmt, args);
+    
+    // Remove trailing newline if present
     if (len > 0 && message[len-1] == '\n') {
         message[len-1] = '\0';
     }
     
     // Console output
-    FILE* out_stream = (strcmp(level, "ERROR") == 0) ? stderr : stdout;
-    // Don't print timestamp/level to console if it's already "formatted" by the app?
-    // User requested: "log输出要加上时间戳" (log output needs timestamp)
-    // So yes, add it.
-    fprintf(out_stream, "[%s] [%s] %s\n", timestamp, level, message);
+    if (console_enabled) {
+        FILE* out_stream = (strcmp(level, "ERROR") == 0) ? stderr : stdout;
+        fprintf(out_stream, "[%s] [%s] %s\n", timestamp, level, message);
+    }
     
     // File output
     if (log_file) {
@@ -59,6 +95,7 @@ static void log_v(const char* level, const char* fmt, va_list args) {
         fflush(log_file);
     }
     
+    free(message);
     pthread_mutex_unlock(&log_mutex);
 }
 

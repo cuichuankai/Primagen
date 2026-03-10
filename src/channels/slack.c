@@ -3,16 +3,38 @@
 #include "../bus/message_bus.h"
 #include "../include/message.h"
 #include "../vendor/cJSON/cJSON.h"
+#include "../vendor/mongoose/mongoose.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <curl/curl.h>
 
 typedef struct {
     SlackChannelConfig* config;
     MessageBus* bus;
     bool running;
 } SlackChannelData;
+
+struct MemoryStruct {
+    char *memory;
+    size_t size;
+    bool done;
+};
+
+static void fn(struct mg_connection *c, int ev, void *ev_data) {
+  struct MemoryStruct *ms = (struct MemoryStruct *) c->fn_data;
+  if (ev == MG_EV_HTTP_MSG) {
+    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+    size_t new_size = ms->size + hm->body.len;
+    ms->memory = realloc(ms->memory, new_size + 1);
+    memcpy(ms->memory + ms->size, hm->body.buf, hm->body.len);
+    ms->size = new_size;
+    ms->memory[ms->size] = '\0';
+    c->is_closing = 1;
+    ms->done = true;
+  } else if (ev == MG_EV_ERROR) {
+      ms->done = true;
+  }
+}
 
 static bool slack_init(Channel* self, Config* config, MessageBus* bus) {
     SlackChannelData* data = malloc(sizeof(SlackChannelData));
@@ -43,38 +65,61 @@ static void slack_send(Channel* self, OutboundMessage* msg) {
     // Only process messages meant for this channel
     if (strcmp(msg->channel.data, "slack") != 0) return;
 
-    CURL* curl = curl_easy_init();
-    if (curl) {
-        char url[] = "https://slack.com/api/chat.postMessage";
-        
-        struct curl_slist* headers = NULL;
-        char auth_header[256];
-        snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", data->config->bot_token);
-        headers = curl_slist_append(headers, auth_header);
-        headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
+    struct mg_mgr mgr;
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.memory[0] = '\0';
+    
+    mg_mgr_init(&mgr);
 
-        cJSON* json = cJSON_CreateObject();
-        cJSON_AddStringToObject(json, "channel", msg->chat_id.data);
-        cJSON_AddStringToObject(json, "text", msg->content.data);
-        char* json_str = cJSON_PrintUnformatted(json);
+    char url[] = "https://slack.com/api/chat.postMessage";
+    
+    cJSON* json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "channel", msg->chat_id.data);
+    cJSON_AddStringToObject(json, "text", msg->content.data);
+    char* json_str = cJSON_PrintUnformatted(json);
 
-        curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_POST, 1L);
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_str);
-
-        CURLcode res = curl_easy_perform(curl);
-        if (res != CURLE_OK) {
-            fprintf(stderr, "[Slack] Send failed: %s\n", curl_easy_strerror(res));
-        } else {
-            printf("[Slack] Sent to %s\n", msg->chat_id.data);
-        }
-
-        cJSON_Delete(json);
+    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
+    if (!c) {
+        fprintf(stderr, "[Slack] Send failed: connection error\n");
         free(json_str);
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
+        cJSON_Delete(json);
+        mg_mgr_free(&mgr);
+        free(chunk.memory);
+        return;
     }
+    
+    // struct mg_tls_opts opts = {0};
+    // opts.ca = mg_str("ca.pem");
+
+    struct mg_str host = mg_url_host(url);
+    mg_printf(c, 
+        "POST %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "Authorization: Bearer %s\r\n"
+        "Content-Type: application/json; charset=utf-8\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
+        "%s",
+        mg_url_uri(url), 
+        (int)host.len, host.buf,
+        data->config->bot_token,
+        (int)strlen(json_str),
+        json_str
+    );
+
+    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+    
+    if (chunk.size > 0) {
+        printf("[Slack] Sent to %s\n", msg->chat_id.data);
+    } else {
+        fprintf(stderr, "[Slack] Send failed: empty response\n");
+    }
+
+    cJSON_Delete(json);
+    free(json_str);
+    mg_mgr_free(&mgr);
+    free(chunk.memory);
 }
 
 static void slack_destroy(Channel* self) {

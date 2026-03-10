@@ -24,7 +24,15 @@ static void* console_input_loop(void* arg) {
         if (strcmp(buffer, "exit") == 0) {
             // Signal exit? For now just break loop, main will handle cleanup
             // Or send a system message
-            exit(0); // Simplified for CLI
+            // exit(0); // Simplified for CLI - DO NOT CALL EXIT in thread, it kills whole process abruptly
+            data->running = false; // Stop loop
+            // We should signal main thread to stop, but for now we just break and let main join
+            // Actually main joins agent_thread, which runs forever. 
+            // We need a way to stop agent loop.
+            // Sending a special message?
+            InboundMessage* msg = inbound_message_new("system", "local_user", "exit");
+            message_bus_send_inbound(data->bus, msg);
+            break;
         }
         
         if (strlen(buffer) > 0) {

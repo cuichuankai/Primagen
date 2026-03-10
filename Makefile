@@ -1,16 +1,42 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -std=c99 -pthread -I src/include -I src -I src/vendor
-LDFLAGS = -lcurl
+# Default target
+TARGET ?= macos
 
-OBJDIR = build
+# Android Configuration
+ANDROID_API ?= 24
+ANDROID_ARCH ?= aarch64
+ANDROID_HOST ?= darwin-x86_64
+
+ifeq ($(TARGET),android)
+    # Check if ANDROID_NDK_HOME is set
+    ifndef ANDROID_NDK
+        $(error ANDROID_NDK is not set)
+    endif
+
+    TOOLCHAIN = $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(ANDROID_HOST)
+    # Correct path for clang in newer NDKs
+    CC = $(TOOLCHAIN)/bin/aarch64-linux-android$(ANDROID_API)-clang
+    
+    # Android specific flags
+    CFLAGS = -Wall -Wextra -std=c99 -pthread -g -I src/include -I src -I src/vendor -DANDROID -DMG_TLS=MG_TLS_BUILTIN
+    LDFLAGS = -llog
+else
+    CC = gcc
+    CFLAGS = -Wall -Wextra -std=c99 -pthread -g -I src/include -I src -I src/vendor -DMG_TLS=MG_TLS_BUILTIN -DMG_ENABLE_LINES=1 -DMG_ENABLE_IPV6=1 -DMG_ENABLE_SSI=1 -DMG_UECC_SUPPORTS_secp256r1=1 -DMG_ENABLE_CHACHA20=0
+    LDFLAGS = 
+endif
+
+OBJDIR = build/
 SRCDIR = src
 
-.PHONY: all clean package dirs
+.PHONY: all clean package dirs android
+
+all: dirs $(OBJDIR)/primagen
 
 dirs:
 	@mkdir -p $(OBJDIR)
 
-all: dirs $(OBJDIR)/primagen
+android:
+	$(MAKE) TARGET=android all
 
 OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/common/message.o \
@@ -38,6 +64,7 @@ OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/channels/feishu_ws.o \
       $(OBJDIR)/cli/commands.o \
       $(OBJDIR)/vendor/cJSON/cJSON.o \
+      $(OBJDIR)/vendor/mongoose/mongoose.o \
       $(OBJDIR)/main.o
 
 $(OBJDIR)/primagen: $(OBJ)
@@ -107,12 +134,16 @@ $(OBJDIR)/vendor/cJSON/%.o: $(SRCDIR)/vendor/cJSON/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJDIR)/vendor/mongoose/%.o: $(SRCDIR)/vendor/mongoose/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(OBJDIR)/main.o: $(SRCDIR)/main.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 
-package: all
+package:
 	@echo "Creating self-extracting installer package..."
 	cp install.sh $(OBJDIR)/primagen_install.sh
 	mkdir -p $(OBJDIR)/.primagen
@@ -122,4 +153,4 @@ package: all
 	@echo "Package created: $(OBJDIR)/primagen_install.sh"
 
 clean:
-	rm -rf $(OBJDIR)
+	rm -rf build
