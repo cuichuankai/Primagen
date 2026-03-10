@@ -158,7 +158,7 @@ void register_all_tools(ToolRegistry* reg, ToolContext* ctx) {
     tool_registry_register(reg, "spawn_subagent", "Spawn subagent", 
         "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"task\"]}", 
         tool_spawn, ctx);
-    tool_registry_register(reg, "cron", "Schedule a job. Formats: '@every N' (recurring seconds), '@in N' (once after N seconds), '@at N' (once at timestamp)", 
+    tool_registry_register(reg, "cron", "Schedule a job. Formats: '@every N', '@in N', '@at N', or daily cron 'M H * * *' in local time", 
         "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"payload\":{\"type\":\"string\"},\"schedule\":{\"type\":\"string\"},\"channel\":{\"type\":\"string\"},\"chat_id\":{\"type\":\"string\"}},\"required\":[\"name\",\"payload\",\"schedule\"]}", 
         tool_cron, ctx);
     tool_registry_register(reg, "skill", "Manage skills", 
@@ -785,7 +785,7 @@ Error tool_cron(void* user_data, const char* args_json, String* result) {
         *result = string_new(msg);
         free(job_id);
     } else {
-        *result = string_new("Failed to schedule job");
+        *result = string_new("Failed to schedule job: invalid schedule format");
     }
     
     cJSON_Delete(json);

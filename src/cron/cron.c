@@ -24,6 +24,76 @@ struct CronService {
     JobNode* jobs;
 };
 
+typedef enum {
+    CRON_SCHEDULE_INVALID = 0,
+    CRON_SCHEDULE_ONE_TIME = 1,
+    CRON_SCHEDULE_RECURRING = 2
+} CronScheduleType;
+
+static bool parse_daily_schedule(const char* schedule, int* hour, int* minute) {
+    if (!schedule || !hour || !minute) return false;
+    int parsed_hour = -1;
+    int parsed_minute = -1;
+    char dom[8] = {0};
+    char mon[8] = {0};
+    char dow[8] = {0};
+    char extra[8] = {0};
+    int count = sscanf(schedule, "%d %d %7s %7s %7s %7s",
+                       &parsed_minute, &parsed_hour, dom, mon, dow, extra);
+    if (count != 5) return false;
+    if (parsed_hour < 0 || parsed_hour > 23 || parsed_minute < 0 || parsed_minute > 59) return false;
+    if (strcmp(dom, "*") != 0 || strcmp(mon, "*") != 0 || strcmp(dow, "*") != 0) return false;
+    *hour = parsed_hour;
+    *minute = parsed_minute;
+    return true;
+}
+
+static time_t next_daily_run(time_t now, int hour, int minute) {
+    struct tm local_tm;
+    localtime_r(&now, &local_tm);
+    local_tm.tm_hour = hour;
+    local_tm.tm_min = minute;
+    local_tm.tm_sec = 0;
+    time_t next = mktime(&local_tm);
+    if (next <= now) {
+        local_tm.tm_mday += 1;
+        next = mktime(&local_tm);
+    }
+    return next;
+}
+
+static CronScheduleType cron_schedule_next_run(const char* schedule, time_t now, time_t* out_next_run) {
+    if (!out_next_run) return CRON_SCHEDULE_INVALID;
+    if (!schedule || schedule[0] == '\0') {
+        *out_next_run = now;
+        return CRON_SCHEDULE_ONE_TIME;
+    }
+    if (strncmp(schedule, "@every ", 7) == 0) {
+        int interval = atoi(schedule + 7);
+        if (interval <= 0) interval = 60;
+        *out_next_run = now + interval;
+        return CRON_SCHEDULE_RECURRING;
+    }
+    if (strncmp(schedule, "@in ", 4) == 0) {
+        int delay = atoi(schedule + 4);
+        if (delay <= 0) delay = 1;
+        *out_next_run = now + delay;
+        return CRON_SCHEDULE_ONE_TIME;
+    }
+    if (strncmp(schedule, "@at ", 4) == 0) {
+        long timestamp = atol(schedule + 4);
+        *out_next_run = (time_t)timestamp;
+        return CRON_SCHEDULE_ONE_TIME;
+    }
+    int hour = 0;
+    int minute = 0;
+    if (parse_daily_schedule(schedule, &hour, &minute)) {
+        *out_next_run = next_daily_run(now, hour, minute);
+        return CRON_SCHEDULE_RECURRING;
+    }
+    return CRON_SCHEDULE_INVALID;
+}
+
 static void free_job(CronJob* job) {
     if (!job) return;
     free(job->id);
@@ -182,41 +252,27 @@ static void* cron_worker(void* arg) {
         
         while (current) {
             if (current->job.next_run <= now) {
-                // Time to run!
                 if (service->callback) {
-                    // Release lock during callback to avoid deadlock
                     pthread_mutex_unlock(&service->mutex);
                     service->callback(&current->job);
                     pthread_mutex_lock(&service->mutex);
-                    
-                    // Re-acquire current/prev pointers as list might have changed?
-                    // Ideally we should restart or be very careful.
-                    // For simplicity, let's assume list structure didn't change wildly,
-                    // but removing current node needs care.
                 }
-                
-                // Update next_run or remove
+
                 bool remove = false;
-                if (current->job.schedule) {
-                    if (strncmp(current->job.schedule, "@every ", 7) == 0) {
-                        int interval = atoi(current->job.schedule + 7);
-                        if (interval <= 0) interval = 60;
-                        current->job.next_run = now + interval;
-                        modified = true;
-                    } else if (strncmp(current->job.schedule, "@in ", 4) == 0 ||
-                               strncmp(current->job.schedule, "@at ", 4) == 0) {
-                        // One-time job, remove
-                        remove = true;
-                    } else {
-                        // Unknown or default, treat as one-time? Or cron expr?
-                        // Treat as one-time for safety
-                        remove = true;
-                    }
+                time_t next_run = 0;
+                CronScheduleType schedule_type = cron_schedule_next_run(current->job.schedule, now, &next_run);
+                if (schedule_type == CRON_SCHEDULE_RECURRING) {
+                    current->job.next_run = next_run;
+                    modified = true;
+                } else if (schedule_type == CRON_SCHEDULE_ONE_TIME) {
+                    remove = true;
                 } else {
-                    // One-time job
+                    if (current->job.schedule) {
+                        log_error("[Cron] Invalid schedule in runtime, removing job: %s", current->job.schedule);
+                    }
                     remove = true;
                 }
-                
+
                 if (remove) {
                     JobNode* to_free = current;
                     if (prev) {
@@ -323,29 +379,16 @@ char* cron_service_add_job(CronService* service, const CronJob* job) {
         node->job.id = strdup(id);
     }
     
-    // Calculate initial next_run based on schedule
     time_t now = time(NULL);
-    if (node->job.schedule) {
-        if (strncmp(node->job.schedule, "@every ", 7) == 0) {
-            int interval = atoi(node->job.schedule + 7);
-            if (interval <= 0) interval = 60;
-            node->job.next_run = now + interval;
-        } else if (strncmp(node->job.schedule, "@in ", 4) == 0) {
-            int delay = atoi(node->job.schedule + 4);
-            if (delay <= 0) delay = 1;
-            node->job.next_run = now + delay;
-        } else if (strncmp(node->job.schedule, "@at ", 4) == 0) {
-            long timestamp = atol(node->job.schedule + 4);
-            node->job.next_run = (time_t)timestamp;
-        } else {
-             // Fallback
-             node->job.next_run = now;
-        }
-    } else {
-        // Run immediately if no schedule
-        if (node->job.next_run == 0) node->job.next_run = now;
+    CronScheduleType schedule_type = cron_schedule_next_run(node->job.schedule, now, &node->job.next_run);
+    if (schedule_type == CRON_SCHEDULE_INVALID) {
+        log_error("[Cron] Invalid schedule format: %s", node->job.schedule ? node->job.schedule : "(null)");
+        free_job(&node->job);
+        free(node);
+        pthread_mutex_unlock(&service->mutex);
+        return NULL;
     }
-    
+
     node->next = service->jobs;
     service->jobs = node;
     

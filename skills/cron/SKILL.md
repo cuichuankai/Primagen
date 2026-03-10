@@ -7,51 +7,41 @@ description: Schedule reminders and recurring tasks.
 
 Use the `cron` tool to schedule reminders or recurring tasks.
 
-## Three Modes
+## Parameters
 
-1. **Reminder** - message is sent directly to user
-2. **Task** - message is a task description, agent executes and sends result
-3. **One-time** - runs once at a specific time, then auto-deletes
+`cron(name, payload, schedule, channel?, chat_id?)`
+
+- `name`: job name
+- `payload`: reminder content
+- `schedule`: `@every N`, `@in N`, `@at TIMESTAMP`, or daily cron `M H * * *`
+- `channel`: optional, defaults to current session channel
+- `chat_id`: optional, defaults to current session chat_id
 
 ## Examples
 
 Fixed reminder:
 ```
-cron(action="add", message="Time to take a break!", every_seconds=1200)
+cron(name="coffee-break", payload="Time to take a break!", schedule="@every 1200")
 ```
 
-Dynamic task (agent executes each time):
+One-time reminder:
 ```
-cron(action="add", message="Check HKUDS/nanobot GitHub stars and report", every_seconds=600)
-```
-
-One-time scheduled task (compute ISO datetime from current time):
-```
-cron(action="add", message="Remind me about the meeting", at="<ISO datetime>")
+cron(name="meeting-reminder", payload="Remind me about the meeting", schedule="@in 1800")
 ```
 
-Timezone-aware cron:
+Daily 9:30 reminder:
 ```
-cron(action="add", message="Morning standup", cron_expr="0 9 * * 1-5", tz="America/Vancouver")
-```
-
-List/remove:
-```
-cron(action="list")
-cron(action="remove", job_id="abc123")
+cron(name="morning-coffee", payload="Drink coffee", schedule="30 9 * * *")
 ```
 
 ## Time Expressions
 
 | User says | Parameters |
 |-----------|------------|
-| every 20 minutes | every_seconds: 1200 |
-| every hour | every_seconds: 3600 |
-| every day at 8am | cron_expr: "0 8 * * *" |
-| weekdays at 5pm | cron_expr: "0 17 * * 1-5" |
-| 9am Vancouver time daily | cron_expr: "0 9 * * *", tz: "America/Vancouver" |
-| at a specific time | at: ISO datetime string (compute from current time) |
-
-## Timezone
-
-Use `tz` with `cron_expr` to schedule in a specific IANA timezone. Without `tz`, the server's local timezone is used.
+| every 20 minutes | `schedule: "@every 1200"` |
+| every hour | `schedule: "@every 3600"` |
+| every day at 8am | `schedule: "0 8 * * *"` |
+| 9:30am daily | `schedule: "30 9 * * *"` |
+| after 10 minutes | `schedule: "@in 600"` |
+| at unix timestamp | `schedule: "@at 1760000000"` |
+Daily cron format uses server local timezone.
