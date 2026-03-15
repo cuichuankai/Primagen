@@ -6,7 +6,9 @@
 
 typedef struct SkillsLoader SkillsLoader;
 
+/* Create with optional builtin skills directory */
 SkillsLoader* skills_loader_create(const char* workspace);
+SkillsLoader* skills_loader_create_with_builtin(const char* workspace, const char* builtin_skills_dir);
 void skills_loader_destroy(SkillsLoader* loader);
 
 StringArray* skills_loader_list_skills(SkillsLoader* loader, bool filter_unavailable);

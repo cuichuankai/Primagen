@@ -1,4 +1,5 @@
 #include "tools_impl.h"
+#include "tool_validation.h"
 #include "../vendor/cJSON/cJSON.h"
 #include "../bus/message_bus.h"
 #include "../vendor/mongoose/mongoose.h"
@@ -11,6 +12,9 @@
 #include <ctype.h>
 
 #define MAX_READ_SIZE 128000
+
+// Error hint for tool failures (helps LLM recover)
+#define TOOL_ERROR_HINT "\n\n[Analyze the error above and try a different approach.]"
 
 // Helper struct for mongoose response
 struct MemoryStruct {
@@ -155,11 +159,11 @@ void register_all_tools(ToolRegistry* reg, ToolContext* ctx) {
     tool_registry_register(reg, "send_message", "Send message to user", 
         "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"}},\"required\":[\"content\"]}", 
         tool_send_message, ctx);
-    tool_registry_register(reg, "spawn_subagent", "Spawn subagent", 
-        "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"task\"]}", 
+    tool_registry_register(reg, "spawn_subagent", "Spawn subagent",
+        "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"task\"]}",
         tool_spawn, ctx);
-    tool_registry_register(reg, "cron", "Schedule a job. Formats: '@every N', '@in N', '@at N', or daily cron 'M H * * *' in local time", 
-        "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"payload\":{\"type\":\"string\"},\"schedule\":{\"type\":\"string\"},\"channel\":{\"type\":\"string\"},\"chat_id\":{\"type\":\"string\"}},\"required\":[\"name\",\"payload\",\"schedule\"]}", 
+    tool_registry_register(reg, "cron", "Schedule a reminder or recurring task. Use for future notifications. Formats: '@in N' (N seconds later, one-time), '@every N' (recurring), '@at TIMESTAMP', or 'M H * * *' (daily cron). Example: schedule a drink water reminder with name='drink-water', payload='该喝水了！', schedule='@in 1800' for 30 minutes.",
+        "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Unique job identifier, e.g., 'drink-water', 'stand-up'\"},\"payload\":{\"type\":\"string\",\"description\":\"Message content to deliver when triggered\"},\"schedule\":{\"type\":\"string\",\"description\":\"When to trigger: '@in N' (N seconds), '@every N', '@at UNIX_TIMESTAMP', or 'M H * * *'\"},\"channel\":{\"type\":\"string\"},\"chat_id\":{\"type\":\"string\"}},\"required\":[\"name\",\"payload\",\"schedule\"]}",
         tool_cron, ctx);
     tool_registry_register(reg, "skill", "Manage skills", 
         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"load\",\"unload\"]},\"name\":{\"type\":\"string\"}},\"required\":[\"action\"]}", 
@@ -265,9 +269,27 @@ Error tool_skill(void* user_data, const char* args_json, String* result) {
 
 Error tool_read_file(void* user_data, const char* args_json, String* result) {
     (void)user_data;
-    cJSON* json = cJSON_Parse(args_json);
-    if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
-    
+
+    // Validate and cast parameters
+    char* error_msg = NULL;
+    char* casted_args = tool_validate_and_cast_params(args_json,
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
+        &error_msg);
+
+    if (error_msg) {
+        char* full_error = malloc(strlen(error_msg) + strlen(TOOL_ERROR_HINT) + 1);
+        strcpy(full_error, error_msg);
+        strcat(full_error, TOOL_ERROR_HINT);
+        *result = string_new(full_error);
+        free(full_error);
+        free(error_msg);
+        free(casted_args);
+        return error_new(ERR_INVALID_PARAM, "Parameter validation failed");
+    }
+
+    cJSON* json = cJSON_Parse(casted_args);
+    free(casted_args);
+
     char* path = get_json_string(json, "path");
     if (!path) {
         cJSON_Delete(json);

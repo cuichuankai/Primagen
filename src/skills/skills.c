@@ -100,7 +100,7 @@ static char* get_frontmatter_value(const char* content, const char* key) {
     return value;
 }
 
-// Helper: Parse Nanobot metadata JSON from frontmatter "metadata" field
+/* Helper: Parse skill metadata JSON from frontmatter "metadata" field */
 static cJSON* get_skill_meta(const char* content) {
     char* meta_str = get_frontmatter_value(content, "metadata");
     if (!meta_str) return cJSON_CreateObject(); // Empty object
@@ -173,11 +173,15 @@ static bool check_requirements(cJSON* meta, char** missing_reason) {
 }
 
 SkillsLoader* skills_loader_create(const char* workspace) {
+    return skills_loader_create_with_builtin(workspace, NULL);
+}
+
+SkillsLoader* skills_loader_create_with_builtin(const char* workspace, const char* builtin_skills_dir) {
     SkillsLoader* loader = malloc(sizeof(SkillsLoader));
     if (!loader) return NULL;
 
     loader->workspace = strdup(workspace);
-    loader->builtin_skills_dir = NULL; // Not used in this version, assuming skills are in workspace
+    loader->builtin_skills_dir = builtin_skills_dir ? strdup(builtin_skills_dir) : NULL;
 
     return loader;
 }
@@ -219,50 +223,100 @@ static char* escape_xml(const char* s) {
     return out;
 }
 
+// Helper: Check if skill name already exists in array
+static bool skill_name_exists(StringArray* arr, const char* name) {
+    for (size_t i = 0; i < arr->count; i++) {
+        if (strcmp(arr->items[i].data, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Helper: Add a skill to array if valid
+static void add_skill_if_valid_to_array(StringArray* arr, const char* name, const char* base_dir, bool filter_unavailable) {
+    char skill_path[1024];
+    snprintf(skill_path, sizeof(skill_path), "%s/%s/SKILL.md", base_dir, name);
+
+    if (!file_exists(skill_path)) return;
+
+    if (filter_unavailable) {
+        char* content = read_file(skill_path);
+        if (content) {
+            cJSON* meta = get_skill_meta(content);
+            bool available = check_requirements(meta, NULL);
+            cJSON_Delete(meta);
+            free(content);
+
+            if (available && !skill_name_exists(arr, name)) {
+                string_array_add(arr, name);
+            }
+        }
+    } else {
+        if (!skill_name_exists(arr, name)) {
+            string_array_add(arr, name);
+        }
+    }
+}
+
 StringArray* skills_loader_list_skills(SkillsLoader* loader, bool filter_unavailable) {
     StringArray* arr = malloc(sizeof(StringArray));
     *arr = string_array_new();
-    
+
+    // First: Workspace skills (highest priority)
     char skills_dir[512];
     snprintf(skills_dir, sizeof(skills_dir), "%s/skills", loader->workspace);
-    
+
     DIR* dir = opendir(skills_dir);
-    if (!dir) return arr;
-    
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
-            char skill_path[1024];
-            snprintf(skill_path, sizeof(skill_path), "%s/%s/SKILL.md", skills_dir, entry->d_name);
-            
-            if (file_exists(skill_path)) {
-                if (filter_unavailable) {
-                    char* content = read_file(skill_path);
-                    if (content) {
-                        cJSON* meta = get_skill_meta(content);
-                        bool available = check_requirements(meta, NULL);
-                        cJSON_Delete(meta);
-                        free(content);
-                        
-                        if (available) {
-                            string_array_add(arr, entry->d_name);
-                        }
-                    }
-                } else {
-                    string_array_add(arr, entry->d_name);
-                }
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
+                add_skill_if_valid_to_array(arr, entry->d_name, skills_dir, filter_unavailable);
             }
         }
+        closedir(dir);
     }
-    
-    closedir(dir);
+
+    // Second: Builtin skills
+    if (loader->builtin_skills_dir) {
+        dir = opendir(loader->builtin_skills_dir);
+        if (dir) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
+                    add_skill_if_valid_to_array(arr, entry->d_name, loader->builtin_skills_dir, filter_unavailable);
+                }
+            }
+            closedir(dir);
+        }
+    }
+
     return arr;
 }
 
 char* skills_loader_load_skill(SkillsLoader* loader, const char* name) {
-    char skill_path[1024];
-    snprintf(skill_path, sizeof(skill_path), "%s/skills/%s/SKILL.md", loader->workspace, name);
-    return read_file(skill_path);
+    if (!loader || !name) return NULL;
+
+    // First: Check workspace skills (highest priority)
+    char workspace_skill_path[1024];
+    snprintf(workspace_skill_path, sizeof(workspace_skill_path), "%s/skills/%s/SKILL.md", loader->workspace, name);
+
+    if (file_exists(workspace_skill_path)) {
+        return read_file(workspace_skill_path);
+    }
+
+    // Second: Check builtin skills
+    if (loader->builtin_skills_dir) {
+        char builtin_skill_path[1024];
+        snprintf(builtin_skill_path, sizeof(builtin_skill_path), "%s/%s/SKILL.md", loader->builtin_skills_dir, name);
+
+        if (file_exists(builtin_skill_path)) {
+            return read_file(builtin_skill_path);
+        }
+    }
+
+    return NULL;
 }
 
 char* skills_loader_load_skills_for_context(SkillsLoader* loader, StringArray* skill_names) {
@@ -312,121 +366,174 @@ char* skills_loader_load_skills_for_context(SkillsLoader* loader, StringArray* s
     return result;
 }
 
-char* skills_loader_build_skills_summary(SkillsLoader* loader) {
-    char skills_dir[512];
-    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", loader->workspace);
-    
-    DIR* dir = opendir(skills_dir);
-    if (!dir) {
-        log_error("Failed to open skills directory: %s", skills_dir);
-        return strdup("<skills></skills>");
+// Helper struct for building skills summary
+typedef struct {
+    char* xml;
+    size_t cap;
+    int count;
+} SkillsSummaryCtx;
+
+// Helper: Add a skill to XML summary
+static void add_skill_xml(SkillsSummaryCtx* ctx, const char* name, const char* base_dir) {
+    char skill_path[1024];
+    snprintf(skill_path, sizeof(skill_path), "%s/%s/SKILL.md", base_dir, name);
+
+    if (!file_exists(skill_path)) return;
+
+    char* content = read_file(skill_path);
+    if (!content) return;
+
+    ctx->count++;
+    char* desc = get_frontmatter_value(content, "description");
+    if (!desc) desc = strdup(name);
+
+    cJSON* meta = get_skill_meta(content);
+    char* missing = NULL;
+    bool available = check_requirements(meta, &missing);
+
+    char* name_esc = escape_xml(name);
+    char* desc_esc = escape_xml(desc);
+
+    // Check buffer size
+    if (strlen(ctx->xml) + 1000 > ctx->cap) {
+        ctx->cap *= 2;
+        ctx->xml = realloc(ctx->xml, ctx->cap);
     }
-    
-    // Use dynamic string or simple large buffer for now
+
+    char chunk[2048];
+    snprintf(chunk, sizeof(chunk),
+        "  <skill available=\"%s\">\n"
+        "    <name>%s</name>\n"
+        "    <description>%s</description>\n"
+        "    <location>%s</location>\n",
+        available ? "true" : "false",
+        name_esc, desc_esc, skill_path);
+
+    strcat(ctx->xml, chunk);
+
+    if (!available && missing) {
+        char* missing_esc = escape_xml(missing);
+        snprintf(chunk, sizeof(chunk), "    <requires>%s</requires>\n", missing_esc);
+        strcat(ctx->xml, chunk);
+        free(missing_esc);
+    }
+
+    strcat(ctx->xml, "  </skill>\n");
+
+    free(name_esc);
+    free(desc_esc);
+    free(desc);
+    if (missing) free(missing);
+    cJSON_Delete(meta);
+    free(content);
+}
+
+char* skills_loader_build_skills_summary(SkillsLoader* loader) {
     size_t cap = 16384;
     char* xml = malloc(cap);
+    if (!xml) return strdup("<skills></skills>");
+
     xml[0] = 0;
     strcat(xml, "<skills>\n");
-    
-    int count = 0;
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
-            char skill_path[1024];
-            snprintf(skill_path, sizeof(skill_path), "%s/%s/SKILL.md", skills_dir, entry->d_name);
-            
-            if (file_exists(skill_path)) {
-                char* content = read_file(skill_path);
-                if (content) {
-                    count++;
-                    char* desc = get_frontmatter_value(content, "description");
-                    if (!desc) desc = strdup(entry->d_name);
-                    
-                    cJSON* meta = get_skill_meta(content);
-                    char* missing = NULL;
-                    bool available = check_requirements(meta, &missing);
-                    
-                    char* name_esc = escape_xml(entry->d_name);
-                    char* desc_esc = escape_xml(desc);
-                    
-                    // Append XML
-                    // Check buffer size (rudimentary)
-                    if (strlen(xml) + 1000 > cap) {
-                        cap *= 2;
-                        xml = realloc(xml, cap);
-                    }
-                    
-                    char chunk[2048];
-                    snprintf(chunk, sizeof(chunk), 
-                        "  <skill available=\"%s\">\n"
-                        "    <name>%s</name>\n"
-                        "    <description>%s</description>\n"
-                        "    <location>%s</location>\n",
-                        available ? "true" : "false",
-                        name_esc, desc_esc, skill_path);
-                        
-                    strcat(xml, chunk);
-                    
-                    if (!available && missing) {
-                         char* missing_esc = escape_xml(missing);
-                         snprintf(chunk, sizeof(chunk), "    <requires>%s</requires>\n", missing_esc);
-                         strcat(xml, chunk);
-                         free(missing_esc);
-                    }
-                    
-                    strcat(xml, "  </skill>\n");
-                    
-                    free(name_esc);
-                    free(desc_esc);
-                    free(desc);
-                    if (missing) free(missing);
-                    cJSON_Delete(meta);
-                    free(content);
+
+    SkillsSummaryCtx ctx;
+    ctx.xml = xml;
+    ctx.cap = cap;
+    ctx.count = 0;
+
+    // First: Workspace skills
+    char skills_dir[512];
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", loader->workspace);
+
+    DIR* dir = opendir(skills_dir);
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
+                add_skill_xml(&ctx, entry->d_name, skills_dir);
+            }
+        }
+        closedir(dir);
+    }
+
+    // Second: Builtin skills
+    if (loader->builtin_skills_dir) {
+        dir = opendir(loader->builtin_skills_dir);
+        if (dir) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
+                    add_skill_xml(&ctx, entry->d_name, loader->builtin_skills_dir);
                 }
+            }
+            closedir(dir);
+        }
+    }
+
+    strcat(xml, "</skills>");
+    log_info("Loaded %d skills", ctx.count);
+    return xml;
+}
+
+// Helper: Check and add always skill
+static void check_always_skill(StringArray* arr, const char* name, const char* base_dir) {
+    char skill_path[1024];
+    snprintf(skill_path, sizeof(skill_path), "%s/%s/SKILL.md", base_dir, name);
+
+    if (!file_exists(skill_path)) return;
+
+    char* content = read_file(skill_path);
+    if (!content) return;
+
+    cJSON* meta = get_skill_meta(content);
+    cJSON* always = cJSON_GetObjectItem(meta, "always");
+
+    if (cJSON_IsTrue(always)) {
+        if (check_requirements(meta, NULL)) {
+            if (!skill_name_exists(arr, name)) {
+                string_array_add(arr, name);
             }
         }
     }
-    
-    strcat(xml, "</skills>");
-    closedir(dir);
-    log_info("Loaded %d skills from %s", count, skills_dir);
-    return xml;
+
+    cJSON_Delete(meta);
+    free(content);
 }
 
 StringArray* skills_loader_get_always_skills(SkillsLoader* loader) {
     StringArray* arr = malloc(sizeof(StringArray));
     *arr = string_array_new();
-    
+
+    if (!loader) return arr;
+
+    // First: Workspace skills
     char skills_dir[512];
     snprintf(skills_dir, sizeof(skills_dir), "%s/skills", loader->workspace);
-    
+
     DIR* dir = opendir(skills_dir);
-    if (!dir) return arr;
-    
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
-            char skill_path[1024];
-            snprintf(skill_path, sizeof(skill_path), "%s/%s/SKILL.md", skills_dir, entry->d_name);
-            
-            if (file_exists(skill_path)) {
-                char* content = read_file(skill_path);
-                if (content) {
-                    cJSON* meta = get_skill_meta(content);
-                    // Check always flag
-                    cJSON* always = cJSON_GetObjectItem(meta, "always");
-                    if (cJSON_IsTrue(always)) {
-                         if (check_requirements(meta, NULL)) {
-                             string_array_add(arr, entry->d_name);
-                         }
-                    }
-                    cJSON_Delete(meta);
-                    free(content);
-                }
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
+                check_always_skill(arr, entry->d_name, skills_dir);
             }
         }
+        closedir(dir);
     }
-    
-    closedir(dir);
+
+    // Second: Builtin skills
+    if (loader->builtin_skills_dir) {
+        dir = opendir(loader->builtin_skills_dir);
+        if (dir) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
+                    check_always_skill(arr, entry->d_name, loader->builtin_skills_dir);
+                }
+            }
+            closedir(dir);
+        }
+    }
+
     return arr;
 }

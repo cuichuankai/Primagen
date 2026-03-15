@@ -15,20 +15,20 @@ ifeq ($(TARGET),android)
     TOOLCHAIN = $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(ANDROID_HOST)
     # Correct path for clang in newer NDKs
     CC = $(TOOLCHAIN)/bin/aarch64-linux-android$(ANDROID_API)-clang
-    
+
     # Android specific flags
     CFLAGS = -Wall -Wextra -std=c99 -pthread -g -I src/include -I src -I src/vendor -DANDROID -DMG_TLS=MG_TLS_BUILTIN
     LDFLAGS = -llog
 else
     CC = gcc
     CFLAGS = -Wall -Wextra -std=c99 -pthread -g -I src/include -I src -I src/vendor -DMG_TLS=MG_TLS_BUILTIN -DMG_ENABLE_LINES=1 -DMG_ENABLE_IPV6=1 -DMG_ENABLE_SSI=1 -DMG_UECC_SUPPORTS_secp256r1=1 -DMG_ENABLE_CHACHA20=0
-    LDFLAGS = 
+    LDFLAGS =
 endif
 
 OBJDIR = build/
 SRCDIR = src
 
-.PHONY: all clean package dirs android
+.PHONY: all clean package dirs android test
 
 all: dirs $(OBJDIR)/primagen
 
@@ -38,11 +38,45 @@ dirs:
 android:
 	$(MAKE) TARGET=android all
 
+# Test target
+test: dirs $(OBJDIR)/unit_tests
+	@echo "Running unit tests..."
+	@$(OBJDIR)/unit_tests
+
+$(OBJDIR)/unit_tests: $(OBJDIR)/unit_tests.o $(OBJDIR)/test_common.o $(OBJDIR)/test_message.o $(OBJDIR)/test_utils.o $(OBJDIR)/test_tool_validation.o $(OBJDIR)/test_cJSON.o $(OBJDIR)/test_config.o $(OBJDIR)/test_mcp.o $(OBJDIR)/test_transport_stdio.o $(OBJDIR)/test_logger.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(OBJDIR)/unit_tests.o: tests/unit_tests.c
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/test_%.o: src/common/%.c
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/test_%.o: src/tools/%.c
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/test_%.o: src/config/%.c
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/test_%.o: src/mcp/%.c
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/test_cJSON.o: src/vendor/cJSON/cJSON.c
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/common/message.o \
       $(OBJDIR)/common/logger.o \
+      $(OBJDIR)/common/utils.o \
       $(OBJDIR)/tools/tool.o \
       $(OBJDIR)/tools/tools_impl.o \
+      $(OBJDIR)/tools/tool_validation.o \
       $(OBJDIR)/session/session.o \
       $(OBJDIR)/memory/memory.o \
       $(OBJDIR)/context/context_builder.o \
@@ -54,6 +88,9 @@ OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/heartbeat/heartbeat.o \
       $(OBJDIR)/skills/skills.o \
       $(OBJDIR)/config/config.o \
+      $(OBJDIR)/mcp/mcp.o \
+      $(OBJDIR)/mcp/transport_stdio.o \
+      $(OBJDIR)/mcp/mcp_tools.o \
       $(OBJDIR)/channels/console.o \
       $(OBJDIR)/channels/telegram.o \
       $(OBJDIR)/channels/email.o \
@@ -119,6 +156,10 @@ $(OBJDIR)/skills/%.o: $(SRCDIR)/skills/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/config/%.o: $(SRCDIR)/config/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/mcp/%.o: $(SRCDIR)/mcp/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 

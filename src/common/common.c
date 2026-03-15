@@ -2,6 +2,12 @@
 
 String string_new(const char* str) {
     String s;
+    if (!str) {
+        s.len = 0;
+        s.data = malloc(1);
+        if (s.data) s.data[0] = '\0';
+        return s;
+    }
     s.len = strlen(str);
     s.data = malloc(s.len + 1);
     if (!s.data) {
@@ -25,6 +31,7 @@ String string_copy(const String* s) {
 }
 
 void string_append(String* s, const char* str) {
+    if (!str) return;
     size_t str_len = strlen(str);
     s->data = realloc(s->data, s->len + str_len + 1);
     if (!s->data) return;

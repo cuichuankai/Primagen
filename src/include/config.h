@@ -109,6 +109,21 @@ typedef struct {
 } WhatsAppChannelConfig;
 
 typedef struct {
+    char* server_id;
+    char* transport_type;  // "stdio", "sse", "websocket"
+    char* command;
+    StringArray args;
+    EnvVarArray env;       // Environment variables for this server
+} MCPServerConfig;
+
+typedef struct {
+    MCPServerConfig* servers;
+    size_t server_count;
+    size_t server_capacity;
+    bool enabled;
+} MCPConfig;
+
+typedef struct {
     TelegramChannelConfig telegram;
     EmailChannelConfig email;
     DiscordChannelConfig discord;
@@ -125,6 +140,7 @@ typedef struct Config {
     ToolConfig tools;
     HeartbeatConfig heartbeat;
     ChannelsConfig channels;
+    MCPConfig mcp;
     LogConfig log;
 } Config;
 
@@ -135,8 +151,12 @@ AgentConfig* config_get_agent_config(Config* cfg);
 ToolConfig* config_get_tool_config(Config* cfg);
 HeartbeatConfig* config_get_heartbeat_config(Config* cfg);
 ChannelsConfig* config_get_channels_config(Config* cfg);
+MCPConfig* config_get_mcp_config(Config* cfg);
 
 bool config_load_from_file(Config* cfg, const char* filepath);
 bool config_save_to_file(Config* cfg, const char* filepath);
+
+// Environment variable overrides (env takes precedence over file)
+void config_load_from_env(Config* cfg);
 
 #endif // CONFIG_H

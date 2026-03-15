@@ -7,6 +7,31 @@
 
 // Struct definition moved to header
 
+// Helper functions for environment variables
+static const char* get_env_string(const char* key, const char* default_val) {
+    const char* val = getenv(key);
+    return val ? val : default_val;
+}
+
+static int get_env_int(const char* key, int default_val) {
+    const char* val = getenv(key);
+    if (!val) return default_val;
+    return atoi(val);
+}
+
+static double get_env_double(const char* key, double default_val) {
+    const char* val = getenv(key);
+    if (!val) return default_val;
+    return atof(val);
+}
+
+static bool get_env_bool(const char* key, bool default_val) {
+    const char* val = getenv(key);
+    if (!val) return default_val;
+    // Support common boolean formats: true/false, yes/no, 1/0
+    return (strcmp(val, "true") == 0 || strcmp(val, "yes") == 0 || strcmp(val, "1") == 0);
+}
+
 // Helper functions for cJSON
 static char* get_json_string(cJSON* item, const char* default_val) {
     if (cJSON_IsString(item) && (item->valuestring != NULL)) {
@@ -38,16 +63,54 @@ static bool get_json_bool(cJSON* item, bool default_val) {
 
 static void load_string_array(cJSON* array_item, StringArray* target) {
     if (!cJSON_IsArray(array_item)) return;
-    
+
     string_array_free(target);
     *target = string_array_new();
-    
+
     cJSON* item = NULL;
     cJSON_ArrayForEach(item, array_item) {
         if (cJSON_IsString(item)) {
             string_array_add(target, item->valuestring);
         }
     }
+}
+
+// EnvVarArray helper functions
+static EnvVarArray env_var_array_new() {
+    EnvVarArray arr;
+    arr.items = NULL;
+    arr.count = 0;
+    arr.capacity = 0;
+    return arr;
+}
+
+static void env_var_array_add(EnvVarArray* arr, const char* key, const char* value) {
+    if (!arr) return;
+    if (arr->count >= arr->capacity) {
+        size_t new_capacity = arr->capacity == 0 ? 4 : arr->capacity * 2;
+        EnvVar* new_items = realloc(arr->items, new_capacity * sizeof(EnvVar));
+        if (new_items) {
+            arr->items = new_items;
+            arr->capacity = new_capacity;
+        } else {
+            return;
+        }
+    }
+    arr->items[arr->count].key = strdup(key);
+    arr->items[arr->count].value = strdup(value);
+    arr->count++;
+}
+
+static void env_var_array_free(EnvVarArray* arr) {
+    if (!arr) return;
+    for (size_t i = 0; i < arr->count; i++) {
+        free(arr->items[i].key);
+        free(arr->items[i].value);
+    }
+    free(arr->items);
+    arr->items = NULL;
+    arr->count = 0;
+    arr->capacity = 0;
 }
 
 Config* config_create() {
@@ -131,6 +194,12 @@ Config* config_create() {
     cfg->channels.send_progress = true;
     cfg->channels.send_tool_hints = true;
 
+    // Default MCP config
+    cfg->mcp.enabled = false;
+    cfg->mcp.servers = NULL;
+    cfg->mcp.server_count = 0;
+    cfg->mcp.server_capacity = 0;
+
     return cfg;
 }
 
@@ -180,6 +249,16 @@ void config_destroy(Config* cfg) {
     free(cfg->channels.whatsapp.bridge_token);
     string_array_free(&cfg->channels.whatsapp.allow_from);
 
+    // Free MCP config
+    for (size_t i = 0; i < cfg->mcp.server_count; i++) {
+        free(cfg->mcp.servers[i].server_id);
+        free(cfg->mcp.servers[i].transport_type);
+        free(cfg->mcp.servers[i].command);
+        string_array_free(&cfg->mcp.servers[i].args);
+        env_var_array_free(&cfg->mcp.servers[i].env);
+    }
+    free(cfg->mcp.servers);
+
     free(cfg);
 }
 
@@ -197,6 +276,10 @@ HeartbeatConfig* config_get_heartbeat_config(Config* cfg) {
 
 ChannelsConfig* config_get_channels_config(Config* cfg) {
     return cfg ? &cfg->channels : NULL;
+}
+
+MCPConfig* config_get_mcp_config(Config* cfg) {
+    return cfg ? &cfg->mcp : NULL;
 }
 
 bool config_load_from_file(Config* cfg, const char* filepath) {
@@ -393,9 +476,237 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
             load_string_array(cJSON_GetObjectItem(whatsapp, "allowFrom"), &cfg->channels.whatsapp.allow_from);
         }
     }
-    
+
+    // MCP Config
+    cJSON* mcp = cJSON_GetObjectItem(json, "mcp");
+    if (mcp) {
+        cJSON* item;
+        if ((item = cJSON_GetObjectItem(mcp, "enabled"))) {
+            cfg->mcp.enabled = get_json_bool(item, false);
+        }
+
+        cJSON* servers = cJSON_GetObjectItem(mcp, "servers");
+        if (cJSON_IsArray(servers)) {
+            cJSON* server_item;
+            cJSON_ArrayForEach(server_item, servers) {
+                // Grow array if needed
+                if (cfg->mcp.server_count >= cfg->mcp.server_capacity) {
+                    size_t new_capacity = cfg->mcp.server_capacity == 0 ? 4 : cfg->mcp.server_capacity * 2;
+                    MCPServerConfig* new_servers = realloc(cfg->mcp.servers, new_capacity * sizeof(MCPServerConfig));
+                    if (new_servers) {
+                        cfg->mcp.servers = new_servers;
+                        cfg->mcp.server_capacity = new_capacity;
+                    } else {
+                        break;
+                    }
+                }
+
+                // Initialize new server
+                MCPServerConfig* server = &cfg->mcp.servers[cfg->mcp.server_count];
+                memset(server, 0, sizeof(MCPServerConfig));
+                server->args = string_array_new();
+                server->env = env_var_array_new();
+
+                cJSON* s_item;
+                if ((s_item = cJSON_GetObjectItem(server_item, "id"))) {
+                    server->server_id = get_json_string(s_item, "");
+                }
+                if ((s_item = cJSON_GetObjectItem(server_item, "transport"))) {
+                    server->transport_type = get_json_string(s_item, "stdio");
+                }
+                if ((s_item = cJSON_GetObjectItem(server_item, "command"))) {
+                    server->command = get_json_string(s_item, "");
+                }
+
+                cJSON* args = cJSON_GetObjectItem(server_item, "args");
+                if (cJSON_IsArray(args)) {
+                    cJSON* arg_item;
+                    cJSON_ArrayForEach(arg_item, args) {
+                        if (cJSON_IsString(arg_item)) {
+                            string_array_add(&server->args, arg_item->valuestring);
+                        }
+                    }
+                }
+
+                // Parse environment variables
+                cJSON* env = cJSON_GetObjectItem(server_item, "env");
+                if (cJSON_IsObject(env)) {
+                    cJSON* env_item;
+                    cJSON_ArrayForEach(env_item, env) {
+                        if (cJSON_IsString(env_item)) {
+                            env_var_array_add(&server->env, env_item->string, env_item->valuestring);
+                        }
+                    }
+                }
+
+                cfg->mcp.server_count++;
+            }
+        }
+    }
+
     cJSON_Delete(json);
+
+    // Apply environment variable overrides (env takes precedence over file)
+    config_load_from_env(cfg);
+
     return true;
+}
+
+void config_load_from_env(Config* cfg) {
+    if (!cfg) return;
+
+    // Agent config - PRIMAGEN_AGENT_*
+    const char* env_model = get_env_string("PRIMAGEN_AGENT_MODEL", NULL);
+    if (env_model) { free(cfg->agent.model); cfg->agent.model = strdup(env_model); }
+
+    const char* env_api_key = get_env_string("PRIMAGEN_AGENT_API_KEY", NULL);
+    if (env_api_key) { free(cfg->agent.api_key); cfg->agent.api_key = strdup(env_api_key); }
+
+    const char* env_api_base = get_env_string("PRIMAGEN_AGENT_API_BASE", NULL);
+    if (env_api_base) { free(cfg->agent.api_base); cfg->agent.api_base = strdup(env_api_base); }
+
+    const char* env_temperature = get_env_string("PRIMAGEN_AGENT_TEMPERATURE", NULL);
+    if (env_temperature) { cfg->agent.temperature = get_env_double("PRIMAGEN_AGENT_TEMPERATURE", cfg->agent.temperature); }
+
+    const char* env_max_tokens = get_env_string("PRIMAGEN_AGENT_MAX_TOKENS", NULL);
+    if (env_max_tokens) { cfg->agent.max_tokens = get_env_int("PRIMAGEN_AGENT_MAX_TOKENS", cfg->agent.max_tokens); }
+
+    const char* env_max_tool_iterations = get_env_string("PRIMAGEN_AGENT_MAX_TOOL_ITERATIONS", NULL);
+    if (env_max_tool_iterations) { cfg->agent.max_tool_iterations = get_env_int("PRIMAGEN_AGENT_MAX_TOOL_ITERATIONS", cfg->agent.max_tool_iterations); }
+
+    const char* env_memory_window = get_env_string("PRIMAGEN_AGENT_MEMORY_WINDOW", NULL);
+    if (env_memory_window) { cfg->agent.memory_window = get_env_int("PRIMAGEN_AGENT_MEMORY_WINDOW", cfg->agent.memory_window); }
+
+    const char* env_reasoning_effort = get_env_string("PRIMAGEN_AGENT_REASONING_EFFORT", NULL);
+    if (env_reasoning_effort) { free(cfg->agent.reasoning_effort); cfg->agent.reasoning_effort = strdup(env_reasoning_effort); }
+
+    // Tools config - PRIMAGEN_TOOLS_*
+    const char* env_restrict = get_env_string("PRIMAGEN_TOOLS_RESTRICT_TO_WORKSPACE", NULL);
+    if (env_restrict) { cfg->tools.restrict_to_workspace = get_env_bool("PRIMAGEN_TOOLS_RESTRICT_TO_WORKSPACE", cfg->tools.restrict_to_workspace); }
+
+    const char* env_timeout = get_env_string("PRIMAGEN_TOOLS_EXEC_TIMEOUT", NULL);
+    if (env_timeout) { cfg->tools.exec.timeout = get_env_int("PRIMAGEN_TOOLS_EXEC_TIMEOUT", cfg->tools.exec.timeout); }
+
+    const char* env_exec_restrict = get_env_string("PRIMAGEN_TOOLS_EXEC_RESTRICT_TO_WORKSPACE", NULL);
+    if (env_exec_restrict) { cfg->tools.exec.restrict_to_workspace = get_env_bool("PRIMAGEN_TOOLS_EXEC_RESTRICT_TO_WORKSPACE", cfg->tools.exec.restrict_to_workspace); }
+
+    const char* env_path_append = get_env_string("PRIMAGEN_TOOLS_EXEC_PATH_APPEND", NULL);
+    if (env_path_append) { free(cfg->tools.exec.path_append); cfg->tools.exec.path_append = strdup(env_path_append); }
+
+    const char* env_web_proxy = get_env_string("PRIMAGEN_TOOLS_WEB_PROXY", NULL);
+    if (env_web_proxy) { free(cfg->tools.web.proxy); cfg->tools.web.proxy = strdup(env_web_proxy); }
+
+    const char* env_search_api_key = get_env_string("PRIMAGEN_TOOLS_WEB_SEARCH_API_KEY", NULL);
+    if (env_search_api_key) { free(cfg->tools.web.search.api_key); cfg->tools.web.search.api_key = strdup(env_search_api_key); }
+
+    // Heartbeat config - PRIMAGEN_HEARTBEAT_*
+    const char* env_hb_enabled = get_env_string("PRIMAGEN_HEARTBEAT_ENABLED", NULL);
+    if (env_hb_enabled) { cfg->heartbeat.enabled = get_env_bool("PRIMAGEN_HEARTBEAT_ENABLED", cfg->heartbeat.enabled); }
+
+    const char* env_hb_interval = get_env_string("PRIMAGEN_HEARTBEAT_INTERVAL_S", NULL);
+    if (env_hb_interval) { cfg->heartbeat.interval_s = get_env_int("PRIMAGEN_HEARTBEAT_INTERVAL_S", cfg->heartbeat.interval_s); }
+
+    // Log config - PRIMAGEN_LOG_*
+    const char* env_log_level = get_env_string("PRIMAGEN_LOG_LEVEL", NULL);
+    if (env_log_level) { free(cfg->log.level); cfg->log.level = strdup(env_log_level); }
+
+    const char* env_console_output = get_env_string("PRIMAGEN_LOG_CONSOLE_OUTPUT", NULL);
+    if (env_console_output) { cfg->log.console_output = get_env_bool("PRIMAGEN_LOG_CONSOLE_OUTPUT", cfg->log.console_output); }
+
+    // Channels config - PRIMAGEN_CHANNELS_*
+    const char* env_send_progress = get_env_string("PRIMAGEN_CHANNELS_SEND_PROGRESS", NULL);
+    if (env_send_progress) { cfg->channels.send_progress = get_env_bool("PRIMAGEN_CHANNELS_SEND_PROGRESS", cfg->channels.send_progress); }
+
+    const char* env_send_tool_hints = get_env_string("PRIMAGEN_CHANNELS_SEND_TOOL_HINTS", NULL);
+    if (env_send_tool_hints) { cfg->channels.send_tool_hints = get_env_bool("PRIMAGEN_CHANNELS_SEND_TOOL_HINTS", cfg->channels.send_tool_hints); }
+
+    // Telegram - PRIMAGEN_TELEGRAM_*
+    const char* env_tg_enabled = get_env_string("PRIMAGEN_TELEGRAM_ENABLED", NULL);
+    if (env_tg_enabled) { cfg->channels.telegram.enabled = get_env_bool("PRIMAGEN_TELEGRAM_ENABLED", cfg->channels.telegram.enabled); }
+
+    const char* env_tg_token = get_env_string("PRIMAGEN_TELEGRAM_TOKEN", NULL);
+    if (env_tg_token) { free(cfg->channels.telegram.token); cfg->channels.telegram.token = strdup(env_tg_token); }
+
+    // Email - PRIMAGEN_EMAIL_*
+    const char* env_email_enabled = get_env_string("PRIMAGEN_EMAIL_ENABLED", NULL);
+    if (env_email_enabled) { cfg->channels.email.enabled = get_env_bool("PRIMAGEN_EMAIL_ENABLED", cfg->channels.email.enabled); }
+
+    const char* env_imap_host = get_env_string("PRIMAGEN_EMAIL_IMAP_HOST", NULL);
+    if (env_imap_host) { free(cfg->channels.email.imap_host); cfg->channels.email.imap_host = strdup(env_imap_host); }
+
+    const char* env_imap_port = get_env_string("PRIMAGEN_EMAIL_IMAP_PORT", NULL);
+    if (env_imap_port) { cfg->channels.email.imap_port = get_env_int("PRIMAGEN_EMAIL_IMAP_PORT", cfg->channels.email.imap_port); }
+
+    const char* env_imap_user = get_env_string("PRIMAGEN_EMAIL_IMAP_USERNAME", NULL);
+    if (env_imap_user) { free(cfg->channels.email.imap_username); cfg->channels.email.imap_username = strdup(env_imap_user); }
+
+    const char* env_imap_pass = get_env_string("PRIMAGEN_EMAIL_IMAP_PASSWORD", NULL);
+    if (env_imap_pass) { free(cfg->channels.email.imap_password); cfg->channels.email.imap_password = strdup(env_imap_pass); }
+
+    const char* env_smtp_host = get_env_string("PRIMAGEN_EMAIL_SMTP_HOST", NULL);
+    if (env_smtp_host) { free(cfg->channels.email.smtp_host); cfg->channels.email.smtp_host = strdup(env_smtp_host); }
+
+    const char* env_smtp_port = get_env_string("PRIMAGEN_EMAIL_SMTP_PORT", NULL);
+    if (env_smtp_port) { cfg->channels.email.smtp_port = get_env_int("PRIMAGEN_EMAIL_SMTP_PORT", cfg->channels.email.smtp_port); }
+
+    const char* env_smtp_user = get_env_string("PRIMAGEN_EMAIL_SMTP_USERNAME", NULL);
+    if (env_smtp_user) { free(cfg->channels.email.smtp_username); cfg->channels.email.smtp_username = strdup(env_smtp_user); }
+
+    const char* env_smtp_pass = get_env_string("PRIMAGEN_EMAIL_SMTP_PASSWORD", NULL);
+    if (env_smtp_pass) { free(cfg->channels.email.smtp_password); cfg->channels.email.smtp_password = strdup(env_smtp_pass); }
+
+    const char* env_from_addr = get_env_string("PRIMAGEN_EMAIL_FROM_ADDRESS", NULL);
+    if (env_from_addr) { free(cfg->channels.email.from_address); cfg->channels.email.from_address = strdup(env_from_addr); }
+
+    // Discord - PRIMAGEN_DISCORD_*
+    const char* env_discord_enabled = get_env_string("PRIMAGEN_DISCORD_ENABLED", NULL);
+    if (env_discord_enabled) { cfg->channels.discord.enabled = get_env_bool("PRIMAGEN_DISCORD_ENABLED", cfg->channels.discord.enabled); }
+
+    const char* env_discord_token = get_env_string("PRIMAGEN_DISCORD_TOKEN", NULL);
+    if (env_discord_token) { free(cfg->channels.discord.token); cfg->channels.discord.token = strdup(env_discord_token); }
+
+    const char* env_discord_gateway = get_env_string("PRIMAGEN_DISCORD_GATEWAY_URL", NULL);
+    if (env_discord_gateway) { free(cfg->channels.discord.gateway_url); cfg->channels.discord.gateway_url = strdup(env_discord_gateway); }
+
+    // Slack - PRIMAGEN_SLACK_*
+    const char* env_slack_enabled = get_env_string("PRIMAGEN_SLACK_ENABLED", NULL);
+    if (env_slack_enabled) { cfg->channels.slack.enabled = get_env_bool("PRIMAGEN_SLACK_ENABLED", cfg->channels.slack.enabled); }
+
+    const char* env_slack_bot_token = get_env_string("PRIMAGEN_SLACK_BOT_TOKEN", NULL);
+    if (env_slack_bot_token) { free(cfg->channels.slack.bot_token); cfg->channels.slack.bot_token = strdup(env_slack_bot_token); }
+
+    const char* env_slack_app_token = get_env_string("PRIMAGEN_SLACK_APP_TOKEN", NULL);
+    if (env_slack_app_token) { free(cfg->channels.slack.app_token); cfg->channels.slack.app_token = strdup(env_slack_app_token); }
+
+    // DingTalk - PRIMAGEN_DINGTALK_*
+    const char* env_dingtalk_enabled = get_env_string("PRIMAGEN_DINGTALK_ENABLED", NULL);
+    if (env_dingtalk_enabled) { cfg->channels.dingtalk.enabled = get_env_bool("PRIMAGEN_DINGTALK_ENABLED", cfg->channels.dingtalk.enabled); }
+
+    const char* env_dingtalk_client_id = get_env_string("PRIMAGEN_DINGTALK_CLIENT_ID", NULL);
+    if (env_dingtalk_client_id) { free(cfg->channels.dingtalk.client_id); cfg->channels.dingtalk.client_id = strdup(env_dingtalk_client_id); }
+
+    const char* env_dingtalk_client_secret = get_env_string("PRIMAGEN_DINGTALK_CLIENT_SECRET", NULL);
+    if (env_dingtalk_client_secret) { free(cfg->channels.dingtalk.client_secret); cfg->channels.dingtalk.client_secret = strdup(env_dingtalk_client_secret); }
+
+    // Feishu - PRIMAGEN_FEISHU_*
+    const char* env_feishu_enabled = get_env_string("PRIMAGEN_FEISHU_ENABLED", NULL);
+    if (env_feishu_enabled) { cfg->channels.feishu.enabled = get_env_bool("PRIMAGEN_FEISHU_ENABLED", cfg->channels.feishu.enabled); }
+
+    const char* env_feishu_app_id = get_env_string("PRIMAGEN_FEISHU_APP_ID", NULL);
+    if (env_feishu_app_id) { free(cfg->channels.feishu.app_id); cfg->channels.feishu.app_id = strdup(env_feishu_app_id); }
+
+    const char* env_feishu_app_secret = get_env_string("PRIMAGEN_FEISHU_APP_SECRET", NULL);
+    if (env_feishu_app_secret) { free(cfg->channels.feishu.app_secret); cfg->channels.feishu.app_secret = strdup(env_feishu_app_secret); }
+
+    // WhatsApp - PRIMAGEN_WHATSAPP_*
+    const char* env_whatsapp_enabled = get_env_string("PRIMAGEN_WHATSAPP_ENABLED", NULL);
+    if (env_whatsapp_enabled) { cfg->channels.whatsapp.enabled = get_env_bool("PRIMAGEN_WHATSAPP_ENABLED", cfg->channels.whatsapp.enabled); }
+
+    const char* env_whatsapp_bridge_url = get_env_string("PRIMAGEN_WHATSAPP_BRIDGE_URL", NULL);
+    if (env_whatsapp_bridge_url) { free(cfg->channels.whatsapp.bridge_url); cfg->channels.whatsapp.bridge_url = strdup(env_whatsapp_bridge_url); }
+
+    const char* env_whatsapp_bridge_token = get_env_string("PRIMAGEN_WHATSAPP_BRIDGE_TOKEN", NULL);
+    if (env_whatsapp_bridge_token) { free(cfg->channels.whatsapp.bridge_token); cfg->channels.whatsapp.bridge_token = strdup(env_whatsapp_bridge_token); }
 }
 
 bool config_save_to_file(Config* cfg, const char* filepath) {

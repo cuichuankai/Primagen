@@ -3,17 +3,24 @@
 ## Directory Organization
 
 ### Root Directory (/)
+
 ```
 /workspaces/Primagen/
 ├── Makefile              # Compilation configuration
 ├── README.md             # Project documentation
 ├── PROJECT_STRUCTURE.md  # This file
 ├── IMPLEMENTATION_GUIDE.md # Implementation status and guide
+├── docs/                 # Documentation directory
+│   ├── AMAP_MCP_TEST_REPORT.md      # Amap MCP integration test report
+│   └── AMAP_MCP_SETUP_REPORT.md     # Amap MCP setup guide
+├── mcp-servers/          # MCP Server implementations
+│   └── amap/             # Amap (Gaode Map) MCP server
 ├── src/                  # Source code directory
 └── build/                # Build output directory (artifacts and executable)
 ```
 
 ### Source Code Directory (src/)
+
 ```
 src/
 ├── include/              # Header directory (Common headers)
@@ -58,6 +65,13 @@ src/
 │   └── cron.c
 ├── heartbeat/            # Heartbeat Service Module
 │   └── heartbeat.c
+├── mcp/                  # MCP (Model Context Protocol) Module
+│   ├── mcp.h             # MCP client and manager interface
+│   ├── mcp.c             # MCP manager implementation
+│   ├── mcp_tools.c       # MCP tools registration bridge
+│   ├── mcp_tools.h       # MCP tools registration header
+│   ├── transport_stdio.c # stdio transport implementation
+│   └── transport_stdio.h # stdio transport header
 ├── memory/               # Memory Management Module
 │   ├── memory.h
 │   └── memory.c
@@ -77,13 +91,17 @@ src/
 │   ├── tools_impl.h      # Concrete tools declaration
 │   └── tools_impl.c      # Concrete tools implementation (fs, shell, web, etc.)
 ├── vendor/               # Third-party Libraries
-│   └── cJSON/
-│       ├── cJSON.h
-│       └── cJSON.c
+│   ├── cJSON/
+│   │   ├── cJSON.h
+│   │   └── cJSON.c
+│   └── mongoose/
+│       ├── mongoose.h
+│       └── mongoose.c
 └── main.c                # Main Entry Point
 ```
 
 ### Build Output Directory (build/)
+
 ```
 build/
 ├── primagen               # Final Executable
@@ -109,6 +127,10 @@ build/
 │   └── cron.o
 ├── heartbeat/
 │   └── heartbeat.o
+├── mcp/
+│   ├── mcp.o
+│   ├── mcp_tools.o
+│   └── transport_stdio.o
 ├── memory/
 │   └── memory.o
 ├── providers/
@@ -125,11 +147,14 @@ build/
 └── vendor/
     └── cJSON/
         └── cJSON.o
+    └── mongoose/
+        └── mongoose.o
 ```
 
 ## Compilation
 
 ### From Root Directory:
+
 ```bash
 make              # Compile project
 make clean        # Clean build artifacts
@@ -142,7 +167,9 @@ make clean        # Clean build artifacts
 ```
 
 ### Workspace Structure (.primagen/)
+
 When running, the application creates/uses a workspace directory (default `.primagen`):
+
 ```
 .primagen/
 ├── config.json           # Configuration file
@@ -165,30 +192,45 @@ When running, the application creates/uses a workspace directory (default `.prim
 
 ## Project Features
 
-1.  **Modular Design**: Code separated by function (agent, bus, context, memory, etc.).
-2.  **Header Organization**: Common headers in `src/include/`.
-3.  **Clean Separation**: Implementation details hidden in `.c` files.
-4.  **ReAct Loop**: Full implementation of Reasoning + Acting loop in C.
-5.  **Persistent Memory**: File-based long-term memory (`MEMORY.md`).
-6.  **Tool System**: Extensible tool registration system.
-7.  **Real-world Integration**:
-    - **LLM**: libcurl integration with OpenAI/Brave.
-    - **Channels**: Architecture supports multiple channels (Telegram, Feishu, etc.).
-    - **Cron**: Persistent scheduling.
+1. **Modular Design**: Code separated by function (agent, bus, context, memory, mcp, etc.).
+2. **Header Organization**: Common headers in `src/include/`.
+3. **Clean Separation**: Implementation details hidden in `.c` files.
+4. **ReAct Loop**: Full implementation of Reasoning + Acting loop in C.
+5. **Persistent Memory**: File-based long-term memory (`MEMORY.md`).
+6. **Tool System**: Extensible tool registration system with MCP support.
+7. **MCP Integration**: Model Context Protocol client for external tools (stdio transport).
+8. **Real-world Integration**:
+   - **LLM**: libcurl integration with OpenAI/Brave.
+   - **Channels**: Architecture supports multiple channels (Telegram, Feishu, etc.).
+   - **Cron**: Persistent scheduling.
+   - **MCP Servers**: External tool integration via MCP (e.g., Amap geographic services).
 
 ## Core Module Functions
 
-| Module | Function |
-|---|---|
-| `agent` | Implements the main ReAct loop, handling multi-turn tool execution. |
-| `bus` | Asynchronous message bus for decoupling components. |
-| `channels` | Implementation of various communication channels. |
-| `config` | Loads configuration from JSON files. |
-| `context` | Builds the system prompt from identity, memory, skills, and history. |
-| `cron` | Manages scheduled tasks. |
-| `memory` | Manages long-term (facts) and short-term (history) memory. |
-| `providers` | Interface for LLM API calls (OpenAI compatible). |
-| `session` | Manages active sessions and their persistence. |
-| `skills` | Loads and manages dynamic skills from the filesystem. |
-| `subagent` | Manages spawning of sub-agents for tasks. |
-| `tools` | Registry and implementation of all agent capabilities (tools). |
+| Module      | Function                                                               |
+| ----------- | ---------------------------------------------------------------------- |
+| `agent`     | Implements the main ReAct loop, handling multi-turn tool execution.    |
+| `bus`       | Asynchronous message bus for decoupling components.                    |
+| `channels`  | Implementation of various communication channels.                      |
+| `config`    | Loads configuration from JSON files with environment variable support. |
+| `context`   | Builds the system prompt from identity, memory, skills, and history.   |
+| `cron`      | Manages scheduled tasks with persistent storage.                       |
+| `mcp`       | MCP client for integrating external tools via Model Context Protocol.  |
+| `memory`    | Manages long-term (facts) and short-term (history) memory.             |
+| `providers` | Interface for LLM API calls (OpenAI compatible).                       |
+| `session`   | Manages active sessions and their persistence.                         |
+| `skills`    | Loads and manages dynamic skills from the filesystem.                  |
+| `subagent`  | Manages spawning of sub-agents for tasks.                              |
+| `tools`     | Registry and implementation of all agent capabilities (tools).         |
+
+## MCP Integration
+
+### MCP Module (`src/mcp/`)
+
+| File                | Description                                           |
+| ------------------- | ----------------------------------------------------- |
+| `mcp.h`             | MCP client and manager interface                      |
+| `mcp.c`             | MCP manager implementation with connection management |
+| `mcp_tools.c`       | Bridge for registering MCP tools with ToolRegistry    |
+| `transport_stdio.c` | stdio transport using child processes                 |
+

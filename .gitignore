@@ -3,3 +3,4 @@ tests/
 .primagen/
 .DS_Store
 .vscode/
+mcp-servers/

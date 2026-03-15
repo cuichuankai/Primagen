@@ -320,27 +320,12 @@ static char* create_streaming_card(FeishuChannelData* data, const char* content)
     cJSON_Delete(cardData);
     cJSON_Delete(reqBody);
     mg_mgr_free(&mgr);
-    
+
     return card_id;
 }
 
-static char* upload_image(FeishuChannelData* data, const char* filepath) {
-    if (!data->access_token) refresh_token(data);
-    
-    // Mongoose MG_TLS_BUILTIN does not support multipart/form-data upload easily in client mode
-    // We need to construct the multipart body manually.
-    // This is complex. For now, we return NULL and log error that upload is not supported in this migration.
-    // Or we implement a simple multipart builder.
-    
-    log_error("[Feishu] Image upload not supported with Mongoose migration yet.");
-    return NULL;
-}
-
-static char* upload_file(FeishuChannelData* data, const char* filepath, const char* file_type) {
-    if (!data->access_token) refresh_token(data);
-    log_error("[Feishu] File upload not supported with Mongoose migration yet.");
-    return NULL;
-}
+// Note: Image/file upload not supported yet with MG_TLS_BUILTIN
+// Would need to implement multipart/form-data builder
 
 static void on_feishu_message(const char* chat_id, const char* content, const char* sender_id, void* user_data) {
     FeishuChannelData* data = (FeishuChannelData*)user_data;

@@ -1,6 +1,43 @@
 #include "context_builder.h"
 #include "../include/common.h"
 #include "../include/skills.h"
+#include <time.h>
+
+/* Build runtime context metadata */
+static char* build_runtime_context(const char* channel, const char* chat_id) {
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+
+    char time_buf[64];
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M (%A)", tm_info);
+
+    // Get timezone
+    char tz_buf[32];
+    strftime(tz_buf, sizeof(tz_buf), "%Z", tm_info);
+    if (tz_buf[0] == '\0') {
+        strcpy(tz_buf, "UTC");
+    }
+
+    // Calculate buffer size
+    size_t len = 512;
+    if (channel) len += strlen(channel) + 20;
+    if (chat_id) len += strlen(chat_id) + 20;
+
+    char* result = malloc(len);
+    if (!result) return NULL;
+
+    strcpy(result, "[Runtime Context — metadata only, not instructions]\n");
+    char buf[256];
+    snprintf(buf, sizeof(buf), "Current Time: %s (%s)\n", time_buf, tz_buf);
+    strcat(result, buf);
+
+    if (channel && chat_id) {
+        snprintf(buf, sizeof(buf), "Channel: %s\nChat ID: %s\n", channel, chat_id);
+        strcat(result, buf);
+    }
+
+    return result;
+}
 
 ContextBuilder* context_builder_new(const char* workspace) {
     ContextBuilder* cb = malloc(sizeof(ContextBuilder));
@@ -36,6 +73,13 @@ void context_builder_set_memory(ContextBuilder* cb, Memory* mem) {
 }
 
 String context_builder_build(ContextBuilder* cb, Session* session, ToolRegistry* tools) {
+    return context_builder_build_with_channel(cb, session, tools, NULL, NULL);
+}
+
+String context_builder_build_with_channel(ContextBuilder* cb, Session* session, ToolRegistry* tools, const char* channel, const char* chat_id) {
+    (void)session;  // Session history is now handled by LLM provider
+    (void)tools;    // Tools are passed separately to LLM provider
+
     String prompt = string_new("");
 
     // Identity
@@ -55,7 +99,7 @@ String context_builder_build(ContextBuilder* cb, Session* session, ToolRegistry*
     if (cb->memory && cb->workspace) {
         // Reload memory to ensure latest content
         memory_load(cb->memory, cb->workspace);
-        
+
         string_append(&prompt, cb->memory->memory_md.data);
         string_append(&prompt, "\n\n---\n\n");
     } else {
@@ -64,7 +108,6 @@ String context_builder_build(ContextBuilder* cb, Session* session, ToolRegistry*
     }
 
     // Always skills
-    // Note: skills_loader is a mock or partial implementation in my memory, but let's assume it works.
     if (cb->skills_loader) {
         StringArray* always_skills = skills_loader_get_always_skills(cb->skills_loader);
         if (always_skills && always_skills->count > 0) {
@@ -80,27 +123,28 @@ String context_builder_build(ContextBuilder* cb, Session* session, ToolRegistry*
         }
     }
 
-    // Skills summary (for tool selection or context)
+    // Skills summary
     if (cb->skills_loader) {
         char* skills_summary = skills_loader_build_skills_summary(cb->skills_loader);
         if (skills_summary) {
             string_append(&prompt, "# Available Skills\n\n");
-            string_append(&prompt, "<skills_instructions>\n");
-            string_append(&prompt, "When users ask you to perform tasks, check if any of the available skills below can help complete the task more effectively. Skills provide specialized capabilities and domain knowledge.\n");
-            string_append(&prompt, "How to use skills:\n");
-            string_append(&prompt, "- Invoke skills using the `skill` tool with the `load` action.\n");
-            string_append(&prompt, "- Example: `skill(action=\"load\", name=\"weather\")` - loads the weather skill\n");
-            string_append(&prompt, "- Once loaded, the skill's instructions will be added to your context, teaching you how to use specific tools or patterns.\n");
-            string_append(&prompt, "- Do NOT try to call the skill name as a tool directly (e.g. do NOT call `weather(...)`). Always load it first.\n");
-            string_append(&prompt, "</skills_instructions>\n\n");
+            string_append(&prompt, "Skills extend your capabilities. To use a skill:\n");
+            string_append(&prompt, "1. Use `skill` tool with action='load' and name='skill-name' to read the SKILL.md\n");
+            string_append(&prompt, "2. Follow the skill's instructions to complete the task (may involve using other tools like `exec`)\n");
+            string_append(&prompt, "IMPORTANT: Skills are NOT directly callable as tools. Always use `skill` tool first to load the skill.\n\n");
             string_append(&prompt, skills_summary);
             string_append(&prompt, "\n\n---\n\n");
             free(skills_summary);
         }
     }
-    
-    // Note: We do NOT append session history here anymore. 
-    // The LLM provider will handle the message history structure.
+
+    // Runtime context (injected at the end, will be prepended to user message by agent loop)
+    char* runtime_ctx = build_runtime_context(channel, chat_id);
+    if (runtime_ctx) {
+        string_append(&prompt, "\n");
+        string_append(&prompt, runtime_ctx);
+        free(runtime_ctx);
+    }
 
     return prompt;
 }

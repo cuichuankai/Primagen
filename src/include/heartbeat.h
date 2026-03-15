@@ -23,4 +23,7 @@ void heartbeat_service_destroy(HeartbeatService* service);
 bool heartbeat_service_start(HeartbeatService* service);
 void heartbeat_service_stop(HeartbeatService* service);
 
+/* Manually trigger a heartbeat */
+char* heartbeat_service_trigger_now(HeartbeatService* service);
+
 #endif // HEARTBEAT_H

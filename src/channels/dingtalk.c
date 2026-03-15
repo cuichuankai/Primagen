@@ -155,7 +155,7 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
     
     cJSON* msgParam = cJSON_CreateObject();
     cJSON_AddStringToObject(msgParam, "text", msg->content.data);
-    cJSON_AddStringToObject(msgParam, "title", "Nanobot Reply");
+    cJSON_AddStringToObject(msgParam, "title", "Primagen Reply");
     char* param_str = cJSON_PrintUnformatted(msgParam);
     cJSON_AddStringToObject(json, "msgParam", param_str);
     free(param_str);

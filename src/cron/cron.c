@@ -48,6 +48,121 @@ static bool parse_daily_schedule(const char* schedule, int* hour, int* minute) {
     return true;
 }
 
+/*
+ * Check if a value matches a cron field
+ * Supports: wildcard, step, range, list formats
+ */
+static bool cron_field_matches(int value, int min_val, int max_val, const char* field) {
+    (void)min_val;  // Reserved for future range validation
+    (void)max_val;  // Reserved for future range validation
+
+    if (!field || strcmp(field, "*") == 0) return true;
+
+    // Step values: */n
+    if (strncmp(field, "*/", 2) == 0) {
+        int step = atoi(field + 2);
+        if (step > 0) return (value % step) == 0;
+        return false;
+    }
+
+    // Range: n-m
+    char* dash = strchr(field, '-');
+    if (dash) {
+        int start = atoi(field);
+        int end = atoi(dash + 1);
+        if (value >= start && value <= end) return true;
+        return false;
+    }
+
+    // List: n,m,o
+    char* comma = strchr(field, ',');
+    if (comma) {
+        char buf[32];
+        strncpy(buf, field, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        char* token = strtok(buf, ",");
+        while (token) {
+            int v = atoi(token);
+            if (v == value) return true;
+            token = strtok(NULL, ",");
+        }
+        return false;
+    }
+
+    // Single value
+    int v = atoi(field);
+    return (v == value);
+}
+
+/**
+ * Parse standard 5-field cron expression (minute hour dom month dow)
+ * Returns next run time for standard cron
+ */
+static bool parse_standard_cron(const char* schedule, time_t now, time_t* out_next) {
+    if (!schedule || !out_next) return false;
+
+    char min_f[8] = {0}, hour_f[8] = {0}, dom_f[8] = {0}, mon_f[8] = {0}, dow_f[8] = {0};
+
+    // Parse 5 fields
+    int count = sscanf(schedule, "%7s %7s %7s %7s %7s", min_f, hour_f, dom_f, mon_f, dow_f);
+    if (count != 5) return false;
+
+    // Validate fields are not special patterns (already handled elsewhere)
+    if (schedule[0] == '@') return false;
+
+    struct tm local_tm;
+    localtime_r(&now, &local_tm);
+
+    // Start from next minute
+    local_tm.tm_sec = 0;
+    local_tm.tm_min++;
+
+    // Search for next matching time (max 1 year ahead)
+    time_t search_end = now + 366 * 24 * 60 * 60;
+
+    while (local_tm.tm_year < 2100 - 1900) {
+        time_t check = mktime(&local_tm);
+        if (check > search_end) break;
+
+        int m = local_tm.tm_min;
+        int h = local_tm.tm_hour;
+        int d = local_tm.tm_mday;
+        int mon = local_tm.tm_mon + 1;  // 1-12
+        int w = local_tm.tm_wday;       // 0-6 (Sunday = 0)
+
+        bool match_min = cron_field_matches(m, 0, 59, min_f);
+        bool match_hour = cron_field_matches(h, 0, 23, hour_f);
+        bool match_dom = cron_field_matches(d, 1, 31, dom_f);
+        bool match_mon = cron_field_matches(mon, 1, 12, mon_f);
+        bool match_dow = cron_field_matches(w, 0, 6, dow_f);
+
+        // Standard cron: DOM and DOW are OR'd when both are specified
+        bool dom_dow_match = (strcmp(dom_f, "*") == 0 && strcmp(dow_f, "*") == 0) ||
+                            (strcmp(dom_f, "*") != 0 && match_dom) ||
+                            (strcmp(dow_f, "*") != 0 && match_dow) ||
+                            (strcmp(dom_f, "*") == 0 && match_dow) ||
+                            (strcmp(dow_f, "*") == 0 && match_dom);
+
+        if (match_min && match_hour && match_mon && dom_dow_match) {
+            *out_next = check;
+            return true;
+        }
+
+        // Increment minute
+        local_tm.tm_min++;
+        if (local_tm.tm_min >= 60) {
+            local_tm.tm_min = 0;
+            local_tm.tm_hour++;
+            if (local_tm.tm_hour >= 24) {
+                local_tm.tm_hour = 0;
+                local_tm.tm_mday++;
+            }
+        }
+    }
+
+    return false;
+}
+
 static time_t next_daily_run(time_t now, int hour, int minute) {
     struct tm local_tm;
     localtime_r(&now, &local_tm);
@@ -85,6 +200,15 @@ static CronScheduleType cron_schedule_next_run(const char* schedule, time_t now,
         *out_next_run = (time_t)timestamp;
         return CRON_SCHEDULE_ONE_TIME;
     }
+
+    // Try standard 5-field cron expression first
+    time_t standard_next;
+    if (parse_standard_cron(schedule, now, &standard_next)) {
+        *out_next_run = standard_next;
+        return CRON_SCHEDULE_RECURRING;
+    }
+
+    // Fallback to daily schedule format
     int hour = 0;
     int minute = 0;
     if (parse_daily_schedule(schedule, &hour, &minute)) {
@@ -368,17 +492,48 @@ char* cron_service_add_job(CronService* service, const CronJob* job) {
     if (!service || !job) return NULL;
 
     pthread_mutex_lock(&service->mutex);
-    
+
+    // Check for duplicate job by name (update if exists)
+    if (job->name) {
+        JobNode* current = service->jobs;
+        while (current) {
+            if (current->job.name && strcmp(current->job.name, job->name) == 0) {
+                log_info("[Cron] Job '%s' already exists, updating schedule.", job->name);
+                // Update existing job's schedule and next_run
+                free(current->job.schedule);
+                current->job.schedule = job->schedule ? strdup(job->schedule) : NULL;
+
+                // Free old payload and update
+                free(current->job.payload_message);
+                current->job.payload_message = job->payload_message ? strdup(job->payload_message) : NULL;
+
+                // Calculate new next_run
+                time_t now = time(NULL);
+                CronScheduleType schedule_type = cron_schedule_next_run(current->job.schedule, now, &current->job.next_run);
+                if (schedule_type == CRON_SCHEDULE_INVALID) {
+                    log_error("[Cron] Invalid schedule format on update: %s", current->job.schedule ? current->job.schedule : "(null)");
+                    pthread_mutex_unlock(&service->mutex);
+                    return NULL;
+                }
+
+                save_jobs(service);
+                pthread_mutex_unlock(&service->mutex);
+                return strdup(current->job.id);
+            }
+            current = current->next;
+        }
+    }
+
     JobNode* node = malloc(sizeof(JobNode));
     node->job = copy_job(job);
-    
+
     // Generate ID if missing
     if (!node->job.id) {
         char id[32];
         snprintf(id, sizeof(id), "job_%ld", time(NULL));
         node->job.id = strdup(id);
     }
-    
+
     time_t now = time(NULL);
     CronScheduleType schedule_type = cron_schedule_next_run(node->job.schedule, now, &node->job.next_run);
     if (schedule_type == CRON_SCHEDULE_INVALID) {
@@ -391,11 +546,11 @@ char* cron_service_add_job(CronService* service, const CronJob* job) {
 
     node->next = service->jobs;
     service->jobs = node;
-    
+
     char* result_id = strdup(node->job.id);
-    
+
     save_jobs(service); // Save after adding
-    
+
     pthread_mutex_unlock(&service->mutex);
     return result_id;
 }

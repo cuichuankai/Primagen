@@ -8,24 +8,19 @@ always: true
 
 ## Structure
 
-- `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships). Always loaded into your context.
-- `memory/HISTORY.md` — Append-only event log. NOT loaded into context. Search it with grep. Each entry starts with [YYYY-MM-DD HH:MM].
+- `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships)
+- `memory/HISTORY.md` — Append-only event log, search with `grep`
 
-## Search Past Events
+## Usage
+
+Use the `memory` tool to save information:
+
+```
+memory(history_entry="[YYYY-MM-DD HH:MM] User is planning a trip to Paris")
+```
+
+## Search History
 
 ```bash
 grep -i "keyword" memory/HISTORY.md
 ```
-
-Use the `exec` tool to run grep. Combine patterns: `grep -iE "meeting|deadline" memory/HISTORY.md`
-
-## When to Update MEMORY.md
-
-Write important facts immediately using `edit_file` or `write_file`:
-- User preferences ("I prefer dark mode")
-- Project context ("The API uses OAuth2")
-- Relationships ("Alice is the project lead")
-
-## Auto-consolidation
-
-Old conversations are automatically summarized and appended to HISTORY.md when the session grows large. Long-term facts are extracted to MEMORY.md. You don't need to manage this.

@@ -1,12 +1,18 @@
 #include "memory.h"
 #include "../include/common.h"
+#include "../include/utils.h"
 #include <sys/stat.h>
+
+#define DEFAULT_MAX_TOKENS 4000  // Maximum tokens before consolidation
+#define CONSOLIDATION_THRESHOLD 0.8  // Consolidate when 80% full
 
 Memory* memory_new() {
     Memory* mem = malloc(sizeof(Memory));
     if (!mem) return NULL;
     mem->memory_md = string_new("");
     mem->history_md = string_new("");
+    mem->max_tokens = DEFAULT_MAX_TOKENS;
+    mem->current_tokens = 0;
     return mem;
 }
 
@@ -160,4 +166,78 @@ void memory_add_history(Memory* mem, const char* entry) {
     string_free(&mem->history_md);
     mem->history_md = string_new(new_data);
     free(new_data);
+
+    // Update token count
+    mem->current_tokens = memory_estimate_tokens(mem);
+}
+
+/**
+ * Estimate tokens in memory content
+ */
+size_t memory_estimate_tokens(Memory* mem) {
+    if (!mem) return 0;
+    return estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+}
+
+/**
+ * Check if memory needs consolidation
+ */
+int memory_needs_consolidation(Memory* mem) {
+    if (!mem) return 0;
+
+    size_t current = memory_estimate_tokens(mem);
+    mem->current_tokens = current;
+
+    return current > (mem->max_tokens * CONSOLIDATION_THRESHOLD);
+}
+
+/**
+ * Consolidate memory by summarizing old history
+ * This is a simple implementation that truncates old history when threshold is exceeded
+ */
+Error memory_consolidate(Memory* mem, const char* workspace_path) {
+    if (!mem || !workspace_path) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
+
+    // Check if consolidation is needed
+    if (!memory_needs_consolidation(mem)) {
+        return error_new(ERR_NONE, "");
+    }
+
+    // Simple consolidation: keep only recent history
+    // Find the last N entries (by counting newlines)
+    const char* data = mem->history_md.data;
+    size_t len = mem->history_md.len;
+
+    // Keep last 5 entries (count newlines)
+    int entries_to_keep = 5;
+    const char* cut_pos = data + len;
+    int newline_count = 0;
+
+    while (cut_pos > data && newline_count < entries_to_keep) {
+        cut_pos--;
+        if (*cut_pos == '\n') {
+            newline_count++;
+        }
+    }
+
+    // Create consolidated history
+    if (cut_pos > data) {
+        // Add consolidation marker
+        const char* marker = "\n\n[Previous history consolidated to save space]\n";
+        size_t marker_len = strlen(marker);
+        size_t remaining_len = len - (cut_pos - data);
+
+        char* new_history = malloc(marker_len + remaining_len + 1);
+        if (new_history) {
+            strcpy(new_history, marker);
+            strcat(new_history, cut_pos);
+
+            string_free(&mem->history_md);
+            mem->history_md = string_new(new_history);
+            free(new_history);
+        }
+    }
+
+    // Save consolidated memory
+    return memory_save(mem, workspace_path);
 }

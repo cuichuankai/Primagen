@@ -32,6 +32,18 @@ typedef struct {
     size_t item_size;
 } DynamicArray;
 
+// Environment variable structures (for MCP server config)
+typedef struct {
+    char* key;
+    char* value;
+} EnvVar;
+
+typedef struct {
+    EnvVar* items;
+    size_t count;
+    size_t capacity;
+} EnvVarArray;
+
 // Error handling
 typedef enum {
     ERR_NONE = 0,
@@ -40,7 +52,10 @@ typedef enum {
     ERR_NETWORK,
     ERR_JSON,
     ERR_TOOL,
-    ERR_INVALID_PARAM
+    ERR_INVALID_PARAM,
+    ERR_CONTENT_FILTER,
+    ERR_CONNECTION,
+    ERR_TIMEOUT
 } ErrorCode;
 
 typedef struct {

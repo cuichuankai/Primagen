@@ -65,13 +65,17 @@ Session* session_manager_create(SessionManager* mgr, const char* key) {
 Error session_manager_save(SessionManager* mgr, Session* session) {
     char filepath[512];
     snprintf(filepath, sizeof(filepath), "%s/sessions/%s.jsonl", mgr->workspace_path.data, session->key.data);
-    FILE* f = fopen(filepath, "a");
+    FILE* f = fopen(filepath, "w");
     if (!f) return error_new(ERR_FILE, "Cannot open session file");
-    
-    // For simplicity, append new messages since last_consolidated
-    for (size_t i = session->last_consolidated; i < session->messages.count; i++) {
+
+    /* Write metadata line first */
+    fprintf(f, "{\"_type\":\"metadata\",\"key\":\"%s\",\"created_at\":%ld,\"updated_at\":%ld,\"last_consolidated\":%zu}\n",
+            session->key.data, (long)session->created_at, (long)session->updated_at, session->last_consolidated);
+
+    // Write ALL messages (not just unconsolidated) for complete persistence
+    for (size_t i = 0; i < session->messages.count; i++) {
         Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
-        
+
         // Skip saving tool calls/results to persistent session file to keep history clean
         // We only save User and Assistant messages (with content)
         if (msg->role == ROLE_TOOL) continue;
@@ -83,7 +87,6 @@ Error session_manager_save(SessionManager* mgr, Session* session) {
                 msg->content.data, msg->timestamp.data);
     }
     fclose(f);
-    session->last_consolidated = session->messages.count;
     return error_new(ERR_NONE, "");
 }
 
@@ -97,51 +100,78 @@ Error session_manager_load(SessionManager* mgr, const char* key, Session** sessi
         *session_out = session_manager_create(mgr, key);
         return error_new(ERR_NONE, "");
     }
-    
+
     Session* session = session_manager_create(mgr, key);
     char line[4096]; // Increased buffer for longer messages
+    bool metadata_loaded = false;
+
     while (fgets(line, sizeof(line), f)) {
         // Skip empty lines
         if (strlen(line) < 2) continue;
-        
+
         cJSON* json = cJSON_Parse(line);
         if (!json) continue;
-        
+
+        // Check for metadata line (first line)
+        cJSON* type_item = cJSON_GetObjectItem(json, "_type");
+        if (cJSON_IsString(type_item) && strcmp(type_item->valuestring, "metadata") == 0) {
+            // Load metadata
+            cJSON* lc_item = cJSON_GetObjectItem(json, "last_consolidated");
+            if (cJSON_IsNumber(lc_item)) {
+                session->last_consolidated = (size_t)lc_item->valuedouble;
+            }
+            cJSON* created_item = cJSON_GetObjectItem(json, "created_at");
+            if (cJSON_IsNumber(created_item)) {
+                session->created_at = (time_t)created_item->valuedouble;
+            }
+            cJSON* updated_item = cJSON_GetObjectItem(json, "updated_at");
+            if (cJSON_IsNumber(updated_item)) {
+                session->updated_at = (time_t)updated_item->valuedouble;
+            }
+            metadata_loaded = true;
+            cJSON_Delete(json);
+            continue;
+        }
+
+        // Regular message line
         cJSON* role_item = cJSON_GetObjectItem(json, "role");
         cJSON* content_item = cJSON_GetObjectItem(json, "content");
-        
+
         if (cJSON_IsString(role_item) && cJSON_IsString(content_item)) {
             char* role_str = role_item->valuestring;
             char* content_str = content_item->valuestring;
-            
+
             // Skip empty content to clean up bad history
             if (strlen(content_str) == 0) {
                 cJSON_Delete(json);
                 continue;
             }
-            
+
             MessageRole role = ROLE_USER;
             if (strcmp(role_str, "assistant") == 0) role = ROLE_ASSISTANT;
             else if (strcmp(role_str, "tool") == 0) role = ROLE_TOOL;
-            
+
             Message* msg = message_new(role, content_str);
-            
+
             // Restore timestamp if available
             cJSON* ts_item = cJSON_GetObjectItem(json, "timestamp");
             if (cJSON_IsString(ts_item)) {
                 string_free(&msg->timestamp);
                 msg->timestamp = string_new(ts_item->valuestring);
             }
-            
+
             session_add_message(session, msg);
         }
         cJSON_Delete(json);
     }
     fclose(f);
-    
-    // Set last_consolidated to current count so we don't re-save loaded messages
-    session->last_consolidated = session->messages.count;
-    
+
+    // If no metadata was loaded, set last_consolidated to current count
+    // (for backward compatibility with old session files)
+    if (!metadata_loaded) {
+        session->last_consolidated = session->messages.count;
+    }
+
     *session_out = session;
     return error_new(ERR_NONE, "");
 }

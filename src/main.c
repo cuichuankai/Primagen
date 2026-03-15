@@ -14,29 +14,31 @@
 #include "include/skills.h"
 #include "include/channel.h"
 #include "include/commands.h"
+#include "mcp/mcp.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <getopt.h>
-#include "vendor/mongoose/mongoose.h" // Include mongoose header
+#include "vendor/mongoose/mongoose.h"
 #include <sys/stat.h>
 
-// Global bus reference for cron callback
+/* Global bus reference for cron callback */
 static MessageBus* global_bus = NULL;
 
-// Channel list
+/* Channel list */
 #define MAX_CHANNELS 10
 static Channel* channels[MAX_CHANNELS];
 static int channel_count = 0;
 
+/* Cron job callback - injects message into bus for delivery */
 void cron_callback(CronJob* job) {
     if (!global_bus) return;
-    
+
     log_info("[Cron] Triggering job: %s", job->name);
-    
-    // Inject message into bus (Outbound for direct delivery)
+
+    /* Inject message into bus (Outbound for direct delivery) */
     OutboundMessage* msg = outbound_message_new(
         job->channel ? job->channel : "cli",
         job->to ? job->to : "local_user",
@@ -45,18 +47,20 @@ void cron_callback(CronJob* job) {
     message_bus_send_outbound(global_bus, msg);
 }
 
+/* Agent thread entry point */
 void* agent_thread(void* arg) {
     AgentLoop* loop = (AgentLoop*)arg;
     agent_loop_run(loop);
     return NULL;
 }
 
+/* Outbound message dispatcher thread - sends messages to channels */
 void* outbound_thread(void* arg) {
     MessageBus* bus = (MessageBus*)arg;
     while (1) {
         OutboundMessage* outbound = message_bus_receive_outbound(bus);
         if (outbound) {
-            // Dispatch to channels
+            /* Dispatch to channels */
             for (int i = 0; i < channel_count; i++) {
                 if (channels[i]->send) {
                     channels[i]->send(channels[i], outbound);
@@ -68,42 +72,25 @@ void* outbound_thread(void* arg) {
     return NULL;
 }
 
-void print_usage(const char* prog_name) {
-    printf("Usage: %s [command] [options]\n", prog_name);
-    printf("\nCommands:\n");
-    printf("  onboard          Initialize configuration and workspace\n");
-    printf("  agent            Run the agent loop (default)\n");
-    printf("  gateway          Start the gateway server\n");
-    printf("  status           Show system status\n");
-    printf("  channels status  Show channel status\n");
-    printf("\nOptions:\n");
-    printf("  -c, --config <path>      Path to config file (default: .primagen/config.json)\n");
-    printf("  -w, --workspace <path>   Path to workspace directory (default: .primagen)\n");
-    printf("  -m, --message <text>     Initial message to send to the agent\n");
-    printf("  -h, --help               Show this help message\n");
-}
-
-// Function prototypes for running the agent loop (extracted from original main)
+/* Print command line usage */
 int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_message);
 
+/* Main entry point - parses command line arguments and dispatches to appropriate handler */
 int main(int argc, char* argv[]) {
-    // Default paths
+    /* Default paths */
     char* config_path = strdup(".primagen/config.json");
     char* workspace_path = strdup(".primagen");
     char* initial_message = NULL;
-    
-    // Command parsing
-    // We need to handle commands before getopt because getopt might get confused
-    // Simple approach: look at argv[1]
-    
+
+    /* Command parsing - handle commands before getopt because getopt might get confused */
     char* command = NULL;
     if (argc > 1 && argv[1][0] != '-') {
         command = argv[1];
     }
 
-    // Parse options (skipping command if present)
+    /* Parse options (skipping command if present) */
     int opt_start = command ? 2 : 1;
-    // Reset getopt
+    /* Reset getopt */
     optind = opt_start;
     
     static struct option long_options[] = {
@@ -113,7 +100,7 @@ int main(int argc, char* argv[]) {
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
-    
+
     int opt;
     int long_index = 0;
     while ((opt = getopt_long(argc, argv, "c:w:m:h", long_options, &long_index)) != -1) {
@@ -137,22 +124,29 @@ int main(int argc, char* argv[]) {
                 free(initial_message);
                 return 0;
             default:
-                // Ignore unknown options for now, or handle error
+                /* Ignore unknown options for now, or handle error */
                 break;
         }
     }
 
-    // Load Config (needed for most commands)
+    /* Load Config (needed for most commands) */
     Config* cfg = config_create();
-    // Only load if not 'onboard' command (which creates it)
+    /* Only load if not 'onboard' command (which creates it) */
     bool config_loaded = false;
     if (!command || strcmp(command, "onboard") != 0) {
         config_loaded = config_load_from_file(cfg, config_path);
         if (!config_loaded) {
-            // Only warn if we expected to load it
-            // printf("Warning: Could not load config from %s\n", config_path);
+            /* Only warn if we expected to load it */
         }
     }
+
+    printf("\e[1;34m\n");
+    printf("_____________________________  _______________________________   __\n");
+    printf("___  __ \\__  __ \\___  _/__   |/  /__    |_  ____/__  ____/__  | / /\n");
+    printf("__  /_/ /_  /_/ /__  / __  /|_/ /__  /| |  / __ __  __/  __   |/ / \n");
+    printf("_  ____/_  _, _/__/ /  _  /  / / _  ___ / /_/ / _  /___  _  /|  /  \n");
+    printf("/_/     /_/ |_| /___/  /_/  /_/  /_/  |_\\____/  /_____/  /_/ |_/   \n");
+    printf("\e[0m\n");
 
     int ret = 0;
 
@@ -162,7 +156,6 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(command, "onboard") == 0) {
         ret = cmd_onboard(config_path, workspace_path);
     } else if (strcmp(command, "gateway") == 0) {
-        // TODO: parse port/verbose
         ret = cmd_gateway(cfg, 18790, false);
     } else if (strcmp(command, "status") == 0) {
         ret = cmd_status(cfg, config_path, workspace_path);
@@ -186,35 +179,40 @@ int main(int argc, char* argv[]) {
     return ret;
 }
 
-// Extracted logic for running the agent loop
+/* Extracted logic for running the agent loop */
 int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_message) {
-    log_info("Primagen - AI Agent Framework (C Refactoring)");
-    log_info("=============================================");
+    printf("      Primagen(Primitive Genesis) - AI Agent Framework\n");
+    printf("===================================================================\n");
 
-    // Initialize Global Libraries
-    // curl_global_init(CURL_GLOBAL_ALL); // Removed for Mongoose migration
-    mg_log_set(MG_LL_INFO); // Set mongoose log level if needed
+    mg_log_set(MG_LL_INFO); /* Set mongoose log level if needed */
 
     char full_log_path[512];
     snprintf(full_log_path, sizeof(full_log_path), "%s/log", workspace_path);
     mkdir(full_log_path, 0755);
     snprintf(full_log_path, sizeof(full_log_path), "%s/log/primagen.log", workspace_path);
     logger_init(full_log_path);
-    // Apply log config
+    /* Apply log config */
     logger_set_config(cfg->log.level, cfg->log.console_output);
+    log_info("[System] Primagen initialized.");
 
-    // 2. Initialize Components
+    /* Initialize Components */
+    log_debug("[System] Creating MessageBus...");
     MessageBus* bus = message_bus_new();
     global_bus = bus;
-    
-    SessionManager* session_mgr = session_manager_new(workspace_path); 
-    ContextBuilder* ctx_builder = context_builder_new(workspace_path); 
-    
-    // Initialize Memory
+
+    log_debug("[System] Creating SessionManager...");
+    SessionManager* session_mgr = session_manager_new(workspace_path);
+
+    log_debug("[System] Creating ContextBuilder...");
+    ContextBuilder* ctx_builder = context_builder_new(workspace_path);
+
+    /* Initialize Memory */
+    log_debug("[System] Creating Memory...");
     Memory* memory = memory_new();
     context_builder_set_memory(ctx_builder, memory);
-    
-    // Load Bootstrap Files (Identity & Docs)
+
+    /* Load Bootstrap Files (Identity & Docs) */
+    log_debug("[System] Loading bootstrap files...");
     char bootstrap_path[512];
     const char* bootstrap_files[] = {"AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"};
     size_t bootstrap_count = sizeof(bootstrap_files) / sizeof(bootstrap_files[0]);
@@ -247,17 +245,21 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
 
     ToolRegistry* tool_reg = tool_registry_new();
 
-    // Initialize Channels
-    // Console Channel (always enabled for now, or could be configured)
+    /* Initialize Channels */
+    /* Console Channel (always enabled for now, or could be configured) */
+    log_debug("[System] Creating Console channel...");
     Channel* console = channel_create_console();
     if (console->init(console, cfg, bus)) {
         channels[channel_count++] = console;
+        log_debug("[System] Console channel initialized.");
     } else {
         console->destroy(console);
+        log_error("[System] Console channel failed to init.");
     }
-    
-    // Telegram Channel
+
+    /* Telegram Channel */
     if (cfg->channels.telegram.enabled) {
+        log_debug("[System] Creating Telegram channel...");
         Channel* telegram = channel_create_telegram();
         if (telegram->init(telegram, cfg, bus)) {
             channels[channel_count++] = telegram;
@@ -268,87 +270,158 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         }
     }
 
-    // Email Channel
+    /* Email Channel */
     if (cfg->channels.email.enabled) {
+        log_debug("[System] Creating Email channel...");
         Channel* email = channel_create_email();
         if (email->init(email, cfg, bus)) {
             channels[channel_count++] = email;
             log_info("[System] Email channel initialized.");
         } else {
             email->destroy(email);
+            log_error("[System] Email channel disabled or failed to init.");
         }
     }
 
-    // Discord Channel
+    /* Discord Channel */
     if (cfg->channels.discord.enabled) {
+        log_debug("[System] Creating Discord channel...");
         Channel* discord = channel_create_discord();
         if (discord->init(discord, cfg, bus)) {
             channels[channel_count++] = discord;
             log_info("[System] Discord channel initialized.");
         } else {
             discord->destroy(discord);
+            log_error("[System] Discord channel disabled or failed to init.");
         }
     }
 
-    // Slack Channel
+    /* Slack Channel */
     if (cfg->channels.slack.enabled) {
+        log_debug("[System] Creating Slack channel...");
         Channel* slack = channel_create_slack();
         if (slack->init(slack, cfg, bus)) {
             channels[channel_count++] = slack;
             log_info("[System] Slack channel initialized.");
         } else {
             slack->destroy(slack);
+            log_error("[System] Slack channel disabled or failed to init.");
         }
     }
 
-    // DingTalk Channel
+    /* DingTalk Channel */
     if (cfg->channels.dingtalk.enabled) {
+        log_debug("[System] Creating DingTalk channel...");
         Channel* dingtalk = channel_create_dingtalk();
         if (dingtalk->init(dingtalk, cfg, bus)) {
             channels[channel_count++] = dingtalk;
             log_info("[System] DingTalk channel initialized.");
         } else {
             dingtalk->destroy(dingtalk);
+            log_error("[System] DingTalk channel disabled or failed to init.");
         }
     }
 
-    // Feishu Channel
+    /* Feishu Channel */
     if (cfg->channels.feishu.enabled) {
+        log_debug("[System] Creating Feishu channel...");
         Channel* feishu = channel_create_feishu();
         if (feishu->init(feishu, cfg, bus)) {
             channels[channel_count++] = feishu;
             log_info("[System] Feishu channel initialized.");
         } else {
             feishu->destroy(feishu);
+            log_error("[System] Feishu channel disabled or failed to init.");
         }
     }
 
-    // Start Channels
+    /* Start Channels */
     log_info("[System] Active Channels (%d):", channel_count);
     for (int i = 0; i < channel_count; i++) {
         if (channels[i]->start) channels[i]->start(channels[i]);
         log_info("  - %s", channels[i]->name);
     }
 
-    // Initialize Subagent Manager
+    /* Initialize MCP Manager */
+    if (cfg->mcp.enabled) {
+        log_debug("[System] Creating MCPManager...");
+        MCPManager* mcp_mgr = mcp_manager_create(workspace_path);
+
+        // Add configured MCP servers
+        for (size_t i = 0; i < cfg->mcp.server_count; i++) {
+            MCPServerConfig* srv = &cfg->mcp.servers[i];
+            log_info("[MCP] Adding server: %s (transport: %s)", srv->server_id, srv->transport_type);
+
+            // Convert StringArray to char**
+            char** args = NULL;
+            if (srv->args.count > 0) {
+                args = malloc(srv->args.count * sizeof(char*));
+                for (size_t j = 0; j < srv->args.count; j++) {
+                    args[j] = srv->args.items[j].data;
+                }
+            }
+
+            mcp_manager_add_client(mcp_mgr, srv->server_id, srv->transport_type,
+                                   srv->command, args, srv->args.count,
+                                   srv->env.items, srv->env.count);
+
+            if (args) free(args);
+        }
+
+        // Connect all clients
+        for (size_t i = 0; i < mcp_mgr->clients_count; i++) {
+            MCPClient* client = mcp_mgr->clients[i];
+            Error err = mcp_client_connect(client);
+            if (err.code == ERR_NONE) {
+                log_info("[MCP] Connected to %s", client->server_id);
+
+                // List available tools
+                MCPToolDef* tools = NULL;
+                size_t tools_count = 0;
+                err = mcp_client_list_tools(client, &tools, &tools_count);
+                if (err.code == ERR_NONE && tools_count > 0) {
+                    log_info("[MCP] %s provides %zu tools", client->server_id, tools_count);
+
+                    // Register MCP tools with ToolRegistry
+                    mcp_register_tools(tool_reg, client);
+
+                    for (size_t j = 0; j < tools_count; j++) {
+                        log_debug("  - Tool: %s", tools[j].name);
+                    }
+                }
+            } else {
+                log_error("[MCP] Failed to connect to %s: %s", client->server_id, err.message);
+            }
+        }
+
+        log_info("[System] MCP Manager initialized with %zu servers", mcp_mgr->clients_count);
+    } else {
+        log_info("[System] MCP disabled");
+    }
+
+    /* Initialize Subagent Manager */
+    log_debug("[System] Creating SubagentManager...");
     SubagentManager* subagent_mgr = subagent_manager_create(
         (void*)llm_provider_call,
-        workspace_path, 
+        workspace_path,
         bus,
         cfg
     );
-    
-    // Initialize Cron Service
+
+    /* Initialize Cron Service */
+    log_debug("[System] Creating CronService...");
     char cron_path[512];
     snprintf(cron_path, sizeof(cron_path), "%s/cron_store.json", workspace_path);
     CronService* cron_service = cron_service_create(cron_path);
     cron_service_set_callback(cron_service, cron_callback);
     cron_service_start(cron_service);
 
-    // Initialize Skills Loader
+    /* Initialize Skills Loader */
+    log_debug("[System] Creating SkillsLoader...");
     SkillsLoader* skills_loader = skills_loader_create(workspace_path);
 
-    // Create Tool Context
+    /* Create Tool Context */
+    log_debug("[System] Creating ToolContext...");
     ToolContext* tool_ctx = malloc(sizeof(ToolContext));
     tool_ctx->bus = bus;
     tool_ctx->subagent_mgr = subagent_mgr;
@@ -359,45 +432,49 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     tool_ctx->current_channel = "cli";
     tool_ctx->current_chat_id = "current";
 
-    // 3. Register Tools
+    /* Register Tools */
+    log_debug("[System] Registering all tools...");
     register_all_tools(tool_reg, tool_ctx);
 
-    // 4. Create Agent Loop
+    /* Create Agent Loop */
+    log_debug("[System] Creating AgentLoop...");
     AgentLoop* loop = agent_loop_new(session_mgr, ctx_builder, tool_reg, bus, cfg);
     agent_loop_set_llm_provider(loop, llm_provider_call);
 
-    // 5. Start Threads
+    /* Start Threads */
+    log_debug("[System] Starting agent thread...");
     pthread_t agent_tid, outbound_tid;
-    
+
     if (pthread_create(&agent_tid, NULL, agent_thread, loop) != 0) {
         fprintf(stderr, "Failed to create agent thread\n");
         return 1;
     }
-    
+
+    log_debug("[System] Starting outbound thread...");
     if (pthread_create(&outbound_tid, NULL, outbound_thread, bus) != 0) {
         fprintf(stderr, "Failed to create outbound thread\n");
         return 1;
     }
 
-    // Inject initial message if provided
+    /* Inject initial message if provided */
     if (initial_message) {
         log_info("[System] Injecting initial message: %s", initial_message);
-        // Use "cli" channel and "user" chat_id
+        /* Use "cli" channel and "local_user" chat_id */
         InboundMessage* msg = inbound_message_new("cli", "local_user", initial_message);
         message_bus_send_inbound(bus, msg);
     }
 
-    // Main thread waits (Channels run in their own threads or main loop)
-    // Console channel spawns a thread, so we just wait here
+    /* Main thread waits (Channels run in their own threads or main loop) */
+    /* Console channel spawns a thread, so we just wait here */
     pthread_join(agent_tid, NULL);
-    // pthread_join(outbound_tid, NULL); // Unreachable unless agent stops
+    /* pthread_join(outbound_tid, NULL); - Unreachable unless agent stops */
 
-    // Cleanup
+    /* Cleanup */
     for (int i = 0; i < channel_count; i++) {
         channels[i]->stop(channels[i]);
         channels[i]->destroy(channels[i]);
     }
-    
+
     cron_service_stop(cron_service);
     cron_service_destroy(cron_service);
     subagent_manager_destroy(subagent_mgr);
@@ -405,8 +482,8 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     memory_free(memory);
     free(tool_ctx);
 
-    // curl_global_cleanup(); // Removed for Mongoose migration
+    /* curl_global_cleanup(); - Removed for Mongoose migration */
     logger_cleanup();
-    
+
     return 0;
 }

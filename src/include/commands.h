@@ -4,11 +4,14 @@
 #include "common.h"
 #include "config.h"
 
-// Command functions
+/* Command functions */
 int cmd_onboard(const char* config_path, const char* workspace_path);
 int cmd_gateway(Config* cfg, int port, bool verbose);
 int cmd_agent(Config* cfg, const char* message, const char* session_id, bool markdown, bool logs);
 int cmd_channels_status(Config* cfg);
 int cmd_status(Config* cfg, const char* config_path, const char* workspace_path);
+
+/* Print command line usage */
+void print_usage(const char* program_name);
 
 #endif // COMMANDS_H

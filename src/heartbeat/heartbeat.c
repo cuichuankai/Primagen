@@ -1,10 +1,14 @@
 #include "../include/heartbeat.h"
+#include "../include/logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <time.h>
 #include "../include/common.h"
+
+// Heartbeat service implementation
 
 struct HeartbeatService {
     char* workspace;
@@ -19,23 +23,122 @@ struct HeartbeatService {
     pthread_mutex_t mutex;
 };
 
+// Read HEARTBEAT.md file
+static char* read_heartbeat_file(const char* workspace) {
+    if (!workspace) return NULL;
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/HEARTBEAT.md", workspace);
+
+    FILE* f = fopen(path, "r");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long length = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (length <= 0) {
+        fclose(f);
+        return NULL;
+    }
+
+    char* content = malloc(length + 1);
+    if (!content) {
+        fclose(f);
+        return NULL;
+    }
+
+    fread(content, 1, length, f);
+    content[length] = '\0';
+    fclose(f);
+
+    return content;
+}
+
+// Phase 1: Ask LLM to decide skip/run via tool call
+// Returns: 0 = skip, 1 = run, -1 = error
+static int heartbeat_decide(void* provider, const char* model, const char* content, char** tasks_out) {
+    (void)provider;  // Stub - real implementation would use provider
+    (void)model;     // Stub - real implementation would use model
+
+    if (!content || !tasks_out) return -1;
+
+    log_info("[Heartbeat] Asking LLM to decide...");
+
+    // Build prompt
+    char prompt[4096];
+    snprintf(prompt, sizeof(prompt),
+        "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n"
+        "%s",
+        content
+    );
+
+    // Call LLM with tool (this is a simplified stub - real implementation would call LLM)
+    // For now, we simulate the decision based on content
+    // A full implementation would use the provider's chat_with_retry with tool support
+
+    // Simple heuristic for simulation:
+    // - If content contains "pending", "todo", "task", etc., return "run"
+    // - Otherwise return "skip"
+    const char* run_keywords[] = {"pending", "todo", "task", "active", "waiting", NULL};
+    bool should_run = false;
+
+    const char** kw = run_keywords;
+    while (*kw) {
+        if (strcasestr(content, *kw)) {
+            should_run = true;
+            break;
+        }
+        kw++;
+    }
+
+    if (should_run) {
+        *tasks_out = strdup("Tasks found in HEARTBEAT.md");
+        return 1;
+    } else {
+        *tasks_out = NULL;
+        return 0;
+    }
+}
+
 static void* heartbeat_worker(void* arg) {
     HeartbeatService* service = (HeartbeatService*)arg;
 
     while (service->running) {
         sleep(service->interval_s);
 
-        if (service->on_execute) {
-            // Simulate heartbeat tasks
-            const char* tasks = "Check system status and perform maintenance tasks.";
-            char* response = service->on_execute(tasks);
+        if (!service->running) break;
 
+        // Read HEARTBEAT.md
+        char* content = read_heartbeat_file(service->workspace);
+        if (!content) {
+            log_debug("[Heartbeat] HEARTBEAT.md missing or empty");
+            continue;
+        }
+
+        log_info("[Heartbeat] Checking for tasks...");
+
+        // Phase 1: Decide
+        char* tasks = NULL;
+        int decision = heartbeat_decide(service->provider, service->model, content, &tasks);
+        free(content);
+
+        if (decision <= 0) {
+            log_info("[Heartbeat] OK (nothing to report)");
+            continue;
+        }
+
+        // Phase 2: Execute
+        log_info("[Heartbeat] Tasks found, executing...");
+        if (service->on_execute && tasks) {
+            char* response = service->on_execute(tasks);
             if (response && service->on_notify) {
+                log_info("[Heartbeat] Completed, delivering response");
                 service->on_notify(response);
             }
-
             free(response);
         }
+        free(tasks);
     }
 
     return NULL;
@@ -84,9 +187,11 @@ bool heartbeat_service_start(HeartbeatService* service) {
 
     if (pthread_create(&service->worker_thread, NULL, heartbeat_worker, service) != 0) {
         service->running = false;
+        log_error("[Heartbeat] Failed to start worker thread");
         return false;
     }
 
+    log_info("[Heartbeat] Started (every %ds)", service->interval_s);
     return true;
 }
 
@@ -95,4 +200,29 @@ void heartbeat_service_stop(HeartbeatService* service) {
 
     service->running = false;
     pthread_join(service->worker_thread, NULL);
+    log_info("[Heartbeat] Stopped");
+}
+
+/* Manually trigger a heartbeat */
+char* heartbeat_service_trigger_now(HeartbeatService* service) {
+    if (!service) return NULL;
+
+    char* content = read_heartbeat_file(service->workspace);
+    if (!content) return NULL;
+
+    char* tasks = NULL;
+    int decision = heartbeat_decide(service->provider, service->model, content, &tasks);
+    free(content);
+
+    if (decision <= 0 || !tasks) {
+        return NULL;
+    }
+
+    char* result = NULL;
+    if (service->on_execute) {
+        result = service->on_execute(tasks);
+    }
+    free(tasks);
+
+    return result;
 }
