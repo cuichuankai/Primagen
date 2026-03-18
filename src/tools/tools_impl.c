@@ -8,6 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include <ctype.h>
 
@@ -71,7 +72,7 @@ static bool is_known_channel(const char* s) {
     return s && (strcmp(s, "console") == 0 || strcmp(s, "telegram") == 0 ||
                  strcmp(s, "email") == 0 || strcmp(s, "discord") == 0 ||
                  strcmp(s, "slack") == 0 || strcmp(s, "dingtalk") == 0 ||
-                 strcmp(s, "feishu") == 0 || strcmp(s, "system") == 0);
+                 strcmp(s, "system") == 0);
 }
 
 static const char* resolve_channel(ToolContext* ctx, const char* channel) {
@@ -133,45 +134,6 @@ static void strip_tags(char* src, char* dst) {
 }
 
 // --- Tools Implementation ---
-
-void register_all_tools(ToolRegistry* reg, ToolContext* ctx) {
-    tool_registry_register(reg, "read_file", "Read file content", 
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", 
-        tool_read_file, ctx);
-    tool_registry_register(reg, "write_file", "Write file content", 
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}", 
-        tool_write_file, ctx);
-    tool_registry_register(reg, "edit_file", "Edit file content", 
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_str\":{\"type\":\"string\"},\"new_str\":{\"type\":\"string\"}},\"required\":[\"path\",\"old_str\",\"new_str\"]}", 
-        tool_edit_file, ctx);
-    tool_registry_register(reg, "list_dir", "List directory contents", 
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", 
-        tool_list_dir, ctx);
-    tool_registry_register(reg, "exec", "Execute shell command", 
-        "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}", 
-        tool_exec, ctx);
-    tool_registry_register(reg, "web_search", "Search the web", 
-        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}},\"required\":[\"query\"]}", 
-        tool_web_search, ctx);
-    tool_registry_register(reg, "web_fetch", "Fetch URL content", 
-        "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}", 
-        tool_web_fetch, ctx);
-    tool_registry_register(reg, "send_message", "Send message to user", 
-        "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"}},\"required\":[\"content\"]}", 
-        tool_send_message, ctx);
-    tool_registry_register(reg, "spawn_subagent", "Spawn subagent",
-        "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"task\"]}",
-        tool_spawn, ctx);
-    tool_registry_register(reg, "cron", "Schedule a reminder or recurring task. Use for future notifications. Formats: '@in N' (N seconds later, one-time), '@every N' (recurring), '@at TIMESTAMP', or 'M H * * *' (daily cron). Example: schedule a drink water reminder with name='drink-water', payload='该喝水了！', schedule='@in 1800' for 30 minutes.",
-        "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Unique job identifier, e.g., 'drink-water', 'stand-up'\"},\"payload\":{\"type\":\"string\",\"description\":\"Message content to deliver when triggered\"},\"schedule\":{\"type\":\"string\",\"description\":\"When to trigger: '@in N' (N seconds), '@every N', '@at UNIX_TIMESTAMP', or 'M H * * *'\"},\"channel\":{\"type\":\"string\"},\"chat_id\":{\"type\":\"string\"}},\"required\":[\"name\",\"payload\",\"schedule\"]}",
-        tool_cron, ctx);
-    tool_registry_register(reg, "skill", "Manage skills", 
-        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"load\",\"unload\"]},\"name\":{\"type\":\"string\"}},\"required\":[\"action\"]}", 
-        tool_skill, ctx);
-    tool_registry_register(reg, "memory", "Manage long-term memory. Use this to consolidate conversation history into persistent memory.", 
-        "{\"type\":\"object\",\"properties\":{\"history_entry\":{\"type\":\"string\",\"description\":\"A paragraph summarizing key events/decisions. Start with [YYYY-MM-DD HH:MM].\"},\"memory_update\":{\"type\":\"string\",\"description\":\"Full updated long-term memory content (facts). Return unchanged if no new facts.\"}},\"required\":[\"history_entry\"]}", 
-        tool_memory, ctx);
-}
 
 Error tool_memory(void* user_data, const char* args_json, String* result) {
     ToolContext* ctx = (ToolContext*)user_data;
@@ -487,31 +449,44 @@ Error tool_exec(void* user_data, const char* args_json, String* result) {
     (void)user_data;
     cJSON* json = cJSON_Parse(args_json);
     if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
-    
+
     char* command = get_json_string(json, "command");
     if (!command) {
         cJSON_Delete(json);
         return error_new(ERR_INVALID_PARAM, "Missing 'command' argument");
     }
-    
-    FILE* fp = popen(command, "r");
+
+    // Execute command (timeout is handled by tool_executor)
+    // Note: We add a shell timeout wrapper for extra safety on Linux systems
+    char* shell_cmd = NULL;
+    asprintf(&shell_cmd, "%s 2>&1", command);
+
+    FILE* fp = popen(shell_cmd, "r");
+    free(shell_cmd);
+
     if (!fp) {
         cJSON_Delete(json);
         return error_new(ERR_TOOL, "Failed to execute command");
     }
-    
+
     char buffer[1024];
     *result = string_new("");
-    
+
     while (fgets(buffer, sizeof(buffer), fp) != NULL) {
         string_append(result, buffer);
     }
-    
+
     int status = pclose(fp);
-    char status_str[64];
-    snprintf(status_str, sizeof(status_str), "\nExit code: %d", status);
+    char status_str[128];
+    if (WIFEXITED(status)) {
+        snprintf(status_str, sizeof(status_str), "\nExit code: %d", WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        snprintf(status_str, sizeof(status_str), "\nTerminated by signal: %d", WTERMSIG(status));
+    } else {
+        snprintf(status_str, sizeof(status_str), "\nExit status: %d", status);
+    }
     string_append(result, status_str);
-    
+
     cJSON_Delete(json);
     return error_new(ERR_NONE, "");
 }

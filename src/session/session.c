@@ -1,8 +1,10 @@
 #include "session.h"
 #include "../include/common.h"
 #include "../include/message.h"
+#include "../vendor/cJSON/cJSON.h"
 #include <dirent.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 SessionManager* session_manager_new(const char* workspace_path) {
     SessionManager* mgr = malloc(sizeof(SessionManager));
@@ -11,10 +13,23 @@ SessionManager* session_manager_new(const char* workspace_path) {
     mgr->capacity = 8;
     mgr->sessions = malloc(mgr->capacity * sizeof(Session*));
     mgr->workspace_path = string_new(workspace_path);
-    // Create sessions directory if not exists
+    // Create sessions directory if not exists (including parent directories)
     char path[512];
     snprintf(path, sizeof(path), "%s/sessions", workspace_path);
-    mkdir(path, 0755);
+    // Use system mkdir -p equivalent by trying to create with parents
+    // First ensure parent directory exists (workspace_path should exist)
+    // Then create sessions subdirectory
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        // Directory doesn't exist, try to create it
+        // Try creating parent first if needed
+        char parent[512];
+        snprintf(parent, sizeof(parent), "%s", workspace_path);
+        if (stat(parent, &st) != 0) {
+            mkdir(parent, 0755);  // Create workspace if needed
+        }
+        mkdir(path, 0755);  // Create sessions subdirectory
+    }
     return mgr;
 }
 
@@ -81,10 +96,18 @@ Error session_manager_save(SessionManager* mgr, Session* session) {
         if (msg->role == ROLE_TOOL) continue;
         if (msg->role == ROLE_ASSISTANT && msg->tool_calls_count > 0 && msg->content.len == 0) continue;
 
-        // Simple JSON-like output
-        fprintf(f, "{\"role\":\"%s\",\"content\":\"%s\",\"timestamp\":\"%s\"}\n",
-                msg->role == ROLE_USER ? "user" : "assistant",
-                msg->content.data, msg->timestamp.data);
+        // Use cJSON to properly escape content
+        cJSON* msg_obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(msg_obj, "role", msg->role == ROLE_USER ? "user" : "assistant");
+        cJSON_AddStringToObject(msg_obj, "content", msg->content.data);
+        cJSON_AddStringToObject(msg_obj, "timestamp", msg->timestamp.data);
+
+        char* msg_json = cJSON_PrintUnformatted(msg_obj);
+        if (msg_json) {
+            fprintf(f, "%s\n", msg_json);
+            free(msg_json);
+        }
+        cJSON_Delete(msg_obj);
     }
     fclose(f);
     return error_new(ERR_NONE, "");

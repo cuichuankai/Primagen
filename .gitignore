@@ -1,6 +1,39 @@
+# Build output
 build/
-tests/
+# Runtime directories
 .primagen/
+
+*.o
+*.so
+*.dylib
+*.a
+*.lib
+*.dll
+*.exe
+
+# Plugin build artifacts
+**/*.so
+**/*.dylib
+
+# Test artifacts
+tests/
+unit_tests
+*.out
+
+# macOS
 .DS_Store
+*.dSYM/
+
+# IDE
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Dependencies
 mcp-servers/
+
+# Logs
+*.log
+logs/

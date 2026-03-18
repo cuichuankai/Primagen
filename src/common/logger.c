@@ -123,6 +123,7 @@ static void log_v_with_loc(const char* level, const char* fmt, va_list args,
         } else {
             fprintf(out_stream, "[%s] [%s] %s\n", timestamp, level, message);
         }
+        fflush(out_stream);
     }
 
     /* File output */

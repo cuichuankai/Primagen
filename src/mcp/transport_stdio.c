@@ -108,7 +108,7 @@ static void* stdio_reader_thread(void* arg) {
     }
 
     transport->running = false;
-    log_info("[MCP stdio] Reader thread stopped for %s", client->server_id);
+    log_debug("[MCP stdio] Reader thread stopped for %s", client->server_id);
     return NULL;
 }
 
@@ -118,7 +118,7 @@ static Error mcp_transport_stdio_init(MCPClient* client) {
         return error_new(ERR_INVALID_PARAM, "Invalid client or command");
     }
 
-    log_info("[MCP stdio] Starting %s with command: %s", client->server_id, client->command);
+    log_debug("[MCP stdio] Starting %s with command: %s", client->server_id, client->command);
 
     // Create pipes for stdin and stdout
     int stdin_pipe[2];   // parent writes -> child reads
@@ -208,7 +208,7 @@ static Error mcp_transport_stdio_init(MCPClient* client) {
         return error_new(ERR_CONNECTION, "Failed to create reader thread");
     }
 
-    log_info("[MCP stdio] Started process %d for %s", pid, client->server_id);
+    log_debug("[MCP stdio] Started process %d for %s", pid, client->server_id);
     return error_new(ERR_NONE, "");
 }
 
@@ -311,7 +311,7 @@ static void mcp_transport_stdio_close(MCPClient* client) {
     free(transport);
 
     client->transport_data = NULL;
-    log_info("[MCP stdio] Closed connection to %s", client->server_id);
+    log_debug("[MCP stdio] Closed connection to %s", client->server_id);
 }
 
 // Transport vtable
@@ -344,7 +344,7 @@ static MCPTransportOps* get_transport_ops(const char* type) {
 Error mcp_client_connect(MCPClient* client) {
     if (!client) return error_new(ERR_INVALID_PARAM, "client is NULL");
 
-    log_info("[MCP] Connecting to %s via %s...", client->server_id, client->transport_type);
+    log_debug("[MCP] Connecting to %s via %s...", client->server_id, client->transport_type);
 
     MCPTransportOps* ops = get_transport_ops(client->transport_type);
     if (!ops) {
@@ -355,7 +355,7 @@ Error mcp_client_connect(MCPClient* client) {
     Error err = ops->init(client);
     if (err.code == ERR_NONE) {
         client->connected = true;
-        log_info("[MCP] Connected to %s", client->server_id);
+        log_debug("[MCP] Connected to %s", client->server_id);
     }
 
     return err;
@@ -364,7 +364,7 @@ Error mcp_client_connect(MCPClient* client) {
 void mcp_client_disconnect(MCPClient* client) {
     if (!client) return;
 
-    log_info("[MCP] Disconnecting from %s", client->server_id);
+    log_debug("[MCP] Disconnecting from %s", client->server_id);
 
     MCPTransportOps* ops = get_transport_ops(client->transport_type);
     if (ops && ops->close) {

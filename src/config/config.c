@@ -1,4 +1,5 @@
 #include "../include/config.h"
+#include "../include/logger.h"
 #include "../vendor/cJSON/cJSON.h"
 #include <stdbool.h>
 #include <stdlib.h>
@@ -73,6 +74,59 @@ static void load_string_array(cJSON* array_item, StringArray* target) {
             string_array_add(target, item->valuestring);
         }
     }
+}
+
+// PluginConfig helper functions
+PluginConfig* config_add_plugin_config(Config* cfg, const char* plugin_id) {
+    if (!cfg || !plugin_id) return NULL;
+
+    // Check if plugin already exists
+    for (size_t i = 0; i < cfg->plugins.count; i++) {
+        if (cfg->plugins.items[i].plugin_id &&
+            strcmp(cfg->plugins.items[i].plugin_id, plugin_id) == 0) {
+            return &cfg->plugins.items[i];
+        }
+    }
+
+    // Grow array if needed
+    if (cfg->plugins.count >= cfg->plugins.capacity) {
+        size_t new_capacity = cfg->plugins.capacity == 0 ? 4 : cfg->plugins.capacity * 2;
+        PluginConfig* new_items = realloc(cfg->plugins.items, new_capacity * sizeof(PluginConfig));
+        if (!new_items) return NULL;
+        cfg->plugins.items = new_items;
+        cfg->plugins.capacity = new_capacity;
+    }
+
+    // Initialize new item
+    PluginConfig* item = &cfg->plugins.items[cfg->plugins.count];
+    item->plugin_id = strdup(plugin_id);
+    item->config = NULL;
+    cfg->plugins.count++;
+
+    return item;
+}
+
+PluginConfig* config_get_plugin_config(Config* cfg, const char* plugin_id) {
+    if (!cfg || !plugin_id) return NULL;
+
+    for (size_t i = 0; i < cfg->plugins.count; i++) {
+        if (cfg->plugins.items[i].plugin_id &&
+            strcmp(cfg->plugins.items[i].plugin_id, plugin_id) == 0) {
+            return &cfg->plugins.items[i];
+        }
+    }
+
+    return NULL;
+}
+
+void config_plugin_config_free(PluginConfig* item) {
+    if (!item) return;
+    free(item->plugin_id);
+    if (item->config) {
+        cJSON_Delete(item->config);
+    }
+    item->plugin_id = NULL;
+    item->config = NULL;
 }
 
 // EnvVarArray helper functions
@@ -181,12 +235,6 @@ Config* config_create() {
     cfg->channels.dingtalk.client_secret = strdup("");
     cfg->channels.dingtalk.allow_from = string_array_new();
 
-    cfg->channels.feishu.enabled = false;
-    cfg->channels.feishu.app_id = strdup("");
-    cfg->channels.feishu.app_secret = strdup("");
-    cfg->channels.feishu.use_card = false;
-    cfg->channels.feishu.allow_from = string_array_new();
-
     cfg->channels.whatsapp.enabled = false;
     cfg->channels.whatsapp.bridge_url = strdup("ws://localhost:3001");
     cfg->channels.whatsapp.bridge_token = strdup("");
@@ -199,6 +247,11 @@ Config* config_create() {
     cfg->mcp.servers = NULL;
     cfg->mcp.server_count = 0;
     cfg->mcp.server_capacity = 0;
+
+    // Default plugins config
+    cfg->plugins.items = NULL;
+    cfg->plugins.count = 0;
+    cfg->plugins.capacity = 0;
 
     return cfg;
 }
@@ -241,10 +294,6 @@ void config_destroy(Config* cfg) {
     free(cfg->channels.dingtalk.client_secret);
     string_array_free(&cfg->channels.dingtalk.allow_from);
 
-    free(cfg->channels.feishu.app_id);
-    free(cfg->channels.feishu.app_secret);
-    string_array_free(&cfg->channels.feishu.allow_from);
-
     free(cfg->channels.whatsapp.bridge_url);
     free(cfg->channels.whatsapp.bridge_token);
     string_array_free(&cfg->channels.whatsapp.allow_from);
@@ -258,6 +307,12 @@ void config_destroy(Config* cfg) {
         env_var_array_free(&cfg->mcp.servers[i].env);
     }
     free(cfg->mcp.servers);
+
+    // Free plugins config
+    for (size_t i = 0; i < cfg->plugins.count; i++) {
+        config_plugin_config_free(&cfg->plugins.items[i]);
+    }
+    free(cfg->plugins.items);
 
     free(cfg);
 }
@@ -453,15 +508,6 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
             load_string_array(cJSON_GetObjectItem(dingtalk, "allowFrom"), &cfg->channels.dingtalk.allow_from);
         }
 
-        cJSON* feishu = cJSON_GetObjectItem(channels, "feishu");
-        if (feishu) {
-            if ((item = cJSON_GetObjectItem(feishu, "enabled"))) cfg->channels.feishu.enabled = get_json_bool(item, false);
-            if ((item = cJSON_GetObjectItem(feishu, "app_id"))) { free(cfg->channels.feishu.app_id); cfg->channels.feishu.app_id = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(feishu, "app_secret"))) { free(cfg->channels.feishu.app_secret); cfg->channels.feishu.app_secret = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(feishu, "useCard"))) cfg->channels.feishu.use_card = get_json_bool(item, false);
-            load_string_array(cJSON_GetObjectItem(feishu, "allow_from"), &cfg->channels.feishu.allow_from);
-        }
-        
         cJSON* whatsapp = cJSON_GetObjectItem(channels, "whatsapp");
         if (whatsapp) {
             if ((item = cJSON_GetObjectItem(whatsapp, "enabled"))) cfg->channels.whatsapp.enabled = get_json_bool(item, false);
@@ -540,6 +586,40 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
                 }
 
                 cfg->mcp.server_count++;
+            }
+        }
+    }
+
+    // Plugins Config
+    cJSON* plugins = cJSON_GetObjectItem(json, "plugins");
+    if (cJSON_IsArray(plugins)) {
+        cJSON* plugin_item;
+        cJSON_ArrayForEach(plugin_item, plugins) {
+            // Support both "plugin_id" (preferred) and "id" (legacy) field names
+            cJSON* id_item = cJSON_GetObjectItem(plugin_item, "plugin_id");
+            if (!cJSON_IsString(id_item)) {
+                id_item = cJSON_GetObjectItem(plugin_item, "id");
+            }
+            if (!cJSON_IsString(id_item)) {
+                log_warn("[Config] Plugin missing plugin_id and id field, skipping");
+                continue;
+            }
+
+            const char* plugin_id = id_item->valuestring;
+            PluginConfig* pc = config_add_plugin_config(cfg, plugin_id);
+            if (pc) {
+                // Get the inner "config" object from the plugin item
+                cJSON* inner_config = cJSON_GetObjectItem(plugin_item, "config");
+                if (cJSON_IsObject(inner_config)) {
+                    // Deep copy just the inner config object
+                    cJSON* config_copy = cJSON_Duplicate(inner_config, 1);
+                    if (config_copy) {
+                        if (pc->config) {
+                            cJSON_Delete(pc->config);
+                        }
+                        pc->config = config_copy;
+                    }
+                }
             }
         }
     }
@@ -688,16 +768,6 @@ void config_load_from_env(Config* cfg) {
     const char* env_dingtalk_client_secret = get_env_string("PRIMAGEN_DINGTALK_CLIENT_SECRET", NULL);
     if (env_dingtalk_client_secret) { free(cfg->channels.dingtalk.client_secret); cfg->channels.dingtalk.client_secret = strdup(env_dingtalk_client_secret); }
 
-    // Feishu - PRIMAGEN_FEISHU_*
-    const char* env_feishu_enabled = get_env_string("PRIMAGEN_FEISHU_ENABLED", NULL);
-    if (env_feishu_enabled) { cfg->channels.feishu.enabled = get_env_bool("PRIMAGEN_FEISHU_ENABLED", cfg->channels.feishu.enabled); }
-
-    const char* env_feishu_app_id = get_env_string("PRIMAGEN_FEISHU_APP_ID", NULL);
-    if (env_feishu_app_id) { free(cfg->channels.feishu.app_id); cfg->channels.feishu.app_id = strdup(env_feishu_app_id); }
-
-    const char* env_feishu_app_secret = get_env_string("PRIMAGEN_FEISHU_APP_SECRET", NULL);
-    if (env_feishu_app_secret) { free(cfg->channels.feishu.app_secret); cfg->channels.feishu.app_secret = strdup(env_feishu_app_secret); }
-
     // WhatsApp - PRIMAGEN_WHATSAPP_*
     const char* env_whatsapp_enabled = get_env_string("PRIMAGEN_WHATSAPP_ENABLED", NULL);
     if (env_whatsapp_enabled) { cfg->channels.whatsapp.enabled = get_env_bool("PRIMAGEN_WHATSAPP_ENABLED", cfg->channels.whatsapp.enabled); }
@@ -760,22 +830,48 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
     cJSON* channels = cJSON_CreateObject();
     cJSON_AddBoolToObject(channels, "sendProgress", cfg->channels.send_progress);
     cJSON_AddBoolToObject(channels, "sendToolHints", cfg->channels.send_tool_hints);
-    
+
     cJSON* telegram = cJSON_CreateObject();
     cJSON_AddBoolToObject(telegram, "enabled", cfg->channels.telegram.enabled);
     cJSON_AddStringToObject(telegram, "token", cfg->channels.telegram.token);
     // TODO: save allowFrom
     cJSON_AddItemToObject(channels, "telegram", telegram);
-    
+
     cJSON* whatsapp = cJSON_CreateObject();
     cJSON_AddBoolToObject(whatsapp, "enabled", cfg->channels.whatsapp.enabled);
     cJSON_AddStringToObject(whatsapp, "bridgeUrl", cfg->channels.whatsapp.bridge_url);
     cJSON_AddStringToObject(whatsapp, "bridgeToken", cfg->channels.whatsapp.bridge_token);
     // TODO: save allowFrom
     cJSON_AddItemToObject(channels, "whatsapp", whatsapp);
-    
+
     cJSON_AddItemToObject(json, "channels", channels);
-    
+
+    // Plugins
+    if (cfg->plugins.count > 0) {
+        cJSON* plugins_array = cJSON_CreateArray();
+        for (size_t i = 0; i < cfg->plugins.count; i++) {
+            PluginConfig* pc = &cfg->plugins.items[i];
+            if (pc->plugin_id) {
+                cJSON* plugin_obj = cJSON_CreateObject();
+                cJSON_AddStringToObject(plugin_obj, "id", pc->plugin_id);
+                if (pc->config) {
+                    // Merge config fields into the plugin object
+                    cJSON* child = pc->config->child;
+                    while (child) {
+                        cJSON* copy = cJSON_Duplicate(child, 1);
+                        if (copy) {
+                            cJSON_AddItemReferenceToObject(plugin_obj, child->string, copy);
+                            cJSON_Delete(copy);  // Remove reference, item is now owned by plugin_obj
+                        }
+                        child = child->next;
+                    }
+                }
+                cJSON_AddItemToArray(plugins_array, plugin_obj);
+            }
+        }
+        cJSON_AddItemToObject(json, "plugins", plugins_array);
+    }
+
     char* string = cJSON_Print(json);
     cJSON_Delete(json);
     

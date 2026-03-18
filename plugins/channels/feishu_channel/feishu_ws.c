@@ -1,7 +1,7 @@
 #include "feishu_ws.h"
-#include "../include/logger.h"
-#include "../vendor/cJSON/cJSON.h"
-#include "../vendor/mongoose/mongoose.h"
+#include "../../../src/include/logger.h"
+#include "../../../src/vendor/cJSON/cJSON.h"
+#include "../../../src/vendor/mongoose/mongoose.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

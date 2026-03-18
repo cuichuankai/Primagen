@@ -153,23 +153,60 @@ static void* subagent_task_runner(void* arg) {
     task_data->ctx_builder = context_builder_new(mgr->workspace);
     task_data->tool_reg = tool_registry_new();
 
-    // Register tools
+    // Register tools directly (subagents don't use PluginManager)
+    // Note: ToolContext fields not explicitly set are NULL
     ToolContext tool_ctx = {
-        .bus = task_data->sub_bus, // Subagent uses its own bus for tool output
+        .bus = task_data->sub_bus,
         .subagent_mgr = mgr,
-        .cron_service = NULL // Subagents don't manage cron? Or maybe they do. For now NULL.
+        .cron_service = NULL,
+        .skills_loader = NULL,
+        .memory = NULL,
+        .workspace = mgr->workspace,
+        .current_channel = "subagent",
+        .current_chat_id = task_data->task_id
     };
-    register_all_tools(task_data->tool_reg, &tool_ctx);
+
+    // Register all standard tools
+    tool_registry_register(task_data->tool_reg, "read_file", "Read file content",
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
+        tool_read_file, &tool_ctx);
+    tool_registry_register(task_data->tool_reg, "write_file", "Write file content",
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}",
+        tool_write_file, &tool_ctx);
+    tool_registry_register(task_data->tool_reg, "edit_file", "Edit file content",
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_str\":{\"type\":\"string\"},\"new_str\":{\"type\":\"string\"}},\"required\":[\"path\",\"old_str\",\"new_str\"]}",
+        tool_edit_file, &tool_ctx);
+    tool_registry_register(task_data->tool_reg, "list_dir", "List directory contents",
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
+        tool_list_dir, &tool_ctx);
+    tool_registry_register(task_data->tool_reg, "exec", "Execute shell command",
+        "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}",
+        tool_exec, &tool_ctx);
+    tool_registry_register(task_data->tool_reg, "web_search", "Search the web",
+        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}},\"required\":[\"query\"]}",
+        tool_web_search, &tool_ctx);
+    tool_registry_register(task_data->tool_reg, "web_fetch", "Fetch URL content",
+        "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}",
+        tool_web_fetch, &tool_ctx);
+    tool_registry_register(task_data->tool_reg, "send_message", "Send message to user",
+        "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"}},\"required\":[\"content\"]}",
+        tool_send_message, &tool_ctx);
+    tool_registry_register(task_data->tool_reg, "spawn_subagent", "Spawn subagent",
+        "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"task\"]}",
+        tool_spawn, &tool_ctx);
 
     // Create Loop
     // Subagent uses the SAME config as main agent for now (same API key, model, etc.)
     // We might want to override model/temp for subagents, but let's keep it simple.
+    // Note: Subagents don't need plugin manager access, so pass NULL
     task_data->loop = agent_loop_new(
         task_data->session_mgr,
         task_data->ctx_builder,
         task_data->tool_reg,
         task_data->sub_bus,
-        mgr->config
+        mgr->config,
+        NULL,
+        ".primagen"  // Default workspace path for subagents
     );
 
     // Update tracking node with loop pointer

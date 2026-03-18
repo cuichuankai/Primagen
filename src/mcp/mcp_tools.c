@@ -23,7 +23,7 @@ static Error mcp_tool_execute(void* user_data, const char* params, String* outpu
         return error_new(ERR_INVALID_PARAM, "Invalid MCP tool context");
     }
 
-    log_info("[MCP Tool] Calling %s with params: %s", ctx->tool_name, params);
+    log_debug("[MCP Tool] Calling %s with params: %s", ctx->tool_name, params);
 
     // Call MCP tool
     String result = { NULL, 0 };
@@ -59,11 +59,11 @@ static void mcp_tool_free(void* user_data) {
 // Register all MCP tools from a client to ToolRegistry
 void mcp_register_tools(ToolRegistry* reg, MCPClient* client) {
     if (!reg || !client || !client->tools || client->tools_count == 0) {
-        log_info("[MCP] No tools to register");
+        log_debug("[MCP] No tools to register");
         return;
     }
 
-    log_info("[MCP] Registering %zu tools from %s", client->tools_count, client->server_id);
+    log_debug("[MCP] Registering %zu tools from %s", client->tools_count, client->server_id);
 
     for (size_t i = 0; i < client->tools_count; i++) {
         MCPToolDef* tool = &client->tools[i];
@@ -90,7 +90,7 @@ void mcp_register_tools(ToolRegistry* reg, MCPClient* client) {
             log_error("[MCP] Failed to register tool %s: %s", full_name, err.message);
             mcp_tool_free(ctx);
         } else {
-            log_info("[MCP] Registered tool: %s", full_name);
+            log_debug("[MCP] Registered tool: %s", full_name);
         }
     }
 }

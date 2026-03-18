@@ -77,7 +77,14 @@ static void console_send(Channel* self, OutboundMessage* msg) {
 }
 
 static void console_destroy(Channel* self) {
-    if (self->user_data) free(self->user_data);
+    ConsoleData* data = (ConsoleData*)self->user_data;
+    if (data) {
+        // Stop the input loop and wait for thread to finish
+        data->running = false;
+        pthread_cancel(data->thread_id);  // Cancel the blocking fgets call
+        pthread_join(data->thread_id, NULL);  // Wait for thread to exit and reclaim resources
+        free(data);
+    }
     free(self);
 }
 

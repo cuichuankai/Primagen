@@ -204,7 +204,7 @@ int mcp_manager_add_client(MCPManager* mgr, const char* server_id, const char* t
 
     mgr->clients[mgr->clients_count++] = client;
 
-    log_info("[MCP] Added client: %s (transport: %s)", server_id, transport);
+    log_debug("[MCP] Added client: %s (transport: %s)", server_id, transport);
     return (int)(mgr->clients_count - 1);
 }
 
@@ -250,7 +250,7 @@ void mcp_manager_remove_client(MCPManager* mgr, const char* server_id) {
             free(client->prompts);
             free(client);
 
-            log_info("[MCP] Removed client: %s", server_id);
+            log_debug("[MCP] Removed client: %s", server_id);
             return;
         }
     }
@@ -276,7 +276,7 @@ Error mcp_client_list_tools(MCPClient* client, MCPToolDef** tools, size_t* count
     if (!client || !tools || !count) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
     if (!client->connected) return error_new(ERR_TOOL, "Client not connected");
 
-    log_info("[MCP] Listing tools from %s...", client->server_id);
+    log_debug("[MCP] Listing tools from %s...", client->server_id);
 
     // Create tools/list request
     long request_id = get_next_request_id();
@@ -364,7 +364,7 @@ Error mcp_client_list_tools(MCPClient* client, MCPToolDef** tools, size_t* count
     cJSON_Delete(result);
     mcp_response_free(&response);
 
-    log_info("[MCP] Listed %zu tools from %s", *count, client->server_id);
+    log_debug("[MCP] Listed %zu tools from %s", *count, client->server_id);
     return error_new(ERR_NONE, "");
 }
 
@@ -374,7 +374,7 @@ Error mcp_client_call_tool(MCPClient* client, const char* name, const char* para
     if (!client || !name || !result) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
     if (!client->connected) return error_new(ERR_TOOL, "Client not connected");
 
-    log_info("[MCP] Calling tool %s on %s...", name, client->server_id);
+    log_debug("[MCP] Calling tool %s on %s...", name, client->server_id);
 
     // Build params JSON
     cJSON* params_obj = NULL;
@@ -449,7 +449,7 @@ Error mcp_client_call_tool(MCPClient* client, const char* name, const char* para
 
     mcp_response_free(&response);
 
-    log_info("[MCP] Tool %s completed", name);
+    log_debug("[MCP] Tool %s completed", name);
     return error_new(ERR_NONE, "");
 }
 
@@ -458,7 +458,7 @@ Error mcp_client_list_resources(MCPClient* client, MCPResource** resources, size
     if (!client || !resources || !count) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
     if (!client->connected) return error_new(ERR_TOOL, "Client not connected");
 
-    log_info("[MCP] Listing resources from %s...", client->server_id);
+    log_debug("[MCP] Listing resources from %s...", client->server_id);
 
     // Create resources/list request
     long request_id = get_next_request_id();
@@ -540,7 +540,7 @@ Error mcp_client_list_resources(MCPClient* client, MCPResource** resources, size
     cJSON_Delete(result);
     mcp_response_free(&response);
 
-    log_info("[MCP] Listed %zu resources from %s", *count, client->server_id);
+    log_debug("[MCP] Listed %zu resources from %s", *count, client->server_id);
     return error_new(ERR_NONE, "");
 }
 
@@ -549,7 +549,7 @@ Error mcp_client_read_resource(MCPClient* client, const char* uri, String* conte
     if (!client || !uri || !content) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
     if (!client->connected) return error_new(ERR_TOOL, "Client not connected");
 
-    log_info("[MCP] Reading resource %s from %s...", uri, client->server_id);
+    log_debug("[MCP] Reading resource %s from %s...", uri, client->server_id);
 
     // Build params
     cJSON* params = cJSON_CreateObject();
@@ -610,7 +610,7 @@ Error mcp_client_read_resource(MCPClient* client, const char* uri, String* conte
 
     mcp_response_free(&response);
 
-    log_info("[MCP] Read resource %s completed", uri);
+    log_debug("[MCP] Read resource %s completed", uri);
     return error_new(ERR_NONE, "");
 }
 
@@ -619,7 +619,7 @@ Error mcp_client_list_prompts(MCPClient* client, MCPPrompt** prompts, size_t* co
     if (!client || !prompts || !count) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
     if (!client->connected) return error_new(ERR_TOOL, "Client not connected");
 
-    log_info("[MCP] Listing prompts from %s...", client->server_id);
+    log_debug("[MCP] Listing prompts from %s...", client->server_id);
 
     // Create prompts/list request
     long request_id = get_next_request_id();
@@ -703,7 +703,7 @@ Error mcp_client_list_prompts(MCPClient* client, MCPPrompt** prompts, size_t* co
     cJSON_Delete(result);
     mcp_response_free(&response);
 
-    log_info("[MCP] Listed %zu prompts from %s", *count, client->server_id);
+    log_debug("[MCP] Listed %zu prompts from %s", *count, client->server_id);
     return error_new(ERR_NONE, "");
 }
 
@@ -713,7 +713,7 @@ Error mcp_client_get_prompt(MCPClient* client, const char* name, const char* arg
     if (!client || !name || !result) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
     if (!client->connected) return error_new(ERR_TOOL, "Client not connected");
 
-    log_info("[MCP] Getting prompt %s from %s...", name, client->server_id);
+    log_debug("[MCP] Getting prompt %s from %s...", name, client->server_id);
 
     // Build params
     cJSON* params = cJSON_CreateObject();
@@ -769,7 +769,7 @@ Error mcp_client_get_prompt(MCPClient* client, const char* name, const char* arg
 
     mcp_response_free(&response);
 
-    log_info("[MCP] Got prompt %s", name);
+    log_debug("[MCP] Got prompt %s", name);
     return error_new(ERR_NONE, "");
 }
 

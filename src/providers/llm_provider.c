@@ -319,7 +319,10 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
     
     cJSON *content = cJSON_GetObjectItem(message, "content");
     if (cJSON_IsString(content) && content->valuestring) {
-        *response = string_new(content->valuestring);
+        // Strip leading newlines from content
+        const char* trimmed = content->valuestring;
+        while (*trimmed == '\n' || *trimmed == '\r') trimmed++;
+        *response = string_new(trimmed);
     } else {
         *response = string_new("");
     }
@@ -632,7 +635,10 @@ Error llm_provider_call_extended(const char* system_prompt, Session* session, To
 
     cJSON *content = cJSON_GetObjectItem(message, "content");
     if (cJSON_IsString(content) && content->valuestring) {
-        llm_response->content = string_new(content->valuestring);
+        // Strip leading newlines from content
+        const char* trimmed = content->valuestring;
+        while (*trimmed == '\n' || *trimmed == '\r') trimmed++;
+        llm_response->content = string_new(trimmed);
     } else {
         llm_response->content = string_new("");
     }
@@ -1020,8 +1026,10 @@ Error llm_provider_call_streaming(const char* system_prompt, Session* session, T
         return error_new(ERR_NETWORK, ctx.last_error);
     }
 
-    // Copy accumulated content to response
-    llm_response->content = string_new(ctx.accumulated_content.data);
+    // Copy accumulated content to response (strip leading newlines)
+    char* trimmed = ctx.accumulated_content.data;
+    while (*trimmed == '\n' || *trimmed == '\r') trimmed++;
+    llm_response->content = string_new(trimmed);
     string_free(&ctx.accumulated_content);
     string_free(&ctx.recv_buf);
 

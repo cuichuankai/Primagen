@@ -22,9 +22,6 @@ typedef struct {
 
 void tool_context_set_route(ToolContext* ctx, const char* channel, const char* chat_id);
 
-// Helper to register all standard tools
-void register_all_tools(ToolRegistry* reg, ToolContext* ctx);
-
 // FileSystem tools
 Error tool_read_file(void* user_data, const char* args_json, String* result);
 Error tool_write_file(void* user_data, const char* args_json, String* result);

@@ -2,6 +2,7 @@
 #define CONFIG_H
 
 #include <stdbool.h>
+#include "../vendor/cJSON/cJSON.h"
 #include "common.h"
 
 typedef struct {
@@ -95,14 +96,6 @@ typedef struct {
 
 typedef struct {
     bool enabled;
-    char* app_id;
-    char* app_secret;
-    bool use_card;
-    StringArray allow_from;
-} FeishuChannelConfig;
-
-typedef struct {
-    bool enabled;
     char* bridge_url;
     char* bridge_token;
     StringArray allow_from;
@@ -123,13 +116,24 @@ typedef struct {
     bool enabled;
 } MCPConfig;
 
+// Plugin configuration structures
+typedef struct {
+    char* plugin_id;      // Plugin unique identifier
+    cJSON* config;        // Plugin configuration JSON object
+} PluginConfig;
+
+typedef struct {
+    PluginConfig* items;  // Plugin configuration array
+    size_t count;         // Current count
+    size_t capacity;      // Capacity
+} PluginsConfig;
+
 typedef struct {
     TelegramChannelConfig telegram;
     EmailChannelConfig email;
     DiscordChannelConfig discord;
     SlackChannelConfig slack;
     DingTalkChannelConfig dingtalk;
-    FeishuChannelConfig feishu;
     WhatsAppChannelConfig whatsapp;
     bool send_progress;
     bool send_tool_hints;
@@ -142,6 +146,7 @@ typedef struct Config {
     ChannelsConfig channels;
     MCPConfig mcp;
     LogConfig log;
+    PluginsConfig plugins;  // New: plugin configuration
 } Config;
 
 Config* config_create();
@@ -158,5 +163,10 @@ bool config_save_to_file(Config* cfg, const char* filepath);
 
 // Environment variable overrides (env takes precedence over file)
 void config_load_from_env(Config* cfg);
+
+// Plugin configuration functions
+PluginConfig* config_add_plugin_config(Config* cfg, const char* plugin_id);
+PluginConfig* config_get_plugin_config(Config* cfg, const char* plugin_id);
+void config_plugin_config_free(PluginConfig* item);
 
 #endif // CONFIG_H

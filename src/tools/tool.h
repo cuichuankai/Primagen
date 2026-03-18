@@ -15,6 +15,7 @@ typedef struct {
     ToolDefinition def;
     ToolExecuteFunc execute;
     void* user_data;
+    void* plugin_ref;  // Reference to loaded plugin (for cleanup)
 } Tool;
 
 typedef struct {
@@ -27,6 +28,9 @@ typedef struct {
 ToolRegistry* tool_registry_new();
 void tool_registry_free(ToolRegistry* reg);
 Error tool_registry_register(ToolRegistry* reg, const char* name, const char* desc, const char* params_schema, ToolExecuteFunc exec, void* user_data);
+Error tool_registry_register_plugin_tool(ToolRegistry* reg, const char* name, const char* desc,
+                                          const char* params_schema, ToolExecuteFunc exec,
+                                          void* user_data, void* plugin_ref);
 Tool* tool_registry_get(ToolRegistry* reg, const char* name);
 Error tool_registry_execute(ToolRegistry* reg, const char* name, const char* args_json, String* result);
 

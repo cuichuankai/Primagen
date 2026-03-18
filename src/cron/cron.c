@@ -283,12 +283,12 @@ static void save_jobs(CronService* service) {
 
 static void load_jobs(CronService* service) {
     if (!service || !service->store_path) return;
-    
-    log_info("[Cron] Loading jobs from %s", service->store_path);
+
+    log_debug("[Cron] Loading jobs from %s", service->store_path);
 
     FILE* fp = fopen(service->store_path, "r");
     if (!fp) {
-        log_info("[Cron] No existing job store found.");
+        log_debug("[Cron] No existing job store found.");
         return;
     }
 
@@ -358,7 +358,7 @@ static void load_jobs(CronService* service) {
             service->jobs = node;
             count++;
         }
-        log_info("[Cron] Loaded %d jobs.", count);
+        log_debug("[Cron] Loaded %d jobs.", count);
     }
     cJSON_Delete(root);
 }
@@ -498,7 +498,7 @@ char* cron_service_add_job(CronService* service, const CronJob* job) {
         JobNode* current = service->jobs;
         while (current) {
             if (current->job.name && strcmp(current->job.name, job->name) == 0) {
-                log_info("[Cron] Job '%s' already exists, updating schedule.", job->name);
+                log_debug("[Cron] Job '%s' already exists, updating schedule.", job->name);
                 // Update existing job's schedule and next_run
                 free(current->job.schedule);
                 current->job.schedule = job->schedule ? strdup(job->schedule) : NULL;

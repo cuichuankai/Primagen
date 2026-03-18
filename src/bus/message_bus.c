@@ -12,7 +12,16 @@ static void message_queue_init(MessageQueue* q) {
 }
 
 static void message_queue_free(MessageQueue* q) {
-    // Assume queue is empty or free items if needed
+    // Clean up remaining messages in queue
+    pthread_mutex_lock(&q->mutex);
+    while (q->front != q->rear) {
+        void* msg = q->items[q->front];
+        q->front = (q->front + 1) % q->capacity;
+        // Message type is unknown here, caller is responsible for freeing
+        // But we should at least free the pointer if it's a Message
+        free(msg);
+    }
+    pthread_mutex_unlock(&q->mutex);
     free(q->items);
     pthread_mutex_destroy(&q->mutex);
     pthread_cond_destroy(&q->cond);

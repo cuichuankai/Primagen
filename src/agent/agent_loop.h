@@ -6,8 +6,11 @@
 #include "../session/session.h"
 #include "../context/context_builder.h"
 #include "../tools/tool.h"
+#include "../tools/tools_impl.h"
 #include "../bus/message_bus.h"
 #include "../include/config.h"
+#include "../plugin/plugin_manager.h"
+#include "../tools/tool_executor.h"
 #include <stdbool.h>
 #include <pthread.h>
 
@@ -29,8 +32,11 @@ struct AgentLoop {
     SessionManager* session_mgr;
     ContextBuilder* ctx_builder;
     ToolRegistry* tool_reg;
+    ToolExecutor* tool_executor;  // Async tool executor
     MessageBus* bus;
     Config* config;
+    PluginManager* plugin_mgr;  // Plugin manager for reload-plugins command
+    char workspace_path[512];   // Workspace path for plugin commands
     bool running;
     LLMProvider llm_call;
 
@@ -41,10 +47,13 @@ struct AgentLoop {
 };
 
 // Functions
-AgentLoop* agent_loop_new(SessionManager* session_mgr, ContextBuilder* ctx_builder, ToolRegistry* tool_reg, MessageBus* bus, Config* config);
+AgentLoop* agent_loop_new(SessionManager* session_mgr, ContextBuilder* ctx_builder, ToolRegistry* tool_reg, MessageBus* bus, Config* config, PluginManager* plugin_mgr, const char* workspace_path);
 void agent_loop_free(AgentLoop* loop);
 void agent_loop_set_llm_provider(AgentLoop* loop, LLMProvider provider);
 void agent_loop_run(AgentLoop* loop);
 void agent_loop_stop(AgentLoop* loop);
+void agent_loop_register_builtin_commands(AgentLoop* loop);  // Register built-in commands with PluginManager
+void agent_loop_register_builtin_tools(PluginManager* manager, ToolContext* ctx);  // Register built-in tools with PluginManager
+void agent_loop_register_builtin_channels(PluginManager* manager, Config* cfg);  // Register built-in channels with PluginManager
 
 #endif // AGENT_LOOP_H

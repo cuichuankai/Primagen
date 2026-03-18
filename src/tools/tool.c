@@ -32,6 +32,26 @@ Error tool_registry_register(ToolRegistry* reg, const char* name, const char* de
     tool->def.parameters = string_new(params_schema);
     tool->execute = exec;
     tool->user_data = user_data;
+    tool->plugin_ref = NULL;  // NULL means builtin tool
+    reg->count++;
+    return error_new(ERR_NONE, "");
+}
+
+// Plugin-aware tool registration
+Error tool_registry_register_plugin_tool(ToolRegistry* reg, const char* name, const char* desc,
+                                          const char* params_schema, ToolExecuteFunc exec,
+                                          void* user_data, void* plugin_ref) {
+    if (reg->count >= reg->capacity) {
+        reg->capacity *= 2;
+        reg->tools = realloc(reg->tools, reg->capacity * sizeof(Tool));
+    }
+    Tool* tool = &reg->tools[reg->count];
+    tool->def.name = string_new(name);
+    tool->def.description = string_new(desc);
+    tool->def.parameters = string_new(params_schema);
+    tool->execute = exec;
+    tool->user_data = user_data;
+    tool->plugin_ref = plugin_ref;  // Track which plugin this tool comes from
     reg->count++;
     return error_new(ERR_NONE, "");
 }

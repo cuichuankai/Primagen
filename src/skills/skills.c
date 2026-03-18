@@ -471,7 +471,7 @@ char* skills_loader_build_skills_summary(SkillsLoader* loader) {
     }
 
     strcat(xml, "</skills>");
-    log_info("Loaded %d skills", ctx.count);
+    log_debug("Loaded %d skills", ctx.count);
     return xml;
 }
 

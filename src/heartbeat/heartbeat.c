@@ -63,7 +63,7 @@ static int heartbeat_decide(void* provider, const char* model, const char* conte
 
     if (!content || !tasks_out) return -1;
 
-    log_info("[Heartbeat] Asking LLM to decide...");
+    log_debug("[Heartbeat] Asking LLM to decide...");
 
     // Build prompt
     char prompt[4096];
@@ -116,7 +116,7 @@ static void* heartbeat_worker(void* arg) {
             continue;
         }
 
-        log_info("[Heartbeat] Checking for tasks...");
+        log_debug("[Heartbeat] Checking for tasks...");
 
         // Phase 1: Decide
         char* tasks = NULL;
@@ -124,16 +124,16 @@ static void* heartbeat_worker(void* arg) {
         free(content);
 
         if (decision <= 0) {
-            log_info("[Heartbeat] OK (nothing to report)");
+            log_debug("[Heartbeat] OK (nothing to report)");
             continue;
         }
 
         // Phase 2: Execute
-        log_info("[Heartbeat] Tasks found, executing...");
+        log_debug("[Heartbeat] Tasks found, executing...");
         if (service->on_execute && tasks) {
             char* response = service->on_execute(tasks);
             if (response && service->on_notify) {
-                log_info("[Heartbeat] Completed, delivering response");
+                log_debug("[Heartbeat] Completed, delivering response");
                 service->on_notify(response);
             }
             free(response);
@@ -191,7 +191,7 @@ bool heartbeat_service_start(HeartbeatService* service) {
         return false;
     }
 
-    log_info("[Heartbeat] Started (every %ds)", service->interval_s);
+    log_debug("[Heartbeat] Started (every %ds)", service->interval_s);
     return true;
 }
 
@@ -200,7 +200,7 @@ void heartbeat_service_stop(HeartbeatService* service) {
 
     service->running = false;
     pthread_join(service->worker_thread, NULL);
-    log_info("[Heartbeat] Stopped");
+    log_debug("[Heartbeat] Stopped");
 }
 
 /* Manually trigger a heartbeat */
