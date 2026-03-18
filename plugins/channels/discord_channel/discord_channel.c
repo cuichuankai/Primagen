@@ -25,9 +25,10 @@
 // =============================================================================
 
 typedef struct {
-    DiscordChannelConfig* config;
     MessageBus* bus;
     bool running;
+    char* token;
+    char* channel_id;
 } DiscordChannelData;
 
 struct MemoryStruct {
@@ -62,10 +63,21 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 
 static bool discord_init(Channel* self, Config* config, MessageBus* bus) {
     DiscordChannelData* data = malloc(sizeof(DiscordChannelData));
-    data->config = &config->channels.discord;
     data->bus = bus;
     data->running = false;
+    data->token = NULL;
+    data->channel_id = NULL;
     self->user_data = data;
+
+    // Get plugin configuration
+    PluginConfig* plugin_cfg = config_get_plugin_config(config, "discord_channel");
+    if (plugin_cfg && plugin_cfg->config) {
+        cJSON* token = cJSON_GetObjectItem(plugin_cfg->config, "token");
+        cJSON* channel_id = cJSON_GetObjectItem(plugin_cfg->config, "channel_id");
+
+        data->token = token && cJSON_IsString(token) ? strdup(token->valuestring) : strdup("");
+        data->channel_id = channel_id && cJSON_IsString(channel_id) ? strdup(channel_id->valuestring) : strdup("");
+    }
 
     log_info("[DiscordChannel] Initialized");
     return true;
@@ -73,9 +85,9 @@ static bool discord_init(Channel* self, Config* config, MessageBus* bus) {
 
 static void discord_start(Channel* self) {
     DiscordChannelData* data = (DiscordChannelData*)self->user_data;
-    if (!data->config->enabled) return;
+    if (!data->token || strlen(data->token) == 0) return;
 
-    log_info("[Discord] Starting channel (Gateway URL: %s)", data->config->gateway_url);
+    log_info("[Discord] Starting channel");
     log_info("[Discord] Note: WebSocket receiving is not yet implemented in C port.");
     data->running = true;
 }
@@ -87,7 +99,7 @@ static void discord_stop(Channel* self) {
 
 static void discord_send(Channel* self, OutboundMessage* msg) {
     DiscordChannelData* data = (DiscordChannelData*)self->user_data;
-    if (!data->config->enabled) return;
+    if (!data->token || strlen(data->token) == 0) return;
 
     // Only process messages meant for this channel
     if (strcmp(msg->channel.data, "discord") != 0) return;
@@ -118,17 +130,17 @@ static void discord_send(Channel* self, OutboundMessage* msg) {
 
     struct mg_str host = mg_url_host(url);
     mg_printf(c,
-        "POST %s HTTP/1.0\r\n"
-        "Host: %.*s\r\n"
-        "Authorization: Bot %s\r\n"
-        "Content-Type: application/json\r\n"
-        "User-Agent: Primagen/1.0\r\n"
-        "Content-Length: %d\r\n"
-        "\r\n"
+        "POST %s HTTP/1.0\n"
+        "Host: %.*s\n"
+        "Authorization: Bot %s\n"
+        "Content-Type: application/json\n"
+        "User-Agent: Primagen/1.0\n"
+        "Content-Length: %d\n"
+        "\n"
         "%s",
         mg_url_uri(url),
         (int)host.len, host.buf,
-        data->config->token,
+        data->token,
         (int)strlen(json_str),
         json_str
     );
@@ -182,6 +194,22 @@ PLUGIN_EXPORT int plugin_init(PluginManager* manager, void* context) {
     (void)context;
 
     log_info("[Plugin:discord_channel] Initializing discord channel plugin");
+
+    // Check if this plugin is enabled in config
+    if (manager && manager->config) {
+        PluginConfig* pc = config_get_plugin_config(manager->config, "discord_channel");
+        if (pc && pc->config) {
+            cJSON* enabled_item = cJSON_GetObjectItem(pc->config, "enabled");
+            if (cJSON_IsBool(enabled_item) && !cJSON_IsTrue(enabled_item)) {
+                log_info("[Plugin:discord_channel] Plugin is disabled in config, skipping registration");
+                return 0;  // Return success but don't register
+            }
+        } else {
+            // No config found means default to disabled
+            log_info("[Plugin:discord_channel] No config found, default to disabled, skipping registration");
+            return 0;
+        }
+    }
 
     // Register the channel factory
     int ret = plugin_register_channel(manager, NULL, "discord", discord_channel_create);

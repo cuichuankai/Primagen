@@ -25,9 +25,9 @@
 // =============================================================================
 
 typedef struct {
-    SlackChannelConfig* config;
     MessageBus* bus;
     bool running;
+    char* bot_token;
 } SlackChannelData;
 
 struct MemoryStruct {
@@ -62,10 +62,18 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 
 static bool slack_init(Channel* self, Config* config, MessageBus* bus) {
     SlackChannelData* data = malloc(sizeof(SlackChannelData));
-    data->config = &config->channels.slack;
     data->bus = bus;
     data->running = false;
+    data->bot_token = NULL;
     self->user_data = data;
+
+    // Get plugin configuration
+    PluginConfig* plugin_cfg = config_get_plugin_config(config, "slack_channel");
+    if (plugin_cfg && plugin_cfg->config) {
+        cJSON* bot_token = cJSON_GetObjectItem(plugin_cfg->config, "bot_token");
+
+        data->bot_token = bot_token && cJSON_IsString(bot_token) ? strdup(bot_token->valuestring) : strdup("");
+    }
 
     log_info("[SlackChannel] Initialized");
     return true;
@@ -73,9 +81,9 @@ static bool slack_init(Channel* self, Config* config, MessageBus* bus) {
 
 static void slack_start(Channel* self) {
     SlackChannelData* data = (SlackChannelData*)self->user_data;
-    if (!data->config->enabled) return;
+    if (!data->bot_token || strlen(data->bot_token) == 0) return;
 
-    log_info("[Slack] Starting channel (Mode: %s)", data->config->mode);
+    log_info("[Slack] Starting channel");
     log_info("[Slack] Note: Socket Mode receiving is not yet implemented in C port.");
     data->running = true;
 }
@@ -87,7 +95,7 @@ static void slack_stop(Channel* self) {
 
 static void slack_send(Channel* self, OutboundMessage* msg) {
     SlackChannelData* data = (SlackChannelData*)self->user_data;
-    if (!data->config->enabled) return;
+    if (!data->bot_token || strlen(data->bot_token) == 0) return;
 
     // Only process messages meant for this channel
     if (strcmp(msg->channel.data, "slack") != 0) return;
@@ -118,16 +126,16 @@ static void slack_send(Channel* self, OutboundMessage* msg) {
 
     struct mg_str host = mg_url_host(url);
     mg_printf(c,
-        "POST %s HTTP/1.0\r\n"
-        "Host: %.*s\r\n"
-        "Authorization: Bearer %s\r\n"
-        "Content-Type: application/json; charset=utf-8\r\n"
-        "Content-Length: %d\r\n"
-        "\r\n"
+        "POST %s HTTP/1.0\n"
+        "Host: %.*s\n"
+        "Authorization: Bearer %s\n"
+        "Content-Type: application/json; charset=utf-8\n"
+        "Content-Length: %d\n"
+        "\n"
         "%s",
         mg_url_uri(url),
         (int)host.len, host.buf,
-        data->config->bot_token,
+        data->bot_token,
         (int)strlen(json_str),
         json_str
     );
@@ -181,6 +189,22 @@ PLUGIN_EXPORT int plugin_init(PluginManager* manager, void* context) {
     (void)context;
 
     log_info("[Plugin:slack_channel] Initializing slack channel plugin");
+
+    // Check if this plugin is enabled in config
+    if (manager && manager->config) {
+        PluginConfig* pc = config_get_plugin_config(manager->config, "slack_channel");
+        if (pc && pc->config) {
+            cJSON* enabled_item = cJSON_GetObjectItem(pc->config, "enabled");
+            if (cJSON_IsBool(enabled_item) && !cJSON_IsTrue(enabled_item)) {
+                log_info("[Plugin:slack_channel] Plugin is disabled in config, skipping registration");
+                return 0;  // Return success but don't register
+            }
+        } else {
+            // No config found means default to disabled
+            log_info("[Plugin:slack_channel] No config found, default to disabled, skipping registration");
+            return 0;
+        }
+    }
 
     // Register the channel factory
     int ret = plugin_register_channel(manager, NULL, "slack", slack_channel_create);

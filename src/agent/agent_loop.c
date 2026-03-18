@@ -411,16 +411,7 @@ void agent_loop_register_builtin_channels(PluginManager* manager, Config* cfg) {
 
     for (size_t i = 0; i < BUILTIN_CHANNELS_COUNT; i++) {
         log_debug("[AgentLoop] Processing built-in channel: %s", builtin_channels[i].name);
-        // Check if channel should be enabled (skip console which is always enabled)
-        if (builtin_channels[i].config_section) {
-            ChannelsConfig* channels_cfg = config_get_channels_config(cfg);
-            if (!channels_cfg) continue;
-
-            bool enabled = false;
-            // Add more channel checks here as needed
-
-            if (!enabled) continue;
-        }
+        // Console channel is always enabled (config_section is NULL)
 
         int result = plugin_register_channel(manager, NULL,
             builtin_channels[i].name,

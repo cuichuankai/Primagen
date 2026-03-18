@@ -26,10 +26,15 @@
 // =============================================================================
 
 typedef struct {
-    EmailChannelConfig* config;
     MessageBus* bus;
     bool running;
     pthread_t poll_thread;
+    char* imap_host;
+    char* imap_user;
+    char* imap_pass;
+    char* smtp_host;
+    char* smtp_user;
+    char* smtp_pass;
 } EmailChannelData;
 
 // =============================================================================
@@ -54,10 +59,33 @@ static void* email_run(void* arg) {
 
 static bool email_init(Channel* self, Config* config, MessageBus* bus) {
     EmailChannelData* data = malloc(sizeof(EmailChannelData));
-    data->config = &config->channels.email;
     data->bus = bus;
     data->running = false;
+    data->imap_host = NULL;
+    data->imap_user = NULL;
+    data->imap_pass = NULL;
+    data->smtp_host = NULL;
+    data->smtp_user = NULL;
+    data->smtp_pass = NULL;
     self->user_data = data;
+
+    // Get plugin configuration
+    PluginConfig* plugin_cfg = config_get_plugin_config(config, "email_channel");
+    if (plugin_cfg && plugin_cfg->config) {
+        cJSON* imap_host = cJSON_GetObjectItem(plugin_cfg->config, "imap_host");
+        cJSON* imap_user = cJSON_GetObjectItem(plugin_cfg->config, "imap_user");
+        cJSON* imap_pass = cJSON_GetObjectItem(plugin_cfg->config, "imap_pass");
+        cJSON* smtp_host = cJSON_GetObjectItem(plugin_cfg->config, "smtp_host");
+        cJSON* smtp_user = cJSON_GetObjectItem(plugin_cfg->config, "smtp_user");
+        cJSON* smtp_pass = cJSON_GetObjectItem(plugin_cfg->config, "smtp_pass");
+
+        data->imap_host = imap_host && cJSON_IsString(imap_host) ? strdup(imap_host->valuestring) : strdup("");
+        data->imap_user = imap_user && cJSON_IsString(imap_user) ? strdup(imap_user->valuestring) : strdup("");
+        data->imap_pass = imap_pass && cJSON_IsString(imap_pass) ? strdup(imap_pass->valuestring) : strdup("");
+        data->smtp_host = smtp_host && cJSON_IsString(smtp_host) ? strdup(smtp_host->valuestring) : strdup("");
+        data->smtp_user = smtp_user && cJSON_IsString(smtp_user) ? strdup(smtp_user->valuestring) : strdup("");
+        data->smtp_pass = smtp_pass && cJSON_IsString(smtp_pass) ? strdup(smtp_pass->valuestring) : strdup("");
+    }
 
     log_info("[EmailChannel] Initialized");
     return true;
@@ -65,10 +93,10 @@ static bool email_init(Channel* self, Config* config, MessageBus* bus) {
 
 static void email_start(Channel* self) {
     EmailChannelData* data = (EmailChannelData*)self->user_data;
-    if (!data->config->enabled) return;
+    if (!data->imap_host || strlen(data->imap_host) == 0) return;
 
     log_info("[EmailChannel] Starting (IMAP: %s, SMTP: %s)",
-           data->config->imap_host, data->config->smtp_host);
+           data->imap_host, data->smtp_host);
 
     data->running = true;
     pthread_create(&data->poll_thread, NULL, email_run, self);
@@ -77,14 +105,14 @@ static void email_start(Channel* self) {
 static void email_stop(Channel* self) {
     EmailChannelData* data = (EmailChannelData*)self->user_data;
     data->running = false;
-    if (data->config->enabled) {
+    if (data->imap_host && strlen(data->imap_host) > 0) {
         pthread_join(data->poll_thread, NULL);
     }
 }
 
 static void email_send(Channel* self, OutboundMessage* msg) {
     EmailChannelData* data = (EmailChannelData*)self->user_data;
-    if (!data->config->enabled) return;
+    if (!data->smtp_host || strlen(data->smtp_host) == 0) return;
 
     // Only process messages meant for this channel
     if (strcmp(msg->channel.data, "email") != 0) return;
@@ -129,6 +157,22 @@ PLUGIN_EXPORT int plugin_init(PluginManager* manager, void* context) {
     (void)context;
 
     log_info("[Plugin:email_channel] Initializing email channel plugin");
+
+    // Check if this plugin is enabled in config
+    if (manager && manager->config) {
+        PluginConfig* pc = config_get_plugin_config(manager->config, "email_channel");
+        if (pc && pc->config) {
+            cJSON* enabled_item = cJSON_GetObjectItem(pc->config, "enabled");
+            if (cJSON_IsBool(enabled_item) && !cJSON_IsTrue(enabled_item)) {
+                log_info("[Plugin:email_channel] Plugin is disabled in config, skipping registration");
+                return 0;  // Return success but don't register
+            }
+        } else {
+            // No config found means default to disabled
+            log_info("[Plugin:email_channel] No config found, default to disabled, skipping registration");
+            return 0;
+        }
+    }
 
     // Register the channel factory
     int ret = plugin_register_channel(manager, NULL, "email", email_channel_create);

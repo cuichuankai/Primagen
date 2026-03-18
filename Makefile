@@ -34,7 +34,7 @@ all: dirs plugins $(OBJDIR)/primagen
 
 dirs:
 	@mkdir -p $(OBJDIR)
-	@mkdir -p $(OBJDIR)/.primagen/plugins/external
+	@mkdir -p $(OBJDIR)/.primagen/plugins
 
 android:
 	$(MAKE) TARGET=android all
@@ -180,6 +180,7 @@ package:
 	@echo "Creating self-extracting installer package..."
 	cp install.sh $(OBJDIR)/primagen_install.sh
 	mkdir -p $(OBJDIR)/.primagen
+	mkdir -p $(OBJDIR)/.primagen/plugins/channels
 	cp -r skills $(OBJDIR)/.primagen/
 	cd $(OBJDIR);tar -czf - ./primagen ./.primagen >> primagen_install.sh;cd -
 	chmod +x $(OBJDIR)/primagen_install.sh

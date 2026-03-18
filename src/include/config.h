@@ -49,59 +49,6 @@ typedef struct {
 } ToolConfig;
 
 typedef struct {
-    bool enabled;
-    char* token;
-    StringArray allow_from;
-} TelegramChannelConfig;
-
-typedef struct {
-    bool enabled;
-    char* imap_host;
-    int imap_port;
-    char* imap_username;
-    char* imap_password;
-    bool imap_use_ssl;
-    char* smtp_host;
-    int smtp_port;
-    char* smtp_username;
-    char* smtp_password;
-    bool smtp_use_ssl;
-    bool smtp_use_tls;
-    char* from_address;
-    StringArray allow_from;
-} EmailChannelConfig;
-
-typedef struct {
-    bool enabled;
-    char* token;
-    char* gateway_url;
-    int intents;
-    StringArray allow_from;
-} DiscordChannelConfig;
-
-typedef struct {
-    bool enabled;
-    char* bot_token;
-    char* app_token;
-    char* mode;
-    StringArray allow_from;
-} SlackChannelConfig;
-
-typedef struct {
-    bool enabled;
-    char* client_id;
-    char* client_secret;
-    StringArray allow_from;
-} DingTalkChannelConfig;
-
-typedef struct {
-    bool enabled;
-    char* bridge_url;
-    char* bridge_token;
-    StringArray allow_from;
-} WhatsAppChannelConfig;
-
-typedef struct {
     char* server_id;
     char* transport_type;  // "stdio", "sse", "websocket"
     char* command;
@@ -128,22 +75,10 @@ typedef struct {
     size_t capacity;      // Capacity
 } PluginsConfig;
 
-typedef struct {
-    TelegramChannelConfig telegram;
-    EmailChannelConfig email;
-    DiscordChannelConfig discord;
-    SlackChannelConfig slack;
-    DingTalkChannelConfig dingtalk;
-    WhatsAppChannelConfig whatsapp;
-    bool send_progress;
-    bool send_tool_hints;
-} ChannelsConfig;
-
 typedef struct Config {
     AgentConfig agent;
     ToolConfig tools;
     HeartbeatConfig heartbeat;
-    ChannelsConfig channels;
     MCPConfig mcp;
     LogConfig log;
     PluginsConfig plugins;  // New: plugin configuration
@@ -155,7 +90,6 @@ void config_destroy(Config* cfg);
 AgentConfig* config_get_agent_config(Config* cfg);
 ToolConfig* config_get_tool_config(Config* cfg);
 HeartbeatConfig* config_get_heartbeat_config(Config* cfg);
-ChannelsConfig* config_get_channels_config(Config* cfg);
 MCPConfig* config_get_mcp_config(Config* cfg);
 
 bool config_load_from_file(Config* cfg, const char* filepath);

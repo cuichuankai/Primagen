@@ -142,16 +142,25 @@ static void* telegram_poller(void* arg) {
 }
 
 static bool telegram_init(Channel* self, Config* cfg, MessageBus* bus) {
-    if (!cfg->channels.telegram.enabled || strlen(cfg->channels.telegram.token) == 0) {
-        return false;
-    }
-
     TelegramChannelData* data = malloc(sizeof(TelegramChannelData));
     data->bus = bus;
-    data->token = strdup(cfg->channels.telegram.token);
     data->running = false;
     data->last_update_id = 0;
+    data->token = NULL;
     self->user_data = data;
+
+    // Get plugin configuration
+    PluginConfig* plugin_cfg = config_get_plugin_config(cfg, "telegram_channel");
+    if (plugin_cfg && plugin_cfg->config) {
+        cJSON* token = cJSON_GetObjectItem(plugin_cfg->config, "token");
+        data->token = token && cJSON_IsString(token) ? strdup(token->valuestring) : strdup("");
+    }
+
+    // Check if token is configured
+    if (!data->token || strlen(data->token) == 0) {
+        log_info("[TelegramChannel] No token configured, skipping initialization");
+        return false;
+    }
 
     log_info("[TelegramChannel] Initialized with token");
     return true;
@@ -272,6 +281,22 @@ PLUGIN_EXPORT int plugin_init(PluginManager* manager, void* context) {
     (void)context;
 
     log_info("[Plugin:telegram_channel] Initializing telegram channel plugin");
+
+    // Check if this plugin is enabled in config
+    if (manager && manager->config) {
+        PluginConfig* pc = config_get_plugin_config(manager->config, "telegram_channel");
+        if (pc && pc->config) {
+            cJSON* enabled_item = cJSON_GetObjectItem(pc->config, "enabled");
+            if (cJSON_IsBool(enabled_item) && !cJSON_IsTrue(enabled_item)) {
+                log_info("[Plugin:telegram_channel] Plugin is disabled in config, skipping registration");
+                return 0;  // Return success but don't register
+            }
+        } else {
+            // No config found means default to disabled
+            log_info("[Plugin:telegram_channel] No config found, default to disabled, skipping registration");
+            return 0;
+        }
+    }
 
     // Register the channel factory
     int ret = plugin_register_channel(manager, NULL, "telegram", telegram_channel_create);

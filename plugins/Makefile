@@ -1,81 +1,150 @@
+# =============================================================================
 # Primagen Plugins Root Makefile
-# Builds all plugins in subdirectories
+# Builds all plugins organized by type
+# =============================================================================
+#
+# Directory structure after build:
+#   build/.primagen/plugins/
+#   ├── channels/     - Channel plugins (feishu, dingtalk, telegram, etc.)
+#   ├── tools/        - Tool plugins (echo_tool, etc.)
+#   └── commands/     - Command plugins (hello_command, etc.)
+#
+# All platforms (native/Android) output to the same directory.
+# Building for a different platform overwrites the previous build.
+#
+# Usage:
+#   make                        - Build all plugins for native platform
+#   make android                - Build all plugins for Android
+#   make channels               - Build channel plugins only
+#   make tools                  - Build tool plugins only
+#   make commands               - Build command plugins only
+#   make install                - Build and install all plugins
+#   make clean                  - Remove all built artifacts
+#   make rebuild                - Clean and rebuild all
+#
+# Environment variables:
+#   ANDROID_NDK - Path to Android NDK (for android target)
+# =============================================================================
 
-.PHONY: all clean install rebuild tools channels commands
+# Plugin directories
+CHANNELS_DIR = channels
+TOOLS_DIR = tools
+COMMANDS_DIR = commands
+
+# Collect all plugin subdirectories
+CHANNEL_PLUGINS := $(wildcard $(CHANNELS_DIR)/*)
+TOOL_PLUGINS := $(wildcard $(TOOLS_DIR)/*)
+COMMAND_PLUGINS := $(wildcard $(COMMANDS_DIR)/*)
+
+# Mark all phony targets
+.PHONY: all clean install rebuild tools channels commands android help native install-native
+.PHONY: $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS)
 
 # Default target - build all plugins
-all: tools channels commands
+all: native
+	@echo ""
+	@echo "=========================================="
 	@echo "All plugins built successfully!"
+	@echo "=========================================="
 
-# Build tool plugins
-tools:
-	@echo "Building tool plugins..."
-	@cd tools/echo_tool && $(MAKE) --no-print-directory
+# =============================================================================
+# Native builds
+# =============================================================================
 
-# Build channel plugins
-channels:
-	@echo "Building channel plugins..."
-	@cd channels/stdout_channel && $(MAKE) --no-print-directory
-	@cd channels/telegram_channel && $(MAKE) --no-print-directory
-	@cd channels/email_channel && $(MAKE) --no-print-directory
-	@cd channels/discord_channel && $(MAKE) --no-print-directory
-	@cd channels/slack_channel && $(MAKE) --no-print-directory
-	@cd channels/dingtalk_channel && $(MAKE) --no-print-directory
+native: channels tools commands
 
-# Build command plugins
-commands:
-	@echo "Building command plugins..."
-	@cd commands/hello_command && $(MAKE) --no-print-directory
+channels: $(CHANNEL_PLUGINS)
 
-# Install all plugins
-install: all
-	@echo "Installing all plugins..."
-	@cd tools/echo_tool && $(MAKE) --no-print-directory install
-	@cd channels/stdout_channel && $(MAKE) --no-print-directory install
-	@cd channels/telegram_channel && $(MAKE) --no-print-directory install
-	@cd channels/email_channel && $(MAKE) --no-print-directory install
-	@cd channels/discord_channel && $(MAKE) --no-print-directory install
-	@cd channels/slack_channel && $(MAKE) --no-print-directory install
-	@cd channels/dingtalk_channel && $(MAKE) --no-print-directory install
-	@cd commands/hello_command && $(MAKE) --no-print-directory install
-	@echo "All plugins installed to build/.primagen/plugins/"
+tools: $(TOOL_PLUGINS)
 
-# Clean all plugins
+commands: $(COMMAND_PLUGINS)
+
+# Build individual plugins (use subshell for cd)
+$(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS):
+	@echo ""
+	@echo "--- Building plugin: $@ ---"
+	@(cd $@ && $(MAKE) --no-print-directory)
+
+# =============================================================================
+# Android builds (outputs to same directory, overwrites native)
+# =============================================================================
+
+android: check-android-ndk
+	@echo "Building all plugins for Android..."
+	@for plugin in $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS); do \
+		echo "--- Building Android plugin: $$plugin ---"; \
+		(cd $$plugin && $(MAKE) --no-print-directory android ANDROID_NDK=$(ANDROID_NDK)) || true; \
+	done
+	@echo ""
+	@echo "=========================================="
+	@echo "All Android plugins built successfully!"
+	@echo "=========================================="
+
+check-android-ndk:
+ifeq ($(ANDROID_NDK),)
+	@echo "Error: ANDROID_NDK not set or invalid path"
+	@echo "Please set ANDROID_NDK environment variable:"
+	@echo "  export ANDROID_NDK=/path/to/android-ndk"
+	@exit 1
+endif
+
+# =============================================================================
+# Installation
+# =============================================================================
+
+install: native
+	@echo ""
+	@echo "Installing plugins..."
+	@for plugin in $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS); do \
+		(cd $$plugin && $(MAKE) --no-print-directory install) || true; \
+	done
+	@echo ""
+	@echo "All plugins installed to .primagen/plugins/"
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+
 clean:
 	@echo "Cleaning all plugins..."
-	@cd tools/echo_tool && $(MAKE) --no-print-directory clean
-	@cd channels/stdout_channel && $(MAKE) --no-print-directory clean
-	@cd channels/telegram_channel && $(MAKE) --no-print-directory clean
-	@cd channels/email_channel && $(MAKE) --no-print-directory clean
-	@cd channels/discord_channel && $(MAKE) --no-print-directory clean
-	@cd channels/slack_channel && $(MAKE) --no-print-directory clean
-	@cd channels/dingtalk_channel && $(MAKE) --no-print-directory clean
-	@cd commands/hello_command && $(MAKE) --no-print-directory clean
+	@for plugin in $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS); do \
+		(cd $$plugin && $(MAKE) --no-print-directory clean) || true; \
+	done
 	@echo "All plugins cleaned."
 
-# Rebuild all plugins
 rebuild: clean all
 
+# =============================================================================
 # Help
+# =============================================================================
+
 help:
-	@echo "Primagen Plugins Makefile"
+	@echo "Primagen Plugins Build System"
+	@echo "=============================="
 	@echo ""
 	@echo "Targets:"
-	@echo "  all      - Build all plugins (default)"
-	@echo "  tools    - Build tool plugins only"
-	@echo "  channels - Build channel plugins only"
-	@echo "  commands - Build command plugins only"
-	@echo "  install  - Build and install all plugins"
-	@echo "  clean    - Remove built plugins"
-	@echo "  rebuild  - Clean and rebuild all plugins"
-	@echo "  help     - Show this help message"
+	@echo "  all/native    - Build all plugins for native platform (default)"
+	@echo "  android       - Build all plugins for Android (arm64-v8a)"
+	@echo "  channels      - Build channel plugins only"
+	@echo "  tools         - Build tool plugins only"
+	@echo "  commands      - Build command plugins only"
+	@echo "  install       - Build and install all plugins"
+	@echo "  clean         - Remove all built artifacts"
+	@echo "  rebuild       - Clean and rebuild all plugins"
+	@echo "  help          - Show this help message"
 	@echo ""
-	@echo "Demo Plugins:"
-	@echo "  tools/echo_tool       - Tool that echoes user messages"
-	@echo "  channels/stdout_channel - Channel that outputs to stdout"
-	@echo "  channels/telegram_channel - Telegram channel support"
-	@echo "  channels/email_channel - Email channel support"
-	@echo "  channels/discord_channel - Discord channel support"
-	@echo "  channels/slack_channel - Slack channel support"
-	@echo "  channels/dingtalk_channel - DingTalk channel support"
-	@echo "  commands/hello_command - Adds /hello slash command"
+	@echo "Environment Variables:"
+	@echo "  ANDROID_NDK   - Path to Android NDK (required for android target)"
+	@echo ""
+	@echo "Output Structure:"
+	@echo "  build/.primagen/plugins/"
+	@echo "  ├── channels/   - Channel plugin .so files"
+	@echo "  ├── tools/      - Tool plugin .so files"
+	@echo "  └── commands/   - Command plugin .so files"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make                                    # Build all native plugins"
+	@echo "  make channels                           # Build channel plugins only"
+	@echo "  make ANDROID_NDK=/path/to/ndk android   # Build all Android plugins"
+	@echo "  make install                            # Build and install"
+	@echo "  make clean && make                      # Rebuild all"

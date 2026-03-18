@@ -194,64 +194,36 @@ Config* config_create() {
     cfg->heartbeat.enabled = true;
     cfg->heartbeat.interval_s = 300;
 
+    // Allocate plugins on heap (not stack!) so they persist after function returns
+    cfg->plugins.items = malloc(2 * sizeof(PluginConfig));
+    cfg->plugins.count = 2;
+    cfg->plugins.capacity = 2;
+
+    cfg->plugins.items[0].plugin_id = strdup("feishu_channel");
+    cfg->plugins.items[0].config = cJSON_CreateObject();
+    cJSON_AddBoolToObject(cfg->plugins.items[0].config, "enabled", false);
+    cJSON_AddStringToObject(cfg->plugins.items[0].config, "app_id", "");
+    cJSON_AddStringToObject(cfg->plugins.items[0].config, "app_secret", "");
+    cJSON_AddBoolToObject(cfg->plugins.items[0].config, "use_card", false);
+    cJSON_AddNullToObject(cfg->plugins.items[0].config, "allow_from");
+
+    cfg->plugins.items[1].plugin_id = strdup("dingtalk_channel");
+    cfg->plugins.items[1].config = cJSON_CreateObject();
+    cJSON_AddBoolToObject(cfg->plugins.items[1].config, "enabled", false);
+    cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientId", "");
+    cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientSecret", "");
+    cJSON_AddBoolToObject(cfg->plugins.items[1].config, "use_card", false);
+    cJSON_AddNullToObject(cfg->plugins.items[1].config, "allow_from");
+
     // Default log config
     cfg->log.level = strdup("INFO");
     cfg->log.console_output = false;
-
-    // Default channels config
-    cfg->channels.telegram.enabled = false;
-    cfg->channels.telegram.token = strdup("");
-    cfg->channels.telegram.allow_from = string_array_new();
-
-    cfg->channels.email.enabled = false;
-    cfg->channels.email.imap_host = strdup("");
-    cfg->channels.email.imap_port = 993;
-    cfg->channels.email.imap_username = strdup("");
-    cfg->channels.email.imap_password = strdup("");
-    cfg->channels.email.imap_use_ssl = true;
-    cfg->channels.email.smtp_host = strdup("");
-    cfg->channels.email.smtp_port = 465;
-    cfg->channels.email.smtp_username = strdup("");
-    cfg->channels.email.smtp_password = strdup("");
-    cfg->channels.email.smtp_use_ssl = true;
-    cfg->channels.email.smtp_use_tls = false;
-    cfg->channels.email.from_address = strdup("");
-    cfg->channels.email.allow_from = string_array_new();
-
-    cfg->channels.discord.enabled = false;
-    cfg->channels.discord.token = strdup("");
-    cfg->channels.discord.gateway_url = strdup("wss://gateway.discord.gg");
-    cfg->channels.discord.intents = 33280; // Default intents
-    cfg->channels.discord.allow_from = string_array_new();
-
-    cfg->channels.slack.enabled = false;
-    cfg->channels.slack.bot_token = strdup("");
-    cfg->channels.slack.app_token = strdup("");
-    cfg->channels.slack.mode = strdup("socket");
-    cfg->channels.slack.allow_from = string_array_new();
-
-    cfg->channels.dingtalk.enabled = false;
-    cfg->channels.dingtalk.client_id = strdup("");
-    cfg->channels.dingtalk.client_secret = strdup("");
-    cfg->channels.dingtalk.allow_from = string_array_new();
-
-    cfg->channels.whatsapp.enabled = false;
-    cfg->channels.whatsapp.bridge_url = strdup("ws://localhost:3001");
-    cfg->channels.whatsapp.bridge_token = strdup("");
-    cfg->channels.whatsapp.allow_from = string_array_new();
-    cfg->channels.send_progress = true;
-    cfg->channels.send_tool_hints = true;
 
     // Default MCP config
     cfg->mcp.enabled = false;
     cfg->mcp.servers = NULL;
     cfg->mcp.server_count = 0;
     cfg->mcp.server_capacity = 0;
-
-    // Default plugins config
-    cfg->plugins.items = NULL;
-    cfg->plugins.count = 0;
-    cfg->plugins.capacity = 0;
 
     return cfg;
 }
@@ -268,35 +240,6 @@ void config_destroy(Config* cfg) {
     free(cfg->tools.web.proxy);
     
     free(cfg->log.level);
-    
-    free(cfg->channels.telegram.token);
-    string_array_free(&cfg->channels.telegram.allow_from);
-
-    free(cfg->channels.email.imap_host);
-    free(cfg->channels.email.imap_username);
-    free(cfg->channels.email.imap_password);
-    free(cfg->channels.email.smtp_host);
-    free(cfg->channels.email.smtp_username);
-    free(cfg->channels.email.smtp_password);
-    free(cfg->channels.email.from_address);
-    string_array_free(&cfg->channels.email.allow_from);
-
-    free(cfg->channels.discord.token);
-    free(cfg->channels.discord.gateway_url);
-    string_array_free(&cfg->channels.discord.allow_from);
-
-    free(cfg->channels.slack.bot_token);
-    free(cfg->channels.slack.app_token);
-    free(cfg->channels.slack.mode);
-    string_array_free(&cfg->channels.slack.allow_from);
-
-    free(cfg->channels.dingtalk.client_id);
-    free(cfg->channels.dingtalk.client_secret);
-    string_array_free(&cfg->channels.dingtalk.allow_from);
-
-    free(cfg->channels.whatsapp.bridge_url);
-    free(cfg->channels.whatsapp.bridge_token);
-    string_array_free(&cfg->channels.whatsapp.allow_from);
 
     // Free MCP config
     for (size_t i = 0; i < cfg->mcp.server_count; i++) {
@@ -327,10 +270,6 @@ ToolConfig* config_get_tool_config(Config* cfg) {
 
 HeartbeatConfig* config_get_heartbeat_config(Config* cfg) {
     return cfg ? &cfg->heartbeat : NULL;
-}
-
-ChannelsConfig* config_get_channels_config(Config* cfg) {
-    return cfg ? &cfg->channels : NULL;
 }
 
 MCPConfig* config_get_mcp_config(Config* cfg) {
@@ -445,82 +384,6 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
             cfg->log.level = get_json_string(item, "INFO");
         }
         if ((item = cJSON_GetObjectItem(log, "consoleOutput"))) cfg->log.console_output = get_json_bool(item, true);
-    }
-
-    // Channels Config
-    cJSON* channels = cJSON_GetObjectItem(json, "channels");
-    if (channels) {
-        cJSON* item;
-        if ((item = cJSON_GetObjectItem(channels, "sendProgress"))) cfg->channels.send_progress = get_json_bool(item, true);
-        if ((item = cJSON_GetObjectItem(channels, "sendToolHints"))) cfg->channels.send_tool_hints = get_json_bool(item, true);
-        
-        cJSON* telegram = cJSON_GetObjectItem(channels, "telegram");
-        if (telegram) {
-            if ((item = cJSON_GetObjectItem(telegram, "enabled"))) cfg->channels.telegram.enabled = get_json_bool(item, false);
-            if ((item = cJSON_GetObjectItem(telegram, "token"))) {
-                free(cfg->channels.telegram.token);
-                cfg->channels.telegram.token = get_json_string(item, "");
-            }
-            load_string_array(cJSON_GetObjectItem(telegram, "allowFrom"), &cfg->channels.telegram.allow_from);
-        }
-
-        cJSON* email = cJSON_GetObjectItem(channels, "email");
-        if (email) {
-            if ((item = cJSON_GetObjectItem(email, "enabled"))) cfg->channels.email.enabled = get_json_bool(item, false);
-            if ((item = cJSON_GetObjectItem(email, "imapHost"))) { free(cfg->channels.email.imap_host); cfg->channels.email.imap_host = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(email, "imapPort"))) cfg->channels.email.imap_port = get_json_int(item, 993);
-            if ((item = cJSON_GetObjectItem(email, "imapUsername"))) { free(cfg->channels.email.imap_username); cfg->channels.email.imap_username = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(email, "imapPassword"))) { free(cfg->channels.email.imap_password); cfg->channels.email.imap_password = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(email, "imapUseSsl"))) cfg->channels.email.imap_use_ssl = get_json_bool(item, true);
-            if ((item = cJSON_GetObjectItem(email, "smtpHost"))) { free(cfg->channels.email.smtp_host); cfg->channels.email.smtp_host = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(email, "smtpPort"))) cfg->channels.email.smtp_port = get_json_int(item, 465);
-            if ((item = cJSON_GetObjectItem(email, "smtpUsername"))) { free(cfg->channels.email.smtp_username); cfg->channels.email.smtp_username = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(email, "smtpPassword"))) { free(cfg->channels.email.smtp_password); cfg->channels.email.smtp_password = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(email, "smtpUseSsl"))) cfg->channels.email.smtp_use_ssl = get_json_bool(item, true);
-            if ((item = cJSON_GetObjectItem(email, "smtpUseTls"))) cfg->channels.email.smtp_use_tls = get_json_bool(item, false);
-            if ((item = cJSON_GetObjectItem(email, "fromAddress"))) { free(cfg->channels.email.from_address); cfg->channels.email.from_address = get_json_string(item, ""); }
-            load_string_array(cJSON_GetObjectItem(email, "allowFrom"), &cfg->channels.email.allow_from);
-        }
-
-        cJSON* discord = cJSON_GetObjectItem(channels, "discord");
-        if (discord) {
-            if ((item = cJSON_GetObjectItem(discord, "enabled"))) cfg->channels.discord.enabled = get_json_bool(item, false);
-            if ((item = cJSON_GetObjectItem(discord, "token"))) { free(cfg->channels.discord.token); cfg->channels.discord.token = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(discord, "gatewayUrl"))) { free(cfg->channels.discord.gateway_url); cfg->channels.discord.gateway_url = get_json_string(item, "wss://gateway.discord.gg"); }
-            if ((item = cJSON_GetObjectItem(discord, "intents"))) cfg->channels.discord.intents = get_json_int(item, 33280);
-            load_string_array(cJSON_GetObjectItem(discord, "allowFrom"), &cfg->channels.discord.allow_from);
-        }
-
-        cJSON* slack = cJSON_GetObjectItem(channels, "slack");
-        if (slack) {
-            if ((item = cJSON_GetObjectItem(slack, "enabled"))) cfg->channels.slack.enabled = get_json_bool(item, false);
-            if ((item = cJSON_GetObjectItem(slack, "botToken"))) { free(cfg->channels.slack.bot_token); cfg->channels.slack.bot_token = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(slack, "appToken"))) { free(cfg->channels.slack.app_token); cfg->channels.slack.app_token = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(slack, "mode"))) { free(cfg->channels.slack.mode); cfg->channels.slack.mode = get_json_string(item, "socket"); }
-            load_string_array(cJSON_GetObjectItem(slack, "allowFrom"), &cfg->channels.slack.allow_from);
-        }
-
-        cJSON* dingtalk = cJSON_GetObjectItem(channels, "dingtalk");
-        if (dingtalk) {
-            if ((item = cJSON_GetObjectItem(dingtalk, "enabled"))) cfg->channels.dingtalk.enabled = get_json_bool(item, false);
-            if ((item = cJSON_GetObjectItem(dingtalk, "clientId"))) { free(cfg->channels.dingtalk.client_id); cfg->channels.dingtalk.client_id = get_json_string(item, ""); }
-            if ((item = cJSON_GetObjectItem(dingtalk, "clientSecret"))) { free(cfg->channels.dingtalk.client_secret); cfg->channels.dingtalk.client_secret = get_json_string(item, ""); }
-            load_string_array(cJSON_GetObjectItem(dingtalk, "allowFrom"), &cfg->channels.dingtalk.allow_from);
-        }
-
-        cJSON* whatsapp = cJSON_GetObjectItem(channels, "whatsapp");
-        if (whatsapp) {
-            if ((item = cJSON_GetObjectItem(whatsapp, "enabled"))) cfg->channels.whatsapp.enabled = get_json_bool(item, false);
-            if ((item = cJSON_GetObjectItem(whatsapp, "bridgeUrl"))) {
-                free(cfg->channels.whatsapp.bridge_url);
-                cfg->channels.whatsapp.bridge_url = get_json_string(item, "ws://localhost:3001");
-            }
-            if ((item = cJSON_GetObjectItem(whatsapp, "bridgeToken"))) {
-                free(cfg->channels.whatsapp.bridge_token);
-                cfg->channels.whatsapp.bridge_token = get_json_string(item, "");
-            }
-            load_string_array(cJSON_GetObjectItem(whatsapp, "allowFrom"), &cfg->channels.whatsapp.allow_from);
-        }
     }
 
     // MCP Config
@@ -693,90 +556,6 @@ void config_load_from_env(Config* cfg) {
     const char* env_console_output = get_env_string("PRIMAGEN_LOG_CONSOLE_OUTPUT", NULL);
     if (env_console_output) { cfg->log.console_output = get_env_bool("PRIMAGEN_LOG_CONSOLE_OUTPUT", cfg->log.console_output); }
 
-    // Channels config - PRIMAGEN_CHANNELS_*
-    const char* env_send_progress = get_env_string("PRIMAGEN_CHANNELS_SEND_PROGRESS", NULL);
-    if (env_send_progress) { cfg->channels.send_progress = get_env_bool("PRIMAGEN_CHANNELS_SEND_PROGRESS", cfg->channels.send_progress); }
-
-    const char* env_send_tool_hints = get_env_string("PRIMAGEN_CHANNELS_SEND_TOOL_HINTS", NULL);
-    if (env_send_tool_hints) { cfg->channels.send_tool_hints = get_env_bool("PRIMAGEN_CHANNELS_SEND_TOOL_HINTS", cfg->channels.send_tool_hints); }
-
-    // Telegram - PRIMAGEN_TELEGRAM_*
-    const char* env_tg_enabled = get_env_string("PRIMAGEN_TELEGRAM_ENABLED", NULL);
-    if (env_tg_enabled) { cfg->channels.telegram.enabled = get_env_bool("PRIMAGEN_TELEGRAM_ENABLED", cfg->channels.telegram.enabled); }
-
-    const char* env_tg_token = get_env_string("PRIMAGEN_TELEGRAM_TOKEN", NULL);
-    if (env_tg_token) { free(cfg->channels.telegram.token); cfg->channels.telegram.token = strdup(env_tg_token); }
-
-    // Email - PRIMAGEN_EMAIL_*
-    const char* env_email_enabled = get_env_string("PRIMAGEN_EMAIL_ENABLED", NULL);
-    if (env_email_enabled) { cfg->channels.email.enabled = get_env_bool("PRIMAGEN_EMAIL_ENABLED", cfg->channels.email.enabled); }
-
-    const char* env_imap_host = get_env_string("PRIMAGEN_EMAIL_IMAP_HOST", NULL);
-    if (env_imap_host) { free(cfg->channels.email.imap_host); cfg->channels.email.imap_host = strdup(env_imap_host); }
-
-    const char* env_imap_port = get_env_string("PRIMAGEN_EMAIL_IMAP_PORT", NULL);
-    if (env_imap_port) { cfg->channels.email.imap_port = get_env_int("PRIMAGEN_EMAIL_IMAP_PORT", cfg->channels.email.imap_port); }
-
-    const char* env_imap_user = get_env_string("PRIMAGEN_EMAIL_IMAP_USERNAME", NULL);
-    if (env_imap_user) { free(cfg->channels.email.imap_username); cfg->channels.email.imap_username = strdup(env_imap_user); }
-
-    const char* env_imap_pass = get_env_string("PRIMAGEN_EMAIL_IMAP_PASSWORD", NULL);
-    if (env_imap_pass) { free(cfg->channels.email.imap_password); cfg->channels.email.imap_password = strdup(env_imap_pass); }
-
-    const char* env_smtp_host = get_env_string("PRIMAGEN_EMAIL_SMTP_HOST", NULL);
-    if (env_smtp_host) { free(cfg->channels.email.smtp_host); cfg->channels.email.smtp_host = strdup(env_smtp_host); }
-
-    const char* env_smtp_port = get_env_string("PRIMAGEN_EMAIL_SMTP_PORT", NULL);
-    if (env_smtp_port) { cfg->channels.email.smtp_port = get_env_int("PRIMAGEN_EMAIL_SMTP_PORT", cfg->channels.email.smtp_port); }
-
-    const char* env_smtp_user = get_env_string("PRIMAGEN_EMAIL_SMTP_USERNAME", NULL);
-    if (env_smtp_user) { free(cfg->channels.email.smtp_username); cfg->channels.email.smtp_username = strdup(env_smtp_user); }
-
-    const char* env_smtp_pass = get_env_string("PRIMAGEN_EMAIL_SMTP_PASSWORD", NULL);
-    if (env_smtp_pass) { free(cfg->channels.email.smtp_password); cfg->channels.email.smtp_password = strdup(env_smtp_pass); }
-
-    const char* env_from_addr = get_env_string("PRIMAGEN_EMAIL_FROM_ADDRESS", NULL);
-    if (env_from_addr) { free(cfg->channels.email.from_address); cfg->channels.email.from_address = strdup(env_from_addr); }
-
-    // Discord - PRIMAGEN_DISCORD_*
-    const char* env_discord_enabled = get_env_string("PRIMAGEN_DISCORD_ENABLED", NULL);
-    if (env_discord_enabled) { cfg->channels.discord.enabled = get_env_bool("PRIMAGEN_DISCORD_ENABLED", cfg->channels.discord.enabled); }
-
-    const char* env_discord_token = get_env_string("PRIMAGEN_DISCORD_TOKEN", NULL);
-    if (env_discord_token) { free(cfg->channels.discord.token); cfg->channels.discord.token = strdup(env_discord_token); }
-
-    const char* env_discord_gateway = get_env_string("PRIMAGEN_DISCORD_GATEWAY_URL", NULL);
-    if (env_discord_gateway) { free(cfg->channels.discord.gateway_url); cfg->channels.discord.gateway_url = strdup(env_discord_gateway); }
-
-    // Slack - PRIMAGEN_SLACK_*
-    const char* env_slack_enabled = get_env_string("PRIMAGEN_SLACK_ENABLED", NULL);
-    if (env_slack_enabled) { cfg->channels.slack.enabled = get_env_bool("PRIMAGEN_SLACK_ENABLED", cfg->channels.slack.enabled); }
-
-    const char* env_slack_bot_token = get_env_string("PRIMAGEN_SLACK_BOT_TOKEN", NULL);
-    if (env_slack_bot_token) { free(cfg->channels.slack.bot_token); cfg->channels.slack.bot_token = strdup(env_slack_bot_token); }
-
-    const char* env_slack_app_token = get_env_string("PRIMAGEN_SLACK_APP_TOKEN", NULL);
-    if (env_slack_app_token) { free(cfg->channels.slack.app_token); cfg->channels.slack.app_token = strdup(env_slack_app_token); }
-
-    // DingTalk - PRIMAGEN_DINGTALK_*
-    const char* env_dingtalk_enabled = get_env_string("PRIMAGEN_DINGTALK_ENABLED", NULL);
-    if (env_dingtalk_enabled) { cfg->channels.dingtalk.enabled = get_env_bool("PRIMAGEN_DINGTALK_ENABLED", cfg->channels.dingtalk.enabled); }
-
-    const char* env_dingtalk_client_id = get_env_string("PRIMAGEN_DINGTALK_CLIENT_ID", NULL);
-    if (env_dingtalk_client_id) { free(cfg->channels.dingtalk.client_id); cfg->channels.dingtalk.client_id = strdup(env_dingtalk_client_id); }
-
-    const char* env_dingtalk_client_secret = get_env_string("PRIMAGEN_DINGTALK_CLIENT_SECRET", NULL);
-    if (env_dingtalk_client_secret) { free(cfg->channels.dingtalk.client_secret); cfg->channels.dingtalk.client_secret = strdup(env_dingtalk_client_secret); }
-
-    // WhatsApp - PRIMAGEN_WHATSAPP_*
-    const char* env_whatsapp_enabled = get_env_string("PRIMAGEN_WHATSAPP_ENABLED", NULL);
-    if (env_whatsapp_enabled) { cfg->channels.whatsapp.enabled = get_env_bool("PRIMAGEN_WHATSAPP_ENABLED", cfg->channels.whatsapp.enabled); }
-
-    const char* env_whatsapp_bridge_url = get_env_string("PRIMAGEN_WHATSAPP_BRIDGE_URL", NULL);
-    if (env_whatsapp_bridge_url) { free(cfg->channels.whatsapp.bridge_url); cfg->channels.whatsapp.bridge_url = strdup(env_whatsapp_bridge_url); }
-
-    const char* env_whatsapp_bridge_token = get_env_string("PRIMAGEN_WHATSAPP_BRIDGE_TOKEN", NULL);
-    if (env_whatsapp_bridge_token) { free(cfg->channels.whatsapp.bridge_token); cfg->channels.whatsapp.bridge_token = strdup(env_whatsapp_bridge_token); }
 }
 
 bool config_save_to_file(Config* cfg, const char* filepath) {
@@ -825,26 +604,6 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
     cJSON_AddStringToObject(log, "level", cfg->log.level);
     cJSON_AddBoolToObject(log, "consoleOutput", cfg->log.console_output);
     cJSON_AddItemToObject(json, "log", log);
-
-    // Channels
-    cJSON* channels = cJSON_CreateObject();
-    cJSON_AddBoolToObject(channels, "sendProgress", cfg->channels.send_progress);
-    cJSON_AddBoolToObject(channels, "sendToolHints", cfg->channels.send_tool_hints);
-
-    cJSON* telegram = cJSON_CreateObject();
-    cJSON_AddBoolToObject(telegram, "enabled", cfg->channels.telegram.enabled);
-    cJSON_AddStringToObject(telegram, "token", cfg->channels.telegram.token);
-    // TODO: save allowFrom
-    cJSON_AddItemToObject(channels, "telegram", telegram);
-
-    cJSON* whatsapp = cJSON_CreateObject();
-    cJSON_AddBoolToObject(whatsapp, "enabled", cfg->channels.whatsapp.enabled);
-    cJSON_AddStringToObject(whatsapp, "bridgeUrl", cfg->channels.whatsapp.bridge_url);
-    cJSON_AddStringToObject(whatsapp, "bridgeToken", cfg->channels.whatsapp.bridge_token);
-    // TODO: save allowFrom
-    cJSON_AddItemToObject(channels, "whatsapp", whatsapp);
-
-    cJSON_AddItemToObject(json, "channels", channels);
 
     // Plugins
     if (cfg->plugins.count > 0) {
