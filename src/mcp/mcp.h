@@ -132,5 +132,6 @@ MCPMethod mcp_method_from_string(const char* str);
 
 // Tool registration (bridge to ToolRegistry)
 void mcp_register_tools(ToolRegistry* reg, MCPClient* client);
+void mcp_register_resources_prompts(ToolRegistry* reg, MCPClient* client);
 
 #endif // MCP_H

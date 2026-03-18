@@ -240,6 +240,11 @@ Error tool_read_file(void* user_data, const char* args_json, String* result) {
 
     if (error_msg) {
         char* full_error = malloc(strlen(error_msg) + strlen(TOOL_ERROR_HINT) + 1);
+        if (!full_error) {
+            free(error_msg);
+            free(casted_args);
+            return error_new(ERR_MEMORY, "Failed to allocate error message");
+        }
         strcpy(full_error, error_msg);
         strcat(full_error, TOOL_ERROR_HINT);
         *result = string_new(full_error);
@@ -361,6 +366,11 @@ Error tool_edit_file(void* user_data, const char* args_json, String* result) {
     fseek(fp, 0, SEEK_SET);
     
     char* data = malloc(length + 1);
+    if (!data) {
+        fclose(fp);
+        cJSON_Delete(json);
+        return error_new(ERR_MEMORY, "Memory allocation failed");
+    }
     fread(data, 1, length, fp);
     data[length] = '\0';
     fclose(fp);
@@ -381,6 +391,11 @@ Error tool_edit_file(void* user_data, const char* args_json, String* result) {
     
     size_t new_len = length - strlen(old_str) + strlen(new_str);
     char* new_data = malloc(new_len + 1);
+    if (!new_data) {
+        free(data);
+        cJSON_Delete(json);
+        return error_new(ERR_MEMORY, "Memory allocation failed");
+    }
     
     size_t prefix_len = pos - data;
     strncpy(new_data, data, prefix_len);
@@ -495,28 +510,32 @@ Error tool_web_search(void* user_data, const char* args_json, String* result) {
     (void)user_data;
     cJSON* json = cJSON_Parse(args_json);
     if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
-    
+
     char* query = get_json_string(json, "query");
     int count = get_json_int(json, "count", 5);
     if (count < 1) count = 1;
     if (count > 10) count = 10;
-    
+
     if (!query) {
         cJSON_Delete(json);
         return error_new(ERR_INVALID_PARAM, "Missing 'query' argument");
     }
-    
+
     const char* api_key = getenv("BRAVE_API_KEY");
     if (!api_key) {
         cJSON_Delete(json);
         return error_new(ERR_INVALID_PARAM, "BRAVE_API_KEY not set");
     }
-    
+
     struct mg_mgr mgr;
     struct MemoryStruct chunk = {0};
     chunk.memory = malloc(1);
+    if (!chunk.memory) {
+        cJSON_Delete(json);
+        return error_new(ERR_MEMORY, "Memory allocation failed");
+    }
     chunk.memory[0] = '\0';
-    
+
     mg_mgr_init(&mgr);
 
     char url[1024];
@@ -620,18 +639,22 @@ Error tool_web_fetch(void* user_data, const char* args_json, String* result) {
     (void)user_data;
     cJSON* json = cJSON_Parse(args_json);
     if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
-    
+
     char* url = get_json_string(json, "url");
     if (!url) {
         cJSON_Delete(json);
         return error_new(ERR_INVALID_PARAM, "Missing 'url' argument");
     }
-    
+
     struct mg_mgr mgr;
     struct MemoryStruct chunk = {0};
     chunk.memory = malloc(1);
+    if (!chunk.memory) {
+        cJSON_Delete(json);
+        return error_new(ERR_MEMORY, "Memory allocation failed");
+    }
     chunk.memory[0] = '\0';
-    
+
     mg_mgr_init(&mgr);
     
     struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);

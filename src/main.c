@@ -238,7 +238,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
 
     /* Initialize Memory */
     log_debug("[System] Creating Memory...");
-    Memory* memory = memory_new();
+    Memory* memory = memory_new_with_config(cfg);
     context_builder_set_memory(ctx_builder, memory);
 
     /* Load Bootstrap Files (Identity & Docs) */
@@ -339,6 +339,9 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
                         log_debug("  - Tool: %s", tools[j].name);
                     }
                 }
+
+                // Register MCP resources and prompts tools
+                mcp_register_resources_prompts(tool_reg, client);
             } else {
                 log_error("[MCP] Failed to connect to %s: %s", client->server_id, err.message);
             }

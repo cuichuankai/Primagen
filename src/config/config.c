@@ -328,6 +328,8 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
         if ((item = cJSON_GetObjectItem(agent, "max_tokens"))) cfg->agent.max_tokens = get_json_int(item, 4096);
         if ((item = cJSON_GetObjectItem(agent, "max_tool_iterations"))) cfg->agent.max_tool_iterations = get_json_int(item, 40);
         if ((item = cJSON_GetObjectItem(agent, "memory_window"))) cfg->agent.memory_window = get_json_int(item, 100);
+        if ((item = cJSON_GetObjectItem(agent, "memory_max_tokens"))) cfg->agent.memory_max_tokens = get_json_int(item, 4000);
+        if ((item = cJSON_GetObjectItem(agent, "memory_consolidation_threshold"))) cfg->agent.memory_consolidation_threshold = get_json_double(item, 0.8);
         if ((item = cJSON_GetObjectItem(agent, "reasoning_effort"))) {
             free(cfg->agent.reasoning_effort);
             cfg->agent.reasoning_effort = get_json_string(item, "medium");

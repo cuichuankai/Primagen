@@ -70,6 +70,10 @@ MCPManager* mcp_manager_create(const char* workspace) {
     mgr->clients_count = 0;
     mgr->clients_capacity = 0;
     mgr->workspace = strdup(workspace);
+    if (!mgr->workspace) {
+        free(mgr);
+        return NULL;
+    }
 
     return mgr;
 }
@@ -160,22 +164,53 @@ int mcp_manager_add_client(MCPManager* mgr, const char* server_id, const char* t
     memset(client, 0, sizeof(MCPClient));
 
     client->server_id = strdup(server_id);
+    if (!client->server_id) {
+        free(client);
+        return -1;
+    }
+
     client->transport_type = strdup(transport);
+    if (!client->transport_type) {
+        free(client->server_id);
+        free(client);
+        return -1;
+    }
 
     if (command) {
         client->command = strdup(command);
+        if (!client->command) {
+            free(client->transport_type);
+            free(client->server_id);
+            free(client);
+            return -1;
+        }
     }
 
     // Copy args
     if (args && args_count > 0) {
         client->args = malloc(args_count * sizeof(char*));
         if (!client->args) {
+            free(client->command);
+            free(client->transport_type);
+            free(client->server_id);
             free(client);
             return -1;
         }
         client->args_count = args_count;
         for (size_t i = 0; i < args_count; i++) {
             client->args[i] = strdup(args[i]);
+            if (!client->args[i]) {
+                // Free already allocated args
+                for (size_t j = 0; j < i; j++) {
+                    free(client->args[j]);
+                }
+                free(client->args);
+                free(client->command);
+                free(client->transport_type);
+                free(client->server_id);
+                free(client);
+                return -1;
+            }
         }
     }
 
@@ -183,14 +218,61 @@ int mcp_manager_add_client(MCPManager* mgr, const char* server_id, const char* t
     if (env_vars && env_count > 0) {
         client->env.items = malloc(env_count * sizeof(EnvVar));
         if (!client->env.items) {
-            if (client->args) free(client->args);
+            if (client->args) {
+                for (size_t i = 0; i < client->args_count; i++) {
+                    free(client->args[i]);
+                }
+                free(client->args);
+            }
+            free(client->command);
+            free(client->transport_type);
+            free(client->server_id);
             free(client);
             return -1;
         }
         client->env.count = env_count;
         for (size_t i = 0; i < env_count; i++) {
             client->env.items[i].key = strdup(env_vars[i].key);
+            if (!client->env.items[i].key) {
+                // Free already allocated keys
+                for (size_t j = 0; j < i; j++) {
+                    free(client->env.items[j].key);
+                    free(client->env.items[j].value);
+                }
+                free(client->env.items);
+                if (client->args) {
+                    for (size_t j = 0; j < client->args_count; j++) {
+                        free(client->args[j]);
+                    }
+                    free(client->args);
+                }
+                free(client->command);
+                free(client->transport_type);
+                free(client->server_id);
+                free(client);
+                return -1;
+            }
             client->env.items[i].value = strdup(env_vars[i].value);
+            if (!client->env.items[i].value) {
+                free(client->env.items[i].key);
+                // Free already allocated env vars
+                for (size_t j = 0; j < i; j++) {
+                    free(client->env.items[j].key);
+                    free(client->env.items[j].value);
+                }
+                free(client->env.items);
+                if (client->args) {
+                    for (size_t j = 0; j < client->args_count; j++) {
+                        free(client->args[j]);
+                    }
+                    free(client->args);
+                }
+                free(client->command);
+                free(client->transport_type);
+                free(client->server_id);
+                free(client);
+                return -1;
+            }
         }
     }
 

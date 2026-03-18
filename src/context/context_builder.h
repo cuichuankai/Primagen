@@ -13,6 +13,13 @@ typedef struct {
     Memory* memory;
     SkillsLoader* skills_loader;
     char* workspace;
+
+    // Caching for LLM efficiency
+    char* cached_memory_content;      // Cached memory content
+    char* cached_skills_content;      // Cached always-on skills content
+    char* cached_skills_summary;      // Cached skills summary
+    time_t memory_mtime;              // Last modification time of memory files
+    time_t skills_mtime;              // Last modification time of skills files
 } ContextBuilder;
 
 // Functions

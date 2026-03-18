@@ -14,6 +14,9 @@ typedef struct {
     int max_tool_iterations;
     int memory_window;
     char* reasoning_effort;
+    // Memory settings
+    int memory_max_tokens;
+    double memory_consolidation_threshold;
 } AgentConfig;
 
 typedef struct {

@@ -7,12 +7,20 @@
 #define CONSOLIDATION_THRESHOLD 0.8  // Consolidate when 80% full
 
 Memory* memory_new() {
+    return memory_new_with_config(NULL);
+}
+
+Memory* memory_new_with_config(Config* config) {
     Memory* mem = malloc(sizeof(Memory));
     if (!mem) return NULL;
     mem->memory_md = string_new("");
     mem->history_md = string_new("");
-    mem->max_tokens = DEFAULT_MAX_TOKENS;
+    // Get settings from config, use defaults if not set
+    mem->max_tokens = config && config->agent.memory_max_tokens > 0
+                      ? (size_t)config->agent.memory_max_tokens : DEFAULT_MAX_TOKENS;
     mem->current_tokens = 0;
+    mem->consolidation_threshold = config && config->agent.memory_consolidation_threshold > 0
+                                   ? config->agent.memory_consolidation_threshold : CONSOLIDATION_THRESHOLD;
     return mem;
 }
 
@@ -66,11 +74,13 @@ Error memory_load(Memory* mem, const char* workspace_path) {
         size_t size = ftell(f);
         fseek(f, 0, SEEK_SET);
         char* buf = malloc(size + 1);
-        fread(buf, 1, size, f);
-        buf[size] = '\0';
-        string_free(&mem->history_md);
-        mem->history_md = string_new(buf);
-        free(buf);
+        if (buf) {
+            fread(buf, 1, size, f);
+            buf[size] = '\0';
+            string_free(&mem->history_md);
+            mem->history_md = string_new(buf);
+            free(buf);
+        }
         fclose(f);
     }
     
@@ -160,6 +170,7 @@ void memory_add_fact(Memory* mem, const char* fact) {
 void memory_add_history(Memory* mem, const char* entry) {
     // Append to history_md
     char* new_data = malloc(mem->history_md.len + strlen(entry) + 2);
+    if (!new_data) return;  // Memory allocation failed, silently skip
     strcpy(new_data, mem->history_md.data);
     strcat(new_data, entry);
     strcat(new_data, "\n");
@@ -188,7 +199,7 @@ int memory_needs_consolidation(Memory* mem) {
     size_t current = memory_estimate_tokens(mem);
     mem->current_tokens = current;
 
-    return current > (mem->max_tokens * CONSOLIDATION_THRESHOLD);
+    return current > (mem->max_tokens * mem->consolidation_threshold);
 }
 
 /**

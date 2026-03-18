@@ -2,6 +2,7 @@
 #include "../include/common.h"
 #include "../include/skills.h"
 #include <time.h>
+#include <sys/stat.h>
 
 /* Build runtime context metadata */
 static char* build_runtime_context(const char* channel, const char* chat_id) {
@@ -47,6 +48,11 @@ ContextBuilder* context_builder_new(const char* workspace) {
     cb->memory = NULL;
     cb->skills_loader = skills_loader_create(workspace);
     cb->workspace = strdup(workspace);
+    cb->cached_memory_content = NULL;
+    cb->cached_skills_content = NULL;
+    cb->cached_skills_summary = NULL;
+    cb->memory_mtime = 0;
+    cb->skills_mtime = 0;
     return cb;
 }
 
@@ -56,6 +62,9 @@ void context_builder_free(ContextBuilder* cb) {
     string_array_free(&cb->bootstrap_files);
     skills_loader_destroy(cb->skills_loader);
     free(cb->workspace);
+    free(cb->cached_memory_content);
+    free(cb->cached_skills_content);
+    free(cb->cached_skills_summary);
     free(cb);
 }
 
@@ -95,47 +104,67 @@ String context_builder_build_with_channel(ContextBuilder* cb, Session* session, 
         string_append(&prompt, "\n\n---\n\n");
     }
 
-    // Memory
+    // Memory - only reload if file changed
     if (cb->memory && cb->workspace) {
-        // Reload memory to ensure latest content
-        memory_load(cb->memory, cb->workspace);
+        // Check if memory files have changed
+        char memory_path[512];
+        snprintf(memory_path, sizeof(memory_path), "%s/memory/MEMORY.md", cb->workspace);
+        struct stat st;
+        time_t new_mtime = 0;
+        if (stat(memory_path, &st) == 0) {
+            new_mtime = st.st_mtime;
+        }
 
-        string_append(&prompt, cb->memory->memory_md.data);
-        string_append(&prompt, "\n\n---\n\n");
-    } else {
-        // Fallback if memory not set (should not happen in prod)
-        string_append(&prompt, "# Long-term Memory\n\n(No memory loaded)\n\n---\n\n");
+        // Reload only if file changed or not cached
+        if (!cb->cached_memory_content || new_mtime > cb->memory_mtime) {
+            memory_load(cb->memory, cb->workspace);
+            free(cb->cached_memory_content);
+            cb->cached_memory_content = strdup(cb->memory->memory_md.data);
+            cb->memory_mtime = new_mtime;
+        }
+
+        if (cb->cached_memory_content) {
+            string_append(&prompt, cb->cached_memory_content);
+            string_append(&prompt, "\n\n---\n\n");
+        }
     }
 
-    // Always skills
-    if (cb->skills_loader) {
+    // Always skills - cache and reuse
+    if (cb->skills_loader && (!cb->cached_skills_content || !cb->cached_skills_summary)) {
         StringArray* always_skills = skills_loader_get_always_skills(cb->skills_loader);
         if (always_skills && always_skills->count > 0) {
             char* always_content = skills_loader_load_skills_for_context(cb->skills_loader, always_skills);
             if (always_content) {
-                string_append(&prompt, "# Active Skills\n\n");
-                string_append(&prompt, always_content);
-                string_append(&prompt, "\n\n---\n\n");
-                free(always_content);
+                free(cb->cached_skills_content);
+                cb->cached_skills_content = always_content;
             }
             string_array_free(always_skills);
             free(always_skills);
         }
-    }
 
-    // Skills summary
-    if (cb->skills_loader) {
         char* skills_summary = skills_loader_build_skills_summary(cb->skills_loader);
         if (skills_summary) {
-            string_append(&prompt, "# Available Skills\n\n");
-            string_append(&prompt, "Skills extend your capabilities. To use a skill:\n");
-            string_append(&prompt, "1. Use `skill` tool with action='load' and name='skill-name' to read the SKILL.md\n");
-            string_append(&prompt, "2. Follow the skill's instructions to complete the task (may involve using other tools like `exec`)\n");
-            string_append(&prompt, "IMPORTANT: Skills are NOT directly callable as tools. Always use `skill` tool first to load the skill.\n\n");
-            string_append(&prompt, skills_summary);
-            string_append(&prompt, "\n\n---\n\n");
-            free(skills_summary);
+            free(cb->cached_skills_summary);
+            cb->cached_skills_summary = skills_summary;
         }
+    }
+
+    // Use cached skills content
+    if (cb->cached_skills_content) {
+        string_append(&prompt, "# Active Skills\n\n");
+        string_append(&prompt, cb->cached_skills_content);
+        string_append(&prompt, "\n\n---\n\n");
+    }
+
+    // Use cached skills summary
+    if (cb->cached_skills_summary) {
+        string_append(&prompt, "# Available Skills\n\n");
+        string_append(&prompt, "Skills extend your capabilities. To use a skill:\n");
+        string_append(&prompt, "1. Use `skill` tool with action='load' and name='skill-name' to read the SKILL.md\n");
+        string_append(&prompt, "2. Follow the skill's instructions to complete the task (may involve using other tools like `exec`)\n");
+        string_append(&prompt, "IMPORTANT: Skills are NOT directly callable as tools. Always use `skill` tool first to load the skill.\n\n");
+        string_append(&prompt, cb->cached_skills_summary);
+        string_append(&prompt, "\n\n---\n\n");
     }
 
     // Runtime context (injected at the end, will be prepended to user message by agent loop)

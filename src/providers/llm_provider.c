@@ -117,8 +117,10 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
     // 2. Session History
     if (session) {
         size_t start_idx = 0;
-        size_t max_history = 30; 
-        
+        // Get max_history from config, default to 30 if not set
+        size_t max_history = config && config->agent.memory_window > 0
+                             ? (size_t)config->agent.memory_window : 30;
+
         if (session->messages.count > max_history) {
             start_idx = session->messages.count - max_history;
             cJSON *note = cJSON_CreateObject();

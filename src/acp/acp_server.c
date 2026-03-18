@@ -339,15 +339,28 @@ void acp_handle_chat_completions(struct mg_connection* nc, ACPServer* server, co
 
     log_debug("[ACP] Chat completion request, session: %s, message: %s", session_id, user_message);
 
-    // For now, return a simple response since we can't easily call the agent loop synchronously
-    // In a full implementation, this would inject a message into the bus and wait for response
+    // Create inbound message and send to agent loop
+    InboundMessage* inbound_msg = inbound_message_new("acp", session_id, user_message);
+    if (inbound_msg) {
+        message_bus_send_inbound(server->bus, inbound_msg);
+        inbound_message_free(inbound_msg);
+        log_debug("[ACP] Message sent to agent loop, session: %s", session_id);
+    } else {
+        log_error("[ACP] Failed to create inbound message");
+    }
+
+    // For synchronous response, we would wait for the agent loop to process
+    // and return the response via the outbound message bus.
+    // Current architecture is async - the response will be sent to the outbound bus.
+    // A production implementation would use a callback or polling mechanism.
+
+    // Return acknowledgment with session ID for tracking
     char* response_id = generate_response_id();
     const char* model = model_json && model_json->valuestring ? model_json->valuestring : "primagen-default";
 
-    // Simple acknowledgment response
     char response_content[1024];
     snprintf(response_content, sizeof(response_content),
-        "Message received. Session: %s. In a full implementation, this would process through the agent loop.",
+        "Message received and queued for processing. Session: %s. Use the session ID to track responses via the outbound message bus.",
         session_id);
 
     char* response_json = acp_chat_response_json(response_id, model, response_content, "stop");

@@ -16,6 +16,10 @@ void tool_registry_free(ToolRegistry* reg) {
         string_free(&reg->tools[i].def.name);
         string_free(&reg->tools[i].def.description);
         string_free(&reg->tools[i].def.parameters);
+        // Free user_data for builtin tools (no plugin_ref means it was allocated by agent_loop)
+        if (reg->tools[i].user_data && reg->tools[i].plugin_ref == NULL) {
+            free(reg->tools[i].user_data);
+        }
     }
     free(reg->tools);
     free(reg);

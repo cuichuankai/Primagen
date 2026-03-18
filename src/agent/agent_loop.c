@@ -367,9 +367,14 @@ void agent_loop_register_builtin_tools(PluginManager* manager, ToolContext* ctx)
     #define BUILTIN_TOOLS_COUNT (sizeof(builtin_tools) / sizeof(builtin_tools[0]))
 
     // Register each tool with a copy of ctx as user_data
+    // Each tool gets its own copy, which will be freed by tool_registry_free
     for (size_t i = 0; i < BUILTIN_TOOLS_COUNT; i++) {
         // Create a shallow copy of ToolContext for this tool
         ToolContext* tool_ctx = malloc(sizeof(ToolContext));
+        if (!tool_ctx) {
+            log_error("[AgentLoop] Failed to allocate ToolContext for tool: %s", builtin_tools[i].name);
+            continue;
+        }
         memcpy(tool_ctx, ctx, sizeof(ToolContext));
 
         int result = plugin_register_tool(manager, NULL,
@@ -381,8 +386,10 @@ void agent_loop_register_builtin_tools(PluginManager* manager, ToolContext* ctx)
 
         if (result != 0) {
             log_error("[AgentLoop] Failed to register built-in tool: %s", builtin_tools[i].name);
-            free(tool_ctx);
+            free(tool_ctx);  // Registration failed, free the copy
         }
+        // On success, tool_ctx ownership is transferred to tool_registry
+        // and will be freed by tool_registry_free
     }
 
     log_debug("[AgentLoop] Registered %zu built-in tools", BUILTIN_TOOLS_COUNT);
@@ -554,7 +561,9 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
                                inbound->channel.data, inbound->chat_id.data);
     }
 
-    int max_turns = 15;
+    // Get max_turns from config, default to 15 if not set
+    int max_turns = loop->config && loop->config->agent.max_tool_iterations > 0
+                    ? loop->config->agent.max_tool_iterations : 15;
     int turn = 0;
     bool conversation_turn_done = false;
     bool error_occurred = false;
