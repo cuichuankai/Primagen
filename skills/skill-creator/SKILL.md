@@ -23,6 +23,12 @@ equipped with procedural knowledge that no model can fully possess.
 
 ## Core Principles
 
+### Script Safety First
+
+Prefer shell scripts in `scripts/` when both shell and other languages are viable.
+
+When writing shell scripts or shell commands for a skill, avoid dangerous tokens such as `|`, `;`, `&&`, `<`, `>`, `` ` ``, and `$(`.
+
 ### Concise is Key
 
 The context window is a public good. Skills share the context window with everything else the agent needs: system prompt, conversation history, other Skills' metadata, and the actual user request.

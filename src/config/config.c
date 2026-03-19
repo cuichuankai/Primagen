@@ -183,12 +183,12 @@ Config* config_create() {
 
     // Default tool config
     cfg->tools.exec.timeout = 300;
-    cfg->tools.exec.restrict_to_workspace = false;
+    cfg->tools.exec.restrict_to_workspace = true;
     cfg->tools.exec.path_append = strdup("");
     cfg->tools.web.search.enabled = true;
     cfg->tools.web.search.api_key = strdup("");
     cfg->tools.web.proxy = strdup("");
-    cfg->tools.restrict_to_workspace = false;
+    cfg->tools.restrict_to_workspace = true;
 
     // Default heartbeat config
     cfg->heartbeat.enabled = true;
@@ -340,12 +340,12 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
     cJSON* tools = cJSON_GetObjectItem(json, "tools");
     if (tools) {
         cJSON* item;
-        if ((item = cJSON_GetObjectItem(tools, "restrictToWorkspace"))) cfg->tools.restrict_to_workspace = get_json_bool(item, false);
+        if ((item = cJSON_GetObjectItem(tools, "restrictToWorkspace"))) cfg->tools.restrict_to_workspace = get_json_bool(item, true);
         
         cJSON* exec = cJSON_GetObjectItem(tools, "exec");
         if (exec) {
             if ((item = cJSON_GetObjectItem(exec, "timeout"))) cfg->tools.exec.timeout = get_json_int(item, 300);
-            if ((item = cJSON_GetObjectItem(exec, "restrictToWorkspace"))) cfg->tools.exec.restrict_to_workspace = get_json_bool(item, false);
+            if ((item = cJSON_GetObjectItem(exec, "restrictToWorkspace"))) cfg->tools.exec.restrict_to_workspace = get_json_bool(item, true);
             if ((item = cJSON_GetObjectItem(exec, "pathAppend"))) {
                 free(cfg->tools.exec.path_append);
                 cfg->tools.exec.path_append = get_json_string(item, "");
@@ -473,17 +473,32 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
             const char* plugin_id = id_item->valuestring;
             PluginConfig* pc = config_add_plugin_config(cfg, plugin_id);
             if (pc) {
-                // Get the inner "config" object from the plugin item
+                cJSON* config_copy = NULL;
                 cJSON* inner_config = cJSON_GetObjectItem(plugin_item, "config");
                 if (cJSON_IsObject(inner_config)) {
-                    // Deep copy just the inner config object
-                    cJSON* config_copy = cJSON_Duplicate(inner_config, 1);
+                    config_copy = cJSON_Duplicate(inner_config, 1);
+                } else {
+                    config_copy = cJSON_CreateObject();
                     if (config_copy) {
-                        if (pc->config) {
-                            cJSON_Delete(pc->config);
+                        cJSON* child = plugin_item->child;
+                        while (child) {
+                            const char* key = child->string;
+                            if (key && strcmp(key, "id") != 0 && strcmp(key, "plugin_id") != 0) {
+                                cJSON* child_copy = cJSON_Duplicate(child, 1);
+                                if (child_copy) {
+                                    cJSON_AddItemToObject(config_copy, key, child_copy);
+                                }
+                            }
+                            child = child->next;
                         }
-                        pc->config = config_copy;
                     }
+                }
+
+                if (config_copy) {
+                    if (pc->config) {
+                        cJSON_Delete(pc->config);
+                    }
+                    pc->config = config_copy;
                 }
             }
         }
@@ -614,17 +629,11 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
             PluginConfig* pc = &cfg->plugins.items[i];
             if (pc->plugin_id) {
                 cJSON* plugin_obj = cJSON_CreateObject();
-                cJSON_AddStringToObject(plugin_obj, "id", pc->plugin_id);
+                cJSON_AddStringToObject(plugin_obj, "plugin_id", pc->plugin_id);
                 if (pc->config) {
-                    // Merge config fields into the plugin object
-                    cJSON* child = pc->config->child;
-                    while (child) {
-                        cJSON* copy = cJSON_Duplicate(child, 1);
-                        if (copy) {
-                            cJSON_AddItemReferenceToObject(plugin_obj, child->string, copy);
-                            cJSON_Delete(copy);  // Remove reference, item is now owned by plugin_obj
-                        }
-                        child = child->next;
+                    cJSON* config_copy = cJSON_Duplicate(pc->config, 1);
+                    if (config_copy) {
+                        cJSON_AddItemToObject(plugin_obj, "config", config_copy);
                     }
                 }
                 cJSON_AddItemToArray(plugins_array, plugin_obj);

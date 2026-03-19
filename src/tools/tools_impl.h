@@ -7,14 +7,17 @@
 #include "../include/cron.h"
 #include "../include/skills.h"
 #include "../memory/memory.h"
+#include "../include/config.h"
 #include "tool.h"
 
 typedef struct {
+    unsigned int magic;
     MessageBus* bus;
     SubagentManager* subagent_mgr;
     CronService* cron_service;
     SkillsLoader* skills_loader;
     Memory* memory;
+    Config* config;
     const char* workspace;
     const char* current_channel;
     const char* current_chat_id;

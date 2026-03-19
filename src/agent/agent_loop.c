@@ -436,25 +436,44 @@ void agent_loop_register_builtin_channels(PluginManager* manager, Config* cfg) {
    Plugin Command Handler - Unified handling for all commands
    ============================================================================= */
 
-static bool handle_plugin_command(AgentLoop* loop, const char* channel, const char* chat_id, const char* session_key, const char* full_content) {
-    if (!loop || !loop->plugin_mgr) return false;
+static void add_active_task(AgentLoop* loop, const char* task_id, const char* session_key, pthread_t thread);
+static void remove_active_task(AgentLoop* loop, const char* task_id);
+static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* session);
 
-    // Extract command name (first word after /)
-    char cmd_name[64];
-    const char* args_start = full_content + 1;
+static void parse_slash_command(const char* full_content, char* cmd_name, size_t cmd_name_size, const char** args_start_out) {
+    if (!full_content || !cmd_name || cmd_name_size == 0) {
+        return;
+    }
+
+    const char* args_start = full_content[0] == '/' ? full_content + 1 : full_content;
     while (*args_start == ' ') args_start++;
 
     const char* space = strchr(args_start, ' ');
     if (space) {
-        size_t len = space - args_start;
-        if (len >= sizeof(cmd_name)) len = sizeof(cmd_name) - 1;
+        size_t len = (size_t)(space - args_start);
+        if (len >= cmd_name_size) len = cmd_name_size - 1;
         strncpy(cmd_name, args_start, len);
         cmd_name[len] = '\0';
         args_start = space + 1;
     } else {
-        strncpy(cmd_name, args_start, sizeof(cmd_name) - 1);
-        cmd_name[sizeof(cmd_name) - 1] = '\0';
+        strncpy(cmd_name, args_start, cmd_name_size - 1);
+        cmd_name[cmd_name_size - 1] = '\0';
+        args_start += strlen(args_start);
     }
+
+    while (*args_start == ' ') args_start++;
+    if (args_start_out) {
+        *args_start_out = args_start;
+    }
+}
+
+static bool handle_plugin_command(AgentLoop* loop, const char* channel, const char* chat_id, const char* session_key, const char* full_content) {
+    if (!loop || !loop->plugin_mgr) return false;
+
+    char cmd_name[64] = {0};
+    const char* args_start = NULL;
+    parse_slash_command(full_content, cmd_name, sizeof(cmd_name), &args_start);
+    if (cmd_name[0] == '\0') return false;
 
     // Search for matching command (need lock for reading)
     pthread_mutex_lock(&loop->plugin_mgr->lock);
@@ -497,6 +516,48 @@ static bool handle_plugin_command(AgentLoop* loop, const char* channel, const ch
     }
 
     return false;
+}
+
+static bool handle_skill_fallback_command(AgentLoop* loop, InboundMessage* inbound, Session* session, const char* session_key, const char* full_content) {
+    if (!loop || !inbound || !session || !session_key || !full_content) return false;
+
+    char skill_name[64] = {0};
+    const char* args_start = NULL;
+    parse_slash_command(full_content, skill_name, sizeof(skill_name), &args_start);
+    if (skill_name[0] == '\0') return false;
+
+    Tool* skill_tool = tool_registry_get(loop->tool_reg, "skill");
+    if (!skill_tool || !skill_tool->user_data) return false;
+
+    ToolContext* tool_ctx = (ToolContext*)skill_tool->user_data;
+    if (!tool_ctx->skills_loader) return false;
+
+    char* loaded_skill = skills_loader_load_skill(tool_ctx->skills_loader, skill_name);
+    if (!loaded_skill) return false;
+    free(loaded_skill);
+
+    String trigger = string_new("");
+    string_append(&trigger, "Run skill '");
+    string_append(&trigger, skill_name);
+    string_append(&trigger, "' for this request.");
+    if (args_start && *args_start) {
+        string_append(&trigger, " User input: ");
+        string_append(&trigger, args_start);
+    }
+
+    Message* user_msg = message_new(ROLE_USER, trigger.data);
+    session_add_message(session, user_msg);
+    string_free(&trigger);
+
+    char task_id[32];
+    snprintf(task_id, sizeof(task_id), "task_%ld", time(NULL));
+    pthread_t current_thread = pthread_self();
+    add_active_task(loop, task_id, session_key, current_thread);
+    process_message(loop, inbound, session);
+    remove_active_task(loop, task_id);
+
+    log_info("[AgentLoop] Fallback slash command '/%s' matched skill and executed", skill_name);
+    return true;
 }
 
 /* =============================================================================
@@ -544,6 +605,17 @@ static void remove_active_task(AgentLoop* loop, const char* task_id) {
     pthread_mutex_unlock(&loop->task_mutex);
 }
 
+static void refresh_tool_routes(AgentLoop* loop, const char* channel, const char* chat_id) {
+    const char* tool_names[] = {"cron", "send_message", "spawn_subagent", "skill", "memory", "exec"};
+    size_t count = sizeof(tool_names) / sizeof(tool_names[0]);
+    for (size_t i = 0; i < count; i++) {
+        Tool* tool = tool_registry_get(loop->tool_reg, tool_names[i]);
+        if (tool && tool->user_data) {
+            tool_context_set_route((ToolContext*)tool->user_data, channel, chat_id);
+        }
+    }
+}
+
 /* =============================================================================
    Message Processing
    ============================================================================= */
@@ -554,12 +626,7 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
 
     strncpy(loop->current_session_key, key, sizeof(loop->current_session_key) - 1);
 
-    /* Set tool context */
-    Tool* cron_tool = tool_registry_get(loop->tool_reg, "cron");
-    if (cron_tool && cron_tool->user_data) {
-        tool_context_set_route((ToolContext*)cron_tool->user_data,
-                               inbound->channel.data, inbound->chat_id.data);
-    }
+    refresh_tool_routes(loop, inbound->channel.data, inbound->chat_id.data);
 
     // Get max_turns from config, default to 15 if not set
     int max_turns = loop->config && loop->config->agent.max_tool_iterations > 0
@@ -611,6 +678,22 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
             string_free(&response);
             conversation_turn_done = true;
         } else {
+            for (size_t i = 0; i < tool_calls_count; i++) {
+                if (tool_registry_get(loop->tool_reg, tool_calls[i].name.data) == NULL &&
+                    strcmp(tool_calls[i].name.data, "skill") != 0) {
+                    char skill_args[256];
+                    char original_name[128];
+                    snprintf(original_name, sizeof(original_name), "%s", tool_calls[i].name.data);
+                    snprintf(skill_args, sizeof(skill_args),
+                             "{\"action\":\"load\",\"name\":\"%s\"}", original_name);
+                    string_free(&tool_calls[i].name);
+                    tool_calls[i].name = string_new("skill");
+                    string_free(&tool_calls[i].arguments);
+                    tool_calls[i].arguments = string_new(skill_args);
+                    log_info("[AgentLoop] Rewriting unresolved tool '%s' to skill load", original_name);
+                }
+            }
+
             Message* assistant_msg = message_new(ROLE_ASSISTANT, clean_content ? clean_content : response.data);
             for (size_t i = 0; i < tool_calls_count; i++) {
                 message_add_tool_call(assistant_msg, tool_calls[i].id.data, tool_calls[i].name.data, tool_calls[i].arguments.data);
@@ -628,19 +711,10 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
                 err = tool_executor_execute_sync(loop->tool_executor, tool_calls[i].name.data,
                                                   tool_calls[i].arguments.data, &result, 30000);
                 if (err.code != ERR_NONE) {
-                    log_error("[AgentLoop] Tool Execution Failed: %s", err.message);
+                    log_error("[AgentLoop] Tool Execution Failed: name=%s error=%s",
+                              tool_calls[i].name.data, err.message);
                     string_free(&result);
-                    if (strstr(err.message, "not found") != NULL || strstr(err.message, "Unknown tool") != NULL) {
-                        char hint[512];
-                        snprintf(hint, sizeof(hint),
-                            "Error: '%s' is not a registered tool. "
-                            "If this is a skill, use the `skill` tool first: {\"action\": \"load\", \"name\": \"%s\"}.",
-                            tool_calls[i].name.data, tool_calls[i].name.data);
-                        result = string_new(hint);
-                        log_debug("[AgentLoop] '%s' may be a skill - suggested: use `skill` tool", tool_calls[i].name.data);
-                    } else {
-                        result = string_new(err.message);
-                    }
+                    result = string_new(err.message);
                 } else {
                     if (strcmp(tool_calls[i].name.data, "skill") == 0) {
                         log_debug("[AgentLoop] Tool Result: [Skill content loaded, length: %zu bytes]", result.len);
@@ -722,7 +796,11 @@ void agent_loop_run(AgentLoop* loop) {
         /* Unified slash command handling - all commands go through plugin system */
         const char* content = inbound->content.data;
         if (content[0] == '/') {
-            if (!handle_plugin_command(loop, inbound->channel.data, inbound->chat_id.data, key, content)) {
+            bool handled = handle_plugin_command(loop, inbound->channel.data, inbound->chat_id.data, key, content);
+            if (!handled) {
+                handled = handle_skill_fallback_command(loop, inbound, session, key, content);
+            }
+            if (!handled) {
                 char response[256];
                 snprintf(response, sizeof(response), "Unknown command: %s. Type /help for available commands.", content);
                 OutboundMessage* outbound = outbound_message_new(inbound->channel.data, inbound->chat_id.data, response);

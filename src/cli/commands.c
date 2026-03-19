@@ -160,8 +160,7 @@ int cmd_gateway(Config* cfg, int port, bool verbose) {
     }
     printf("[yellow]Gateway mode is currently a placeholder in this C implementation.[/yellow]\n");
     printf("In full version, this would start an HTTP/WebSocket server.\n");
-    /* TODO: Implement actual server loop */
-    return 0;
+    return 2;
 }
 
 /* Run agent interaction - simplified version for CLI */
@@ -177,8 +176,8 @@ int cmd_agent(Config* cfg, const char* message, const char* session_id, bool mar
 
     if (message) {
         printf("Message: %s\n", message);
-        /* TODO: Inject message into bus and run loop for one turn */
         printf("[yellow]Single-shot message mode not fully refactored yet. Use interactive mode.[/yellow]\n");
+        return 2;
     } else {
         printf("Entering interactive mode...\n");
         /* This is basically what 'main' does by default now */

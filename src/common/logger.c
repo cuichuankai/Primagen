@@ -13,6 +13,30 @@ static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int current_log_level = 1; /* 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR */
 static bool console_enabled = true;
 
+static bool starts_with(const char* s, const char* prefix) {
+    if (!s || !prefix) return false;
+    size_t n = strlen(prefix);
+    return strncmp(s, prefix, n) == 0;
+}
+
+static bool should_keep_channel_info(const char* message) {
+    if (!message) return false;
+    return strstr(message, "[DingTalk] Message from ") != NULL ||
+           strstr(message, "[DingTalk] Reply content: ") != NULL ||
+           strstr(message, "[Feishu] Received from ") != NULL ||
+           strstr(message, "[Feishu] Reply content: ") != NULL;
+}
+
+static bool should_demote_channel_info(const char* message) {
+    if (!message) return false;
+    return starts_with(message, "[DingTalk]") ||
+           starts_with(message, "[Feishu]") ||
+           starts_with(message, "[DingTalkChannel]") ||
+           starts_with(message, "[FeishuChannel]") ||
+           starts_with(message, "[Plugin:dingtalk_channel]") ||
+           starts_with(message, "[Plugin:feishu_channel]");
+}
+
 /* Forward declaration */
 static void log_v_with_loc(const char* level, const char* fmt, va_list args,
                            const char* file, int line, const char* func);
@@ -73,12 +97,7 @@ static void log_v_with_loc(const char* level, const char* fmt, va_list args,
                            const char* file, int line, const char* func) {
     pthread_mutex_lock(&log_mutex);
 
-    /* Check level - skip if message level is below current threshold */
     int msg_level = get_level_int(level);
-    if (msg_level < current_log_level) {
-        pthread_mutex_unlock(&log_mutex);
-        return;
-    }
 
     /* Get current timestamp */
     struct timeval tv;
@@ -112,16 +131,30 @@ static void log_v_with_loc(const char* level, const char* fmt, va_list args,
         message[len-1] = '\0';
     }
 
+    int effective_msg_level = msg_level;
+    const char* effective_level = level;
+    if (msg_level == LOG_LEVEL_INFO &&
+        should_demote_channel_info(message) &&
+        !should_keep_channel_info(message)) {
+        effective_msg_level = LOG_LEVEL_DEBUG;
+        effective_level = "DEBUG";
+    }
+    if (effective_msg_level < current_log_level) {
+        free(message);
+        pthread_mutex_unlock(&log_mutex);
+        return;
+    }
+
     /* Console output */
     if (console_enabled) {
-        FILE* out_stream = (msg_level >= LOG_LEVEL_ERROR) ? stderr : stdout;
+        FILE* out_stream = (effective_msg_level >= LOG_LEVEL_ERROR) ? stderr : stdout;
         if (file && line > 0) {
             /* Extract filename from path */
             const char* fname = strrchr(file, '/');
             fname = fname ? fname + 1 : file;
-            fprintf(out_stream, "[%s] [%s] [%s:%d %s] %s\n", timestamp, level, fname, line, func ? func : "?", message);
+            fprintf(out_stream, "[%s] [%s] [%s:%d %s] %s\n", timestamp, effective_level, fname, line, func ? func : "?", message);
         } else {
-            fprintf(out_stream, "[%s] [%s] %s\n", timestamp, level, message);
+            fprintf(out_stream, "[%s] [%s] %s\n", timestamp, effective_level, message);
         }
         fflush(out_stream);
     }
@@ -131,9 +164,9 @@ static void log_v_with_loc(const char* level, const char* fmt, va_list args,
         if (file && line > 0) {
             const char* fname = strrchr(file, '/');
             fname = fname ? fname + 1 : file;
-            fprintf(log_file, "[%s] [%s] [%s:%d %s] %s\n", timestamp, level, fname, line, func ? func : "?", message);
+            fprintf(log_file, "[%s] [%s] [%s:%d %s] %s\n", timestamp, effective_level, fname, line, func ? func : "?", message);
         } else {
-            fprintf(log_file, "[%s] [%s] %s\n", timestamp, level, message);
+            fprintf(log_file, "[%s] [%s] %s\n", timestamp, effective_level, message);
         }
         fflush(log_file);
     }

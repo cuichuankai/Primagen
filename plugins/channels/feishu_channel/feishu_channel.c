@@ -456,6 +456,7 @@ static void feishu_send(Channel* self, OutboundMessage* msg) {
     if (!data->app_id || !data->app_id[0]) return;
 
     if (strcmp(msg->channel.data, "feishu") != 0) return;
+    log_info("[Feishu] Reply content: %s", msg->content.data);
 
     if (!data->access_token) refresh_token(data);
 
@@ -586,7 +587,7 @@ static void feishu_send(Channel* self, OutboundMessage* msg) {
                     }
                 }
             } else {
-                log_info("[Feishu] Sent to %s", msg->chat_id.data);
+                log_debug("[Feishu] Sent to %s", msg->chat_id.data);
             }
             cJSON_Delete(resp);
         }

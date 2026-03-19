@@ -5,6 +5,23 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <ctype.h>
+
+static void build_session_file_path(SessionManager* mgr, const char* key, char* filepath, size_t filepath_size) {
+    char sanitized[512];
+    size_t j = 0;
+    for (size_t i = 0; key[i] && j + 4 < sizeof(sanitized); i++) {
+        unsigned char c = (unsigned char) key[i];
+        if (isalnum(c) || c == '_' || c == '-' || c == '.') {
+            sanitized[j++] = (char) c;
+        } else {
+            snprintf(sanitized + j, sizeof(sanitized) - j, "_%02X", c);
+            j += 3;
+        }
+    }
+    sanitized[j] = '\0';
+    snprintf(filepath, filepath_size, "%s/sessions/%s.jsonl", mgr->workspace_path.data, sanitized);
+}
 
 SessionManager* session_manager_new(const char* workspace_path) {
     SessionManager* mgr = malloc(sizeof(SessionManager));
@@ -79,7 +96,7 @@ Session* session_manager_create(SessionManager* mgr, const char* key) {
 
 Error session_manager_save(SessionManager* mgr, Session* session) {
     char filepath[512];
-    snprintf(filepath, sizeof(filepath), "%s/sessions/%s.jsonl", mgr->workspace_path.data, session->key.data);
+    build_session_file_path(mgr, session->key.data, filepath, sizeof(filepath));
     FILE* f = fopen(filepath, "w");
     if (!f) return error_new(ERR_FILE, "Cannot open session file");
 
@@ -117,7 +134,7 @@ Error session_manager_save(SessionManager* mgr, Session* session) {
 
 Error session_manager_load(SessionManager* mgr, const char* key, Session** session_out) {
     char filepath[512];
-    snprintf(filepath, sizeof(filepath), "%s/sessions/%s.jsonl", mgr->workspace_path.data, key);
+    build_session_file_path(mgr, key, filepath, sizeof(filepath));
     FILE* f = fopen(filepath, "r");
     if (!f) {
         *session_out = session_manager_create(mgr, key);

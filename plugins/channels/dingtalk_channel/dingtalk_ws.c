@@ -863,7 +863,7 @@ bool dingtalk_ws_connect(DingTalkWS* ws, const char* url, const char* access_tok
     struct mg_tls_opts opts = {0};
     opts.ca = mg_str("");
     opts.name = host;
-    opts.skip_verification = true;
+    opts.skip_verification = 0;
     if (mg_url_is_ssl(url)) {
         mg_tls_init(ws->c, &opts);
     }

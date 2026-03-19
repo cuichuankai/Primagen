@@ -8,6 +8,9 @@
 #include "../session/session.h"
 #include "../include/config.h"
 
+struct mg_connection;
+struct mg_http_message;
+
 // ACP Server configuration
 #define ACP_DEFAULT_PORT 8080
 #define ACP_DEFAULT_HOST "127.0.0.1"
@@ -16,6 +19,7 @@
 #define ACP_ROUTE_TOOLS_LIST "/v1/tools/list"
 #define ACP_ROUTE_TOOLS_CALL "/v1/tools/call"
 #define ACP_ROUTE_CHAT_COMPLETIONS "/v1/chat/completions"
+#define ACP_ROUTE_CHAT_RESPONSES "/v1/chat/responses"
 #define ACP_ROUTE_HEALTH "/v1/health"
 
 // Max concurrent connections
@@ -94,6 +98,7 @@ void acp_server_stop(ACPServer* server);
 void acp_handle_tools_list(struct mg_connection* nc, ACPServer* server);
 void acp_handle_tools_call(struct mg_connection* nc, ACPServer* server, const char* body);
 void acp_handle_chat_completions(struct mg_connection* nc, ACPServer* server, const char* body);
+void acp_handle_chat_responses(struct mg_connection* nc, ACPServer* server, const struct mg_http_message* hm);
 void acp_handle_health(struct mg_connection* nc, ACPServer* server);
 
 // JSON helpers

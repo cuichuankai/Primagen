@@ -5,11 +5,14 @@
 #include "../vendor/mongoose/mongoose.h"
 #include <pthread.h>
 #include <time.h>
+#include <string.h>
+#include <stdlib.h>
 
 // Forward declarations
 static void send_json_response(struct mg_connection* nc, int status, const char* json);
 static void send_error_response(struct mg_connection* nc, int code, const char* message);
 static char* generate_response_id(void);
+static bool acp_request_authorized(ACPServer* server, struct mg_http_message* hm);
 
 // Generate unique response ID
 static char* generate_response_id(void) {
@@ -27,7 +30,15 @@ static char* generate_response_id(void) {
 
 // Send JSON response
 static void send_json_response(struct mg_connection* nc, int status, const char* json) {
-    mg_http_reply(nc, status, "Content-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n", "%s", json);
+    const char* allow_origin = getenv("PRIMAGEN_ACP_ALLOW_ORIGIN");
+    if (allow_origin && allow_origin[0] != '\0') {
+        char headers[512];
+        snprintf(headers, sizeof(headers),
+                 "Content-Type: application/json\r\nAccess-Control-Allow-Origin: %s\r\n", allow_origin);
+        mg_http_reply(nc, status, headers, "%s", json);
+    } else {
+        mg_http_reply(nc, status, "Content-Type: application/json\r\n", "%s", json);
+    }
 }
 
 // Send error response
@@ -35,10 +46,40 @@ static void send_error_response(struct mg_connection* nc, int code, const char* 
     char* error_json = acp_error_json(code, message);
     int status = 400;
     if (code == 401) status = 401;
+    else if (code == 429) status = 429;
     else if (code == 404) status = 404;
     else if (code == 500) status = 500;
     send_json_response(nc, status, error_json);
     free(error_json);
+}
+
+static bool acp_request_authorized(ACPServer* server, struct mg_http_message* hm) {
+    (void)server;
+    const char* token = getenv("PRIMAGEN_ACP_TOKEN");
+    if (!token || token[0] == '\0') {
+        const char* allow_anon = getenv("PRIMAGEN_ACP_ALLOW_ANON");
+        if (allow_anon && (strcmp(allow_anon, "1") == 0 || strcmp(allow_anon, "true") == 0 || strcmp(allow_anon, "yes") == 0)) {
+            return true;
+        }
+        return false;
+    }
+
+    struct mg_str* auth = mg_http_get_header(hm, "Authorization");
+    if (auth && auth->len > 7 && strncmp(auth->buf, "Bearer ", 7) == 0) {
+        size_t token_len = strlen(token);
+        if ((size_t) (auth->len - 7) == token_len && strncmp(auth->buf + 7, token, token_len) == 0) {
+            return true;
+        }
+    }
+
+    struct mg_str* api_key = mg_http_get_header(hm, "X-API-Key");
+    if (api_key) {
+        size_t token_len = strlen(token);
+        if ((size_t) api_key->len == token_len && strncmp(api_key->buf, token, token_len) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Create ACPServer instance
@@ -145,12 +186,29 @@ void acp_event_handler(struct mg_connection* nc, int ev, void* ev_data) {
     // Track connections
     pthread_mutex_lock(&server->connection_mutex);
     server->active_connections++;
+    bool over_limit = server->active_connections > ACP_MAX_CONNECTIONS;
     pthread_mutex_unlock(&server->connection_mutex);
+    if (over_limit) {
+        send_error_response(nc, 429, "Too many requests");
+        pthread_mutex_lock(&server->connection_mutex);
+        server->active_connections--;
+        pthread_mutex_unlock(&server->connection_mutex);
+        return;
+    }
 
     log_debug("[ACP] %.*s %.*s", (int)hm->method.len, hm->method.buf, (int)hm->uri.len, hm->uri.buf);
 
+    bool is_health = mg_match(hm->uri, mg_str(ACP_ROUTE_HEALTH), NULL);
+    if (!is_health && !acp_request_authorized(server, hm)) {
+        send_error_response(nc, 401, "Unauthorized");
+        pthread_mutex_lock(&server->connection_mutex);
+        server->active_connections--;
+        pthread_mutex_unlock(&server->connection_mutex);
+        return;
+    }
+
     // Route requests
-    if (mg_match(hm->uri, mg_str(ACP_ROUTE_HEALTH), NULL)) {
+    if (is_health) {
         acp_handle_health(nc, server);
     }
     else if (mg_match(hm->uri, mg_str(ACP_ROUTE_TOOLS_LIST), NULL)) {
@@ -186,6 +244,13 @@ void acp_event_handler(struct mg_connection* nc, int ev, void* ev_data) {
             } else {
                 send_error_response(nc, 500, "Failed to allocate memory for request body");
             }
+        }
+    }
+    else if (mg_match(hm->uri, mg_str(ACP_ROUTE_CHAT_RESPONSES), NULL)) {
+        if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
+            send_error_response(nc, 405, "Method not allowed");
+        } else {
+            acp_handle_chat_responses(nc, server, hm);
         }
     }
     else {
@@ -297,10 +362,9 @@ void acp_handle_chat_completions(struct mg_connection* nc, ACPServer* server, co
     // Extract fields
     cJSON* messages_json = cJSON_GetObjectItem(root, "messages");
     cJSON* model_json = cJSON_GetObjectItem(root, "model");
-    // Note: temperature, max_tokens, stream extracted but not used in current implementation
-    cJSON_GetObjectItem(root, "temperature");
-    cJSON_GetObjectItem(root, "max_tokens");
-    cJSON_GetObjectItem(root, "stream");
+    cJSON* temperature_json = cJSON_GetObjectItem(root, "temperature");
+    cJSON* max_tokens_json = cJSON_GetObjectItem(root, "max_tokens");
+    cJSON* stream_json = cJSON_GetObjectItem(root, "stream");
     cJSON* session_id_json = cJSON_GetObjectItem(root, "session_id");
 
     if (!messages_json || messages_json->type != cJSON_Array) {
@@ -343,7 +407,6 @@ void acp_handle_chat_completions(struct mg_connection* nc, ACPServer* server, co
     InboundMessage* inbound_msg = inbound_message_new("acp", session_id, user_message);
     if (inbound_msg) {
         message_bus_send_inbound(server->bus, inbound_msg);
-        inbound_message_free(inbound_msg);
         log_debug("[ACP] Message sent to agent loop, session: %s", session_id);
     } else {
         log_error("[ACP] Failed to create inbound message");
@@ -365,13 +428,127 @@ void acp_handle_chat_completions(struct mg_connection* nc, ACPServer* server, co
 
     char* response_json = acp_chat_response_json(response_id, model, response_content, "stop");
 
-    send_json_response(nc, 200, response_json);
+    cJSON* response_root = cJSON_Parse(response_json);
+    if (response_root) {
+        cJSON* queue_info = cJSON_CreateObject();
+        if (temperature_json && cJSON_IsNumber(temperature_json)) {
+            cJSON_AddNumberToObject(queue_info, "temperature", temperature_json->valuedouble);
+        }
+        if (max_tokens_json && cJSON_IsNumber(max_tokens_json)) {
+            cJSON_AddNumberToObject(queue_info, "max_tokens", max_tokens_json->valueint);
+        }
+        if (stream_json && cJSON_IsBool(stream_json)) {
+            cJSON_AddBoolToObject(queue_info, "stream", cJSON_IsTrue(stream_json));
+        }
+        cJSON_AddStringToObject(queue_info, "result_endpoint", "/v1/chat/responses?session_id=<session_id>");
+        cJSON_AddItemToObject(response_root, "queued_options", queue_info);
+        char* enriched = cJSON_PrintUnformatted(response_root);
+        if (enriched) {
+            send_json_response(nc, 202, enriched);
+            free(enriched);
+        } else {
+            send_json_response(nc, 202, response_json);
+        }
+        cJSON_Delete(response_root);
+    } else {
+        send_json_response(nc, 202, response_json);
+    }
 
     // Cleanup
     free(response_json);
     free(response_id);
     free(session_id);
     cJSON_Delete(root);
+}
+
+void acp_handle_chat_responses(struct mg_connection* nc, ACPServer* server, const struct mg_http_message* hm) {
+    if (!server || !server->session_mgr || !hm) {
+        send_error_response(nc, 500, "Session manager not initialized");
+        return;
+    }
+
+    char session_id[256] = {0};
+    int ret = mg_http_get_var(&hm->query, "session_id", session_id, sizeof(session_id));
+    if (ret <= 0) {
+        send_error_response(nc, 400, "Missing required query parameter: session_id");
+        return;
+    }
+    char limit_buf[32] = {0};
+    char since_buf[32] = {0};
+    int limit = 1;
+    int since = -1;
+    ret = mg_http_get_var(&hm->query, "limit", limit_buf, sizeof(limit_buf));
+    if (ret > 0) {
+        limit = atoi(limit_buf);
+    }
+    if (limit < 1) limit = 1;
+    if (limit > 20) limit = 20;
+    ret = mg_http_get_var(&hm->query, "since", since_buf, sizeof(since_buf));
+    if (ret > 0) {
+        since = atoi(since_buf);
+    }
+    if (since < -1) since = -1;
+
+    char session_key[320];
+    snprintf(session_key, sizeof(session_key), "acp:%s", session_id);
+
+    Session* session = session_manager_get(server->session_mgr, session_key);
+    if (!session) {
+        session_manager_load(server->session_mgr, session_key, &session);
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "session_id", session_id);
+    cJSON_AddNumberToObject(root, "requested_limit", limit);
+    cJSON_AddNumberToObject(root, "requested_since", since);
+
+    cJSON* responses = cJSON_CreateArray();
+    size_t total_assistant = 0;
+    size_t total_new = 0;
+    int last_index = since;
+    int added = 0;
+
+    if (session) {
+        for (size_t i = 0; i < session->messages.count; i++) {
+            Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
+            if (!msg || msg->role != ROLE_ASSISTANT || msg->content.len == 0) continue;
+            total_assistant++;
+            if ((int)i <= since) continue;
+            total_new++;
+            if (added >= limit) continue;
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "message_index", (int)i);
+            cJSON_AddStringToObject(item, "role", "assistant");
+            cJSON_AddStringToObject(item, "content", msg->content.data);
+            cJSON_AddStringToObject(item, "timestamp", msg->timestamp.data ? msg->timestamp.data : "");
+            cJSON_AddItemToArray(responses, item);
+            last_index = (int)i;
+            added++;
+        }
+    }
+
+    if (total_assistant == 0) {
+        cJSON_AddStringToObject(root, "status", "pending");
+        cJSON_AddBoolToObject(root, "ready", false);
+        cJSON_AddNumberToObject(root, "next_since", since);
+        cJSON_AddBoolToObject(root, "has_more", false);
+        cJSON_AddItemToObject(root, "responses", responses);
+        char* json = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        send_json_response(nc, 202, json);
+        free(json);
+        return;
+    }
+
+    cJSON_AddStringToObject(root, "status", "completed");
+    cJSON_AddBoolToObject(root, "ready", added > 0);
+    cJSON_AddNumberToObject(root, "next_since", last_index);
+    cJSON_AddBoolToObject(root, "has_more", total_new > (size_t)added);
+    cJSON_AddItemToObject(root, "responses", responses);
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    send_json_response(nc, 200, json);
+    free(json);
 }
 
 // Generate tools list JSON

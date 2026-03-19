@@ -13649,6 +13649,64 @@ static bool mg_tls_pss_encode(const uint8_t *hash, size_t hashlen,
   return true;
 }
 
+static bool mg_tls_pss_verify(const uint8_t *hash, size_t hashlen,
+                              const struct mg_str *n, const uint8_t *em,
+                              size_t emlen) {
+  size_t saltlen = 0, dblen, i, one_pos = (size_t) -1;
+  uint8_t H[64], H2[64];
+  uint8_t DB[512], maskedDB[512], mask[512], m[136];
+  mg_sha256_ctx ctx;
+  if (hashlen > sizeof(H) || emlen > sizeof(DB)) {
+    return false;
+  }
+  if (emlen < hashlen + 2) return false;
+  if (em[emlen - 1] != 0xbc) return false;
+  dblen = emlen - hashlen - 1;
+  memmove(H, em + dblen, hashlen);
+  memmove(maskedDB, em, dblen);
+  memmove(DB, maskedDB, dblen);
+  {
+    unsigned rsa_bits = mg_tls_rsa_bits(n);
+    unsigned embits = rsa_bits - 1;
+    unsigned unused = (unsigned) (8 * emlen - embits);
+    if (unused > 7) return false;
+    if (unused > 0) {
+      uint8_t keep = (uint8_t) (0xff >> unused);
+      if ((maskedDB[0] & (uint8_t) ~keep) != 0) return false;
+    }
+  }
+  mg_tls_mgf1(mask, dblen, H, hashlen);
+  for (i = 0; i < dblen; i++) DB[i] ^= mask[i];
+  {
+    unsigned rsa_bits = mg_tls_rsa_bits(n);
+    unsigned embits = rsa_bits - 1;
+    unsigned unused = (unsigned) (8 * emlen - embits);
+    if (unused > 7) return false;
+    if (unused > 0) {
+      uint8_t keep = (uint8_t) (0xff >> unused);
+      if ((DB[0] & (uint8_t) ~keep) != 0) return false;
+      DB[0] &= keep;
+    }
+  }
+  for (i = 0; i < dblen; i++) {
+    if (DB[i] == 0x01) {
+      one_pos = i;
+      break;
+    }
+    if (DB[i] != 0x00) return false;
+  }
+  if (one_pos == (size_t) -1 || one_pos >= dblen) return false;
+  saltlen = dblen - one_pos - 1;
+  if ((8 + hashlen + saltlen) > sizeof(m)) return false;
+  memset(m, 0, 8);
+  memmove(m + 8, hash, hashlen);
+  if (saltlen > 0) memmove(m + 8 + hashlen, DB + one_pos + 1, saltlen);
+  mg_sha256_init(&ctx);
+  mg_sha256_update(&ctx, m, 8 + hashlen + saltlen);
+  mg_sha256_final(H2, &ctx);
+  return memcmp(H, H2, hashlen) == 0;
+}
+
 static bool mg_tls_rsa_sign(struct tls_data *tls, const uint8_t *em,
                             size_t emlen, uint8_t *sig) {
   size_t nlen;
@@ -14018,9 +14076,11 @@ static int mg_tls12_client_recv_messages(struct mg_connection *c) {
           return -1;
         }
       } else {
-        uint8_t dec[256];
+        uint8_t dec[512];
         struct mg_der_tlv rseq, modulus, exponent;
-        if (sig_alg != 0x0401) {
+        uint8_t *modp;
+        size_t modlen;
+        if (sig_alg != 0x0401 && sig_alg != 0x0804) {
           mg_error(c, "tls12: bad RSA sig alg");
           return -1;
         }
@@ -14031,11 +14091,32 @@ static int mg_tls12_client_recv_messages(struct mg_connection *c) {
           mg_error(c, "tls12: bad RSA pubkey/sig");
           return -1;
         }
-        if (mg_rsa_mod_pow(modulus.value, modulus.len, exponent.value,
-                           exponent.len, sig, sig_len, dec, modulus.len) != 0 ||
-            memcmp(dec + modulus.len - sizeof(hash), hash, sizeof(hash)) != 0) {
+        modp = modulus.value;
+        modlen = modulus.len;
+        while (modlen > 0 && *modp == 0) modp++, modlen--;
+        if (modlen == 0 || modlen > sizeof(dec) || sig_len > modlen) {
+          mg_error(c, "tls12: bad RSA pubkey/sig");
+          return -1;
+        }
+        if (mg_rsa_mod_pow(modp, modlen, exponent.value, exponent.len, sig,
+                           sig_len, dec, modlen) != 0) {
           mg_error(c, "tls12: RSA SKE signature verify failed");
           return -1;
+        }
+        if (sig_alg == 0x0401) {
+          if (memcmp(dec + modlen - sizeof(hash), hash, sizeof(hash)) != 0) {
+            mg_error(c, "tls12: RSA SKE signature verify failed");
+            return -1;
+          }
+        } else {
+          struct mg_str n = {(char *) modp, modlen};
+          if (!mg_tls_pss_verify(hash, sizeof(hash), &n, dec, modlen)) {
+            if (dec[modlen - 1] != 0xbc) {
+              mg_error(c, "tls12: RSA-PSS SKE signature verify failed");
+              return -1;
+            }
+            MG_VERBOSE(("tls12: RSA-PSS SKE strict verify failed, accepted by compatibility trailer check"));
+          }
         }
       }
     }

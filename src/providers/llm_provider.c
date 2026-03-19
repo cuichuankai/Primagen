@@ -13,6 +13,7 @@ struct MemoryStruct {
     size_t size;
     bool done;
     char last_error[256];
+    int http_status;
 };
 
 /**
@@ -27,6 +28,12 @@ static FinishReason parse_finish_reason(const char* reason) {
     return FINISH_REASON_ERROR;
 }
 
+static const char* json_get_string(cJSON* obj, const char* key, const char* fallback) {
+    cJSON* item = cJSON_GetObjectItem(obj, key);
+    if (cJSON_IsString(item) && item->valuestring) return item->valuestring;
+    return fallback;
+}
+
 static void fn(struct mg_connection *c, int ev, void *ev_data) {
   struct MemoryStruct *ms = (struct MemoryStruct *) c->fn_data;
   if (ev == MG_EV_CONNECT) {
@@ -35,12 +42,13 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     log_debug("[LLM] MG_EV_TLS_HS success");
   } else if (ev == MG_EV_HTTP_HDRS) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    log_debug("[LLM] MG_EV_HTTP_HDRS status=%d", mg_http_status(hm));
+    ms->http_status = mg_http_status(hm);
+    log_debug("[LLM] MG_EV_HTTP_HDRS status=%d", ms->http_status);
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     int status = mg_http_status(hm);
+    ms->http_status = status;
     log_debug("[LLM] MG_EV_HTTP_MSG status=%d body_len=%zu", status, hm->body.len);
-    // Append body
     size_t new_size = ms->size + hm->body.len;
     ms->memory = realloc(ms->memory, new_size + 1);
     if (!ms->memory) {
@@ -72,6 +80,12 @@ static const char* get_api_key(Config* config) {
     const char* key = getenv("OPENAI_API_KEY");
     if (!key) return "";
     return key;
+}
+
+static bool should_skip_tls_verification(void) {
+    const char* val = getenv("PRIMAGEN_TLS_SKIP_VERIFY");
+    if (!val) return false;
+    return strcmp(val, "1") == 0 || strcmp(val, "true") == 0 || strcmp(val, "yes") == 0;
 }
 
 Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, String* response, ToolCall** tool_calls, size_t* tool_calls_count) {
@@ -166,9 +180,6 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
                 if (msg->tool_call_id.len > 0) {
                     cJSON_AddStringToObject(json_msg, "tool_call_id", msg->tool_call_id.data);
                 }
-                if (msg->name.len > 0) {
-                    cJSON_AddStringToObject(json_msg, "name", msg->name.data);
-                }
             }
             
             cJSON_AddItemToArray(messages, json_msg);
@@ -238,7 +249,7 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
     struct mg_tls_opts opts = {0};
     opts.ca = mg_str("");
     opts.name = host;
-    opts.skip_verification = true;  // Use built-in TLS without CA verification
+    opts.skip_verification = should_skip_tls_verification() ? 1 : 0;
     if (mg_url_is_ssl(url)) {
         mg_tls_init(c, &opts);
     }
@@ -285,8 +296,8 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
 
     if (chunk.size == 0) {
         char errbuf[320];
-        snprintf(errbuf, sizeof(errbuf), "Empty LLM response (%s)",
-                 chunk.last_error[0] ? chunk.last_error : "no payload");
+        snprintf(errbuf, sizeof(errbuf), "Empty LLM response (status=%d, %s)",
+                 chunk.http_status, chunk.last_error[0] ? chunk.last_error : "no payload");
         free(chunk.memory);
         return error_new(ERR_NETWORK, errbuf);
     }
@@ -294,7 +305,8 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
     cJSON *json_response = cJSON_Parse(chunk.memory);
     
     if (!json_response) {
-        printf("Failed to parse LLM response. Raw: %s\n", chunk.memory);
+        log_error("[LLM] Failed to parse response: status=%d payload_prefix=%.200s",
+                  chunk.http_status, chunk.memory ? chunk.memory : "");
         free(chunk.memory);
         return error_new(ERR_JSON, "Failed to parse LLM response");
     }
@@ -312,8 +324,14 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
     
     cJSON *choices = cJSON_GetObjectItem(json_response, "choices");
     if (!cJSON_IsArray(choices) || cJSON_GetArraySize(choices) == 0) {
+        char errbuf[256];
+        const char* object_type = json_get_string(json_response, "object", "n/a");
+        const char* message = json_get_string(json_response, "message", "n/a");
+        snprintf(errbuf, sizeof(errbuf),
+                 "No choices in response (status=%d, object=%s, message=%s)",
+                 chunk.http_status, object_type, message);
         cJSON_Delete(json_response);
-        return error_new(ERR_JSON, "No choices in response");
+        return error_new(ERR_JSON, errbuf);
     }
     
     cJSON *choice = cJSON_GetArrayItem(choices, 0);
@@ -458,9 +476,6 @@ Error llm_provider_call_extended(const char* system_prompt, Session* session, To
                 if (msg->tool_call_id.len > 0) {
                     cJSON_AddStringToObject(json_msg, "tool_call_id", msg->tool_call_id.data);
                 }
-                if (msg->name.len > 0) {
-                    cJSON_AddStringToObject(json_msg, "name", msg->name.data);
-                }
             }
 
             cJSON_AddItemToArray(messages, json_msg);
@@ -523,7 +538,7 @@ Error llm_provider_call_extended(const char* system_prompt, Session* session, To
     struct mg_tls_opts opts = {0};
     opts.ca = mg_str("");
     opts.name = host;
-    opts.skip_verification = true;
+    opts.skip_verification = should_skip_tls_verification() ? 1 : 0;
     if (mg_url_is_ssl(url)) {
         mg_tls_init(c, &opts);
     }
@@ -570,8 +585,8 @@ Error llm_provider_call_extended(const char* system_prompt, Session* session, To
 
     if (chunk.size == 0) {
         char errbuf[320];
-        snprintf(errbuf, sizeof(errbuf), "Empty LLM response (%s)",
-                 chunk.last_error[0] ? chunk.last_error : "no payload");
+        snprintf(errbuf, sizeof(errbuf), "Empty LLM response (status=%d, %s)",
+                 chunk.http_status, chunk.last_error[0] ? chunk.last_error : "no payload");
         free(chunk.memory);
         return error_new(ERR_NETWORK, errbuf);
     }
@@ -579,7 +594,8 @@ Error llm_provider_call_extended(const char* system_prompt, Session* session, To
     cJSON *json_response = cJSON_Parse(chunk.memory);
 
     if (!json_response) {
-        printf("Failed to parse LLM response. Raw: %s\n", chunk.memory);
+        log_error("[LLM] Failed to parse response: status=%d payload_prefix=%.200s",
+                  chunk.http_status, chunk.memory ? chunk.memory : "");
         free(chunk.memory);
         return error_new(ERR_JSON, "Failed to parse LLM response");
     }
@@ -597,8 +613,14 @@ Error llm_provider_call_extended(const char* system_prompt, Session* session, To
 
     cJSON *choices = cJSON_GetObjectItem(json_response, "choices");
     if (!cJSON_IsArray(choices) || cJSON_GetArraySize(choices) == 0) {
+        char errbuf[256];
+        const char* object_type = json_get_string(json_response, "object", "n/a");
+        const char* message = json_get_string(json_response, "message", "n/a");
+        snprintf(errbuf, sizeof(errbuf),
+                 "No choices in response (status=%d, object=%s, message=%s)",
+                 chunk.http_status, object_type, message);
         cJSON_Delete(json_response);
-        return error_new(ERR_JSON, "No choices in response");
+        return error_new(ERR_JSON, errbuf);
     }
 
     cJSON *choice = cJSON_GetArrayItem(choices, 0);
@@ -985,7 +1007,7 @@ Error llm_provider_call_streaming(const char* system_prompt, Session* session, T
     struct mg_tls_opts opts = {0};
     opts.ca = mg_str("");
     opts.name = host;
-    opts.skip_verification = true;
+    opts.skip_verification = should_skip_tls_verification() ? 1 : 0;
     if (mg_url_is_ssl(url)) {
         mg_tls_init(c, &opts);
     }

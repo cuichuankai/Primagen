@@ -13,6 +13,7 @@
 #include <ctype.h>
 
 #define MAX_READ_SIZE 128000
+#define TOOL_CONTEXT_MAGIC 0x50474E31
 
 // Error hint for tool failures (helps LLM recover)
 #define TOOL_ERROR_HINT "\n\n[Analyze the error above and try a different approach.]"
@@ -88,9 +89,45 @@ static const char* resolve_chat_id(ToolContext* ctx, const char* chat_id) {
 }
 
 void tool_context_set_route(ToolContext* ctx, const char* channel, const char* chat_id) {
-    if (!ctx) return;
+    if (!ctx || ctx->magic != TOOL_CONTEXT_MAGIC) return;
     ctx->current_channel = channel;
     ctx->current_chat_id = chat_id;
+}
+
+static bool command_contains_unsafe_token(const char* command) {
+    if (!command) return true;
+    const char* tokens[] = {"&&", "||", ";", "|", ">", "<", "`", "$(", "\n", "\r"};
+    size_t n = sizeof(tokens) / sizeof(tokens[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (strstr(command, tokens[i])) return true;
+    }
+    if (strncmp(command, "/", 1) == 0) return true;
+    if (strstr(command, " ../") || strstr(command, "../")) return true;
+    return false;
+}
+
+static char* shell_escape_single_quotes(const char* input) {
+    if (!input) return strdup("");
+    size_t len = strlen(input);
+    size_t extra = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (input[i] == '\'') extra += 3;
+    }
+    char* out = malloc(len + extra + 1);
+    if (!out) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (input[i] == '\'') {
+            out[j++] = '\'';
+            out[j++] = '\\';
+            out[j++] = '\'';
+            out[j++] = '\'';
+        } else {
+            out[j++] = input[i];
+        }
+    }
+    out[j] = '\0';
+    return out;
 }
 
 // Helper to create directories recursively
@@ -461,7 +498,7 @@ Error tool_list_dir(void* user_data, const char* args_json, String* result) {
 }
 
 Error tool_exec(void* user_data, const char* args_json, String* result) {
-    (void)user_data;
+    ToolContext* ctx = (ToolContext*)user_data;
     cJSON* json = cJSON_Parse(args_json);
     if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
 
@@ -471,10 +508,31 @@ Error tool_exec(void* user_data, const char* args_json, String* result) {
         return error_new(ERR_INVALID_PARAM, "Missing 'command' argument");
     }
 
-    // Execute command (timeout is handled by tool_executor)
-    // Note: We add a shell timeout wrapper for extra safety on Linux systems
     char* shell_cmd = NULL;
-    asprintf(&shell_cmd, "%s 2>&1", command);
+    bool restrict_exec = true;
+    if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config) {
+        restrict_exec = ctx->config->tools.exec.restrict_to_workspace || ctx->config->tools.restrict_to_workspace;
+    }
+    if (restrict_exec) {
+        if (command_contains_unsafe_token(command)) {
+            cJSON_Delete(json);
+            return error_new(ERR_TOOL, "Command rejected by workspace restriction policy");
+        }
+        const char* workspace = (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->workspace) ? ctx->workspace : ".";
+        char* escaped_workspace = shell_escape_single_quotes(workspace);
+        if (!escaped_workspace) {
+            cJSON_Delete(json);
+            return error_new(ERR_MEMORY, "Memory allocation failed");
+        }
+        asprintf(&shell_cmd, "cd '%s' && %s 2>&1", escaped_workspace, command);
+        free(escaped_workspace);
+    } else {
+        asprintf(&shell_cmd, "%s 2>&1", command);
+    }
+    if (!shell_cmd) {
+        cJSON_Delete(json);
+        return error_new(ERR_MEMORY, "Memory allocation failed");
+    }
 
     FILE* fp = popen(shell_cmd, "r");
     free(shell_cmd);

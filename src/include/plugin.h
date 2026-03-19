@@ -114,6 +114,7 @@ typedef struct PluginManager {
     ToolRegistry* tool_registry;
     void* channel_array;  // Forward decl - actual type in main.c
     int* channel_count_ptr;
+    int channel_capacity;
 
     // Command registration
     CommandPluginDef* commands;

@@ -468,8 +468,13 @@ int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
     if (manager->channel_array && manager->channel_count_ptr) {
         Channel** channels = (Channel**)manager->channel_array;
         int* count = manager->channel_count_ptr;
+        if (manager->channel_capacity > 0 && *count >= manager->channel_capacity) {
+            log_error("[Plugin] Failed to register channel %s: capacity reached (%d)", name, manager->channel_capacity);
+            pthread_mutex_unlock(&manager->lock);
+            channel->destroy(channel);
+            return -1;
+        }
 
-        // Simple array append (caller should ensure capacity)
         channels[*count] = channel;
         (*count)++;
 

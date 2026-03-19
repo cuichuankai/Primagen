@@ -447,6 +447,7 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
         // Trim leading/trailing whitespace from content
         const char* content = msg->content.data;
         while (*content == ' ' || *content == '\n' || *content == '\r') content++;
+        log_info("[DingTalk] Reply content: %s", content);
 
         // Use markdown format for better readability
         cJSON* json = cJSON_CreateObject();
@@ -457,8 +458,7 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
         cJSON_AddItemToObject(json, "markdown", markdown);
         char* json_str = cJSON_PrintUnformatted(json);
 
-        // Log the request body for debugging
-        log_info("[DingTalk] Request body: %s", json_str);
+        log_debug("[DingTalk] Request body: %s", json_str);
 
         struct mg_connection *c = mg_http_connect(&mgr, session_webhook, webhook_fn, &chunk);
         if (!c) {

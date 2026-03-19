@@ -40,13 +40,12 @@ void cron_callback(CronJob* job) {
 
     log_info("[Cron] Triggering job: %s", job->name);
 
-    /* Inject message into bus (Outbound for direct delivery) */
-    OutboundMessage* msg = outbound_message_new(
+    InboundMessage* msg = inbound_message_new(
         job->channel ? job->channel : "cli",
         job->to ? job->to : "local_user",
         job->payload_message ? job->payload_message : "Cron trigger"
     );
-    message_bus_send_outbound(global_bus, msg);
+    message_bus_send_inbound(global_bus, msg);
 }
 
 /* Agent thread entry point */
@@ -80,8 +79,12 @@ void* outbound_thread(void* arg) {
                      outbound->channel.data, outbound->chat_id.data);
             /* Dispatch to channels */
             int sent = 0;
+            bool broadcast = strcmp(outbound->channel.data, "*") == 0 || strcmp(outbound->channel.data, "all") == 0;
             for (int i = 0; i < channel_count; i++) {
-                if (channels[i]->send) {
+                if (!channels[i]->send) continue;
+                bool direct_match = strcmp(channels[i]->name, outbound->channel.data) == 0;
+                bool cli_console_alias = strcmp(outbound->channel.data, "cli") == 0 && strcmp(channels[i]->name, "console") == 0;
+                if (broadcast || direct_match || cli_console_alias) {
                     channels[i]->send(channels[i], outbound);
                     sent++;
                     log_debug("[OutboundThread] Sent to channel %d: %s", i, channels[i]->name);
@@ -284,6 +287,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         plugin_mgr->tool_registry = tool_reg;
         plugin_mgr->channel_array = channels;
         plugin_mgr->channel_count_ptr = &channel_count;
+        plugin_mgr->channel_capacity = MAX_CHANNELS;
 
         // Load external plugins from .so files
         log_debug("[Plugin] Loading external plugins...");
@@ -376,11 +380,13 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     /* Create Tool Context */
     log_debug("[System] Creating ToolContext...");
     ToolContext* tool_ctx = malloc(sizeof(ToolContext));
+    tool_ctx->magic = 0x50474E31;
     tool_ctx->bus = bus;
     tool_ctx->subagent_mgr = subagent_mgr;
     tool_ctx->cron_service = cron_service;
     tool_ctx->skills_loader = skills_loader;
     tool_ctx->memory = memory;
+    tool_ctx->config = cfg;
     tool_ctx->workspace = workspace_path;
     tool_ctx->current_channel = "cli";
     tool_ctx->current_chat_id = "current";

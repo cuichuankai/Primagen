@@ -110,9 +110,9 @@ static cJSON* get_skill_meta(const char* content) {
     
     if (!json) return cJSON_CreateObject();
     
-    cJSON* nanobot = cJSON_GetObjectItem(json, "nanobot");
-    if (nanobot) {
-        cJSON* copy = cJSON_Duplicate(nanobot, 1);
+    cJSON* Primagen = cJSON_GetObjectItem(json, "Primagen");
+    if (Primagen) {
+        cJSON* copy = cJSON_Duplicate(Primagen, 1);
         cJSON_Delete(json);
         return copy;
     }

@@ -68,6 +68,21 @@ Tool* tool_registry_get(ToolRegistry* reg, const char* name) {
             return &reg->tools[i];
         }
     }
+    if (name) {
+        const char* alias = strrchr(name, '.');
+        if (!alias) alias = strrchr(name, ':');
+        if (alias && *(alias + 1) != '\0') {
+            String alias_str = string_new(alias + 1);
+            for (size_t i = 0; i < reg->count; i++) {
+                if (string_equals(&reg->tools[i].def.name, &alias_str)) {
+                    string_free(&alias_str);
+                    string_free(&name_str);
+                    return &reg->tools[i];
+                }
+            }
+            string_free(&alias_str);
+        }
+    }
     string_free(&name_str);
     return NULL;
 }
@@ -75,7 +90,9 @@ Tool* tool_registry_get(ToolRegistry* reg, const char* name) {
 Error tool_registry_execute(ToolRegistry* reg, const char* name, const char* args_json, String* result) {
     Tool* tool = tool_registry_get(reg, name);
     if (!tool) {
-        return error_new(ERR_TOOL, "Tool not found");
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Tool not found: %s", name ? name : "(null)");
+        return error_new(ERR_TOOL, buf);
     }
     return tool->execute(tool->user_data, args_json, result);
 }

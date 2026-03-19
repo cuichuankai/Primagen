@@ -199,8 +199,9 @@ Error tool_executor_execute_sync(ToolExecutor* executor, const char* tool_name,
     }
 
     SyncExecutionContext ctx;
+    Error sync_err = error_new(ERR_NONE, "");
     ctx.result = result;
-    ctx.err = NULL;
+    ctx.err = &sync_err;
     ctx.done = false;
     pthread_mutex_init(&ctx.mutex, NULL);
     pthread_cond_init(&ctx.cond, NULL);
@@ -245,5 +246,5 @@ Error tool_executor_execute_sync(ToolExecutor* executor, const char* tool_name,
     pthread_mutex_destroy(&ctx.mutex);
     pthread_cond_destroy(&ctx.cond);
 
-    return ctx.err ? *ctx.err : error_new(ERR_NONE, "");
+    return sync_err;
 }
