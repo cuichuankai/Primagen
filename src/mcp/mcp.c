@@ -1,4 +1,5 @@
 #include "mcp.h"
+#include "transport_internal.h"
 #include "../include/logger.h"
 #include "../vendor/cJSON/cJSON.h"
 #include <stdlib.h>
@@ -13,6 +14,48 @@
 static long g_next_request_id = 1;
 static pthread_mutex_t g_request_id_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+typedef struct {
+    const char* type;
+    MCPTransportOps* (*ops_provider)(void);
+} MCPTransportRegistryEntry;
+
+static void mcp_free_tools(MCPClient* client) {
+    if (!client || !client->tools) return;
+    for (size_t j = 0; j < client->tools_count; j++) {
+        free(client->tools[j].name);
+        free(client->tools[j].description);
+        string_free(&client->tools[j].input_schema);
+    }
+    free(client->tools);
+    client->tools = NULL;
+    client->tools_count = 0;
+}
+
+static void mcp_free_resources(MCPClient* client) {
+    if (!client || !client->resources) return;
+    for (size_t j = 0; j < client->resources_count; j++) {
+        free(client->resources[j].uri);
+        free(client->resources[j].name);
+        free(client->resources[j].description);
+        free(client->resources[j].mime_type);
+    }
+    free(client->resources);
+    client->resources = NULL;
+    client->resources_count = 0;
+}
+
+static void mcp_free_prompts(MCPClient* client) {
+    if (!client || !client->prompts) return;
+    for (size_t j = 0; j < client->prompts_count; j++) {
+        free(client->prompts[j].name);
+        free(client->prompts[j].description);
+        string_free(&client->prompts[j].arguments);
+    }
+    free(client->prompts);
+    client->prompts = NULL;
+    client->prompts_count = 0;
+}
+
 static long get_next_request_id() {
     pthread_mutex_lock(&g_request_id_mutex);
     long id = g_next_request_id++;
@@ -20,15 +63,67 @@ static long get_next_request_id() {
     return id;
 }
 
-// External transport functions (from transport_stdio.c)
-extern Error mcp_client_send(MCPClient* client, const char* request_json);
-extern char* mcp_client_recv(MCPClient* client, int timeout_ms);
+static MCPTransportOps* get_transport_ops(const char* type) {
+    if (!type || type[0] == '\0') return NULL;
+
+    static MCPTransportRegistryEntry registry[] = {
+        {"stdio", mcp_transport_stdio_ops},
+        {"websocket", mcp_transport_websocket_ops},
+        {"sse", mcp_transport_sse_ops},
+        {"streamable_http", mcp_transport_streamable_http_ops},
+    };
+    size_t count = sizeof(registry) / sizeof(registry[0]);
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(type, registry[i].type) == 0) {
+            return registry[i].ops_provider();
+        }
+    }
+    return NULL;
+}
+
+Error mcp_client_connect(MCPClient* client) {
+    if (!client) return error_new(ERR_INVALID_PARAM, "client is NULL");
+    log_debug("[MCP] Connecting to %s via %s...", client->server_id, client->transport_type);
+    MCPTransportOps* ops = get_transport_ops(client->transport_type);
+    if (!ops) {
+        log_error("[MCP] Unknown transport type: %s", client->transport_type);
+        return error_new(ERR_INVALID_PARAM, "Unknown transport type");
+    }
+    Error err = ops->init(client);
+    if (err.code == ERR_NONE) {
+        client->connected = true;
+        log_debug("[MCP] Connected to %s", client->server_id);
+    }
+    return err;
+}
+
+void mcp_client_disconnect(MCPClient* client) {
+    if (!client) return;
+    log_debug("[MCP] Disconnecting from %s", client->server_id);
+    MCPTransportOps* ops = get_transport_ops(client->transport_type);
+    if (ops && ops->close) ops->close(client);
+    client->connected = false;
+}
+
+Error mcp_client_send(MCPClient* client, const char* request_json) {
+    if (!client || !request_json) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
+    MCPTransportOps* ops = get_transport_ops(client->transport_type);
+    if (!ops || !ops->send) return error_new(ERR_INVALID_PARAM, "Transport not available");
+    return ops->send(client, request_json);
+}
+
+char* mcp_client_recv(MCPClient* client, int timeout_ms) {
+    if (!client) return NULL;
+    MCPTransportOps* ops = get_transport_ops(client->transport_type);
+    if (!ops || !ops->recv) return NULL;
+    return ops->recv(client, timeout_ms);
+}
 
 // MCP method string mapping
 static const char* method_strings[] = {
     "invalid",
     "initialize",
-    "initialized",
+    "notifications/initialized",
     "tools/list",
     "tools/call",
     "resources/list",
@@ -48,7 +143,7 @@ MCPMethod mcp_method_from_string(const char* str) {
     if (!str) return MCP_METHOD_INVALID;
 
     if (strcmp(str, "initialize") == 0) return MCP_METHOD_INITIALIZE;
-    if (strcmp(str, "initialized") == 0) return MCP_METHOD_INITIALIZED;
+    if (strcmp(str, "notifications/initialized") == 0) return MCP_METHOD_INITIALIZED;
     if (strcmp(str, "tools/list") == 0) return MCP_METHOD_TOOLS_LIST;
     if (strcmp(str, "tools/call") == 0) return MCP_METHOD_TOOLS_CALL;
     if (strcmp(str, "resources/list") == 0) return MCP_METHOD_RESOURCES_LIST;
@@ -85,6 +180,9 @@ void mcp_manager_free(MCPManager* mgr) {
     for (size_t i = 0; i < mgr->clients_count; i++) {
         MCPClient* client = mgr->clients[i];
         if (client) {
+            if (client->connected) {
+                mcp_client_disconnect(client);
+            }
             free(client->server_id);
             free(client->transport_type);
             free(client->command);
@@ -102,30 +200,9 @@ void mcp_manager_free(MCPManager* mgr) {
             }
             free(client->env.items);
 
-            // Free tools
-            for (size_t j = 0; j < client->tools_count; j++) {
-                free(client->tools[j].name);
-                free(client->tools[j].description);
-                string_free(&client->tools[j].input_schema);
-            }
-            free(client->tools);
-
-            // Free resources
-            for (size_t j = 0; j < client->resources_count; j++) {
-                free(client->resources[j].uri);
-                free(client->resources[j].name);
-                free(client->resources[j].description);
-                free(client->resources[j].mime_type);
-            }
-            free(client->resources);
-
-            // Free prompts
-            for (size_t j = 0; j < client->prompts_count; j++) {
-                free(client->prompts[j].name);
-                free(client->prompts[j].description);
-                string_free(&client->prompts[j].arguments);
-            }
-            free(client->prompts);
+            mcp_free_tools(client);
+            mcp_free_resources(client);
+            mcp_free_prompts(client);
 
             free(client);
         }
@@ -277,6 +354,7 @@ int mcp_manager_add_client(MCPManager* mgr, const char* server_id, const char* t
     }
 
     client->connected = false;
+    client->initialized = false;
     client->tools = NULL;
     client->tools_count = 0;
     client->resources = NULL;
@@ -296,6 +374,9 @@ void mcp_manager_remove_client(MCPManager* mgr, const char* server_id) {
     for (size_t i = 0; i < mgr->clients_count; i++) {
         if (strcmp(mgr->clients[i]->server_id, server_id) == 0) {
             MCPClient* client = mgr->clients[i];
+            if (client->connected) {
+                mcp_client_disconnect(client);
+            }
 
             // Remove from array
             for (size_t j = i; j < mgr->clients_count - 1; j++) {
@@ -311,25 +392,9 @@ void mcp_manager_remove_client(MCPManager* mgr, const char* server_id) {
                 free(client->args[j]);
             }
             free(client->args);
-            for (size_t j = 0; j < client->tools_count; j++) {
-                free(client->tools[j].name);
-                free(client->tools[j].description);
-                string_free(&client->tools[j].input_schema);
-            }
-            free(client->tools);
-            for (size_t j = 0; j < client->resources_count; j++) {
-                free(client->resources[j].uri);
-                free(client->resources[j].name);
-                free(client->resources[j].description);
-                free(client->resources[j].mime_type);
-            }
-            free(client->resources);
-            for (size_t j = 0; j < client->prompts_count; j++) {
-                free(client->prompts[j].name);
-                free(client->prompts[j].description);
-                string_free(&client->prompts[j].arguments);
-            }
-            free(client->prompts);
+            mcp_free_tools(client);
+            mcp_free_resources(client);
+            mcp_free_prompts(client);
             free(client);
 
             log_debug("[MCP] Removed client: %s", server_id);
@@ -349,20 +414,160 @@ MCPClient* mcp_manager_get_client(MCPManager* mgr, const char* server_id) {
     return NULL;
 }
 
-// Connect and disconnect are implemented in transport_stdio.c
-// Error mcp_client_connect(MCPClient* client);
+Error mcp_manager_setup_from_config(MCPManager* mgr, MCPConfig* cfg, ToolRegistry* tool_reg) {
+    if (!mgr || !cfg || !tool_reg) {
+        return error_new(ERR_INVALID_PARAM, "Invalid MCP manager setup args");
+    }
+
+    for (size_t i = 0; i < cfg->server_count; i++) {
+        MCPServerConfig* srv = &cfg->servers[i];
+        log_debug("[MCP] Adding server: %s (transport: %s)", srv->server_id, srv->transport_type);
+
+        char** args = NULL;
+        if (srv->args.count > 0) {
+            args = malloc(srv->args.count * sizeof(char*));
+            if (!args) {
+                return error_new(ERR_MEMORY, "Failed to allocate MCP args");
+            }
+            for (size_t j = 0; j < srv->args.count; j++) {
+                args[j] = srv->args.items[j].data;
+            }
+        }
+
+        int add_idx = mcp_manager_add_client(mgr, srv->server_id, srv->transport_type,
+                                             srv->command, args, srv->args.count,
+                                             srv->env.items, srv->env.count);
+        if (args) free(args);
+        if (add_idx < 0) {
+            log_error("[MCP] Failed to add server: %s", srv->server_id);
+        }
+    }
+
+    for (size_t i = 0; i < mgr->clients_count; i++) {
+        MCPClient* client = mgr->clients[i];
+        Error err = mcp_client_connect(client);
+        if (err.code == ERR_NONE) {
+            log_debug("[MCP] Connected to %s", client->server_id);
+
+            MCPToolDef* tools = NULL;
+            size_t tools_count = 0;
+            err = mcp_client_list_tools(client, &tools, &tools_count);
+            if (err.code == ERR_NONE && tools_count > 0) {
+                log_debug("[MCP] %s provides %zu tools", client->server_id, tools_count);
+                mcp_register_tools(tool_reg, client);
+                for (size_t j = 0; j < tools_count; j++) {
+                    log_debug("  - Tool: %s", tools[j].name);
+                }
+            } else if (err.code != ERR_NONE) {
+                if (err.message[0] == '\0') {
+                    log_error("[MCP] Failed to list tools from %s: unknown error (code=%d)", client->server_id, err.code);
+                } else {
+                    log_error("[MCP] Failed to list tools from %s: %s", client->server_id, err.message);
+                }
+            } else {
+                log_debug("[MCP] %s provides no tools", client->server_id);
+            }
+
+            mcp_register_resources_prompts(tool_reg, client);
+        } else {
+            log_error("[MCP] Failed to connect to %s: %s", client->server_id, err.message);
+        }
+    }
+
+    return error_new(ERR_NONE, "");
+}
+
+// Connection management is implemented in this file via transport registry
 // void mcp_client_disconnect(MCPClient* client);
+
+static Error mcp_client_initialize(MCPClient* client) {
+    if (!client) return error_new(ERR_INVALID_PARAM, "Invalid client");
+    if (!client->connected) return error_new(ERR_TOOL, "Client not connected");
+    if (client->initialized) return error_new(ERR_NONE, "");
+
+    cJSON* params_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(params_obj, "protocolVersion", MCP_PROTOCOL_VERSION);
+    cJSON_AddItemToObject(params_obj, "capabilities", cJSON_CreateObject());
+    cJSON* client_info = cJSON_CreateObject();
+    cJSON_AddStringToObject(client_info, "name", "primagen");
+    cJSON_AddStringToObject(client_info, "version", "0.1.0");
+    cJSON_AddItemToObject(params_obj, "clientInfo", client_info);
+    char* params_str = cJSON_PrintUnformatted(params_obj);
+    cJSON_Delete(params_obj);
+
+    if (!params_str) {
+        return error_new(ERR_JSON, "Failed to create initialize params");
+    }
+
+    long request_id = get_next_request_id();
+    char* request = mcp_create_request(MCP_METHOD_INITIALIZE, request_id, params_str);
+    free(params_str);
+    if (!request) {
+        return error_new(ERR_JSON, "Failed to create initialize request");
+    }
+
+    Error err = mcp_client_send(client, request);
+    free(request);
+    if (err.code != ERR_NONE) {
+        return err;
+    }
+
+    char* response_json = mcp_client_recv(client, MCP_REQUEST_TIMEOUT);
+    if (!response_json) {
+        return error_new(ERR_TIMEOUT, "No initialize response from server");
+    }
+
+    MCPResponse response;
+    memset(&response, 0, sizeof(response));
+    char* parse_error = mcp_parse_response(response_json, &response);
+    free(response_json);
+
+    if (parse_error) {
+        return error_new(ERR_JSON, parse_error);
+    }
+    if (response.error.data && strlen(response.error.data) > 0) {
+        mcp_response_free(&response);
+        return error_new(ERR_TOOL, "Initialize failed");
+    }
+
+    cJSON* notify = cJSON_CreateObject();
+    cJSON_AddStringToObject(notify, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(notify, "method", "notifications/initialized");
+    cJSON_AddItemToObject(notify, "params", cJSON_CreateObject());
+    char* notify_str = cJSON_PrintUnformatted(notify);
+    cJSON_Delete(notify);
+
+    if (!notify_str) {
+        mcp_response_free(&response);
+        return error_new(ERR_JSON, "Failed to create initialized notification");
+    }
+
+    Error notify_err = mcp_client_send(client, notify_str);
+    free(notify_str);
+    if (notify_err.code != ERR_NONE) {
+        mcp_response_free(&response);
+        return notify_err;
+    }
+
+    mcp_response_free(&response);
+    client->initialized = true;
+    log_debug("[MCP] Initialized client: %s", client->server_id);
+    return error_new(ERR_NONE, "");
+}
 
 // List tools from MCP server
 Error mcp_client_list_tools(MCPClient* client, MCPToolDef** tools, size_t* count) {
     if (!client || !tools || !count) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
     if (!client->connected) return error_new(ERR_TOOL, "Client not connected");
 
+    Error init_err = mcp_client_initialize(client);
+    if (init_err.code != ERR_NONE) return init_err;
+
     log_debug("[MCP] Listing tools from %s...", client->server_id);
 
     // Create tools/list request
     long request_id = get_next_request_id();
-    char* request = mcp_create_request(MCP_METHOD_TOOLS_LIST, request_id, NULL);
+    char* request = mcp_create_request(MCP_METHOD_TOOLS_LIST, request_id, "{}");
     if (!request) {
         return error_new(ERR_JSON, "Failed to create request");
     }
@@ -391,8 +596,15 @@ Error mcp_client_list_tools(MCPClient* client, MCPToolDef** tools, size_t* count
     }
 
     if (response.error.data && strlen(response.error.data) > 0) {
+        const char* err_msg = response.error.data;
+        if (strspn(err_msg, " \t\r\n") == strlen(err_msg)) {
+            err_msg = "Server returned empty MCP error";
+        }
+        char err_copy[256];
+        strncpy(err_copy, err_msg, sizeof(err_copy) - 1);
+        err_copy[sizeof(err_copy) - 1] = '\0';
         mcp_response_free(&response);
-        return error_new(ERR_TOOL, "Server returned error");
+        return error_new(ERR_TOOL, err_copy);
     }
 
     // Parse tools from result
@@ -440,6 +652,7 @@ Error mcp_client_list_tools(MCPClient* client, MCPToolDef** tools, size_t* count
         idx++;
     }
 
+    mcp_free_tools(client);
     client->tools = *tools;
     client->tools_count = *count;
 
@@ -544,7 +757,7 @@ Error mcp_client_list_resources(MCPClient* client, MCPResource** resources, size
 
     // Create resources/list request
     long request_id = get_next_request_id();
-    char* request = mcp_create_request(MCP_METHOD_RESOURCES_LIST, request_id, NULL);
+    char* request = mcp_create_request(MCP_METHOD_RESOURCES_LIST, request_id, "{}");
     if (!request) {
         return error_new(ERR_JSON, "Failed to create request");
     }
@@ -616,6 +829,7 @@ Error mcp_client_list_resources(MCPClient* client, MCPResource** resources, size
         idx++;
     }
 
+    mcp_free_resources(client);
     client->resources = *resources;
     client->resources_count = *count;
 
@@ -705,7 +919,7 @@ Error mcp_client_list_prompts(MCPClient* client, MCPPrompt** prompts, size_t* co
 
     // Create prompts/list request
     long request_id = get_next_request_id();
-    char* request = mcp_create_request(MCP_METHOD_PROMPTS_LIST, request_id, NULL);
+    char* request = mcp_create_request(MCP_METHOD_PROMPTS_LIST, request_id, "{}");
     if (!request) {
         return error_new(ERR_JSON, "Failed to create request");
     }
@@ -779,6 +993,7 @@ Error mcp_client_list_prompts(MCPClient* client, MCPPrompt** prompts, size_t* co
         idx++;
     }
 
+    mcp_free_prompts(client);
     client->prompts = *prompts;
     client->prompts_count = *count;
 

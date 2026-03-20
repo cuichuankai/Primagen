@@ -142,6 +142,46 @@ Other commands:
 - Logs: `.primagen/log/`
 - Plugins: `.primagen/plugins/`
 
+## MCP Configuration Example
+
+```json
+{
+  "mcp": {
+    "enabled": true,
+    "servers": [
+      {
+        "id": "filesystem",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/cuick/workdir/AI/Primagen"]
+      },
+      {
+        "id": "remote_tools",
+        "transport": "websocket",
+        "url": "ws://127.0.0.1:9000/mcp"
+      },
+      {
+        "id": "remote_sse_tools",
+        "transport": "sse",
+        "url": "http://127.0.0.1:8000/sse",
+        "request_url": "http://127.0.0.1:8000/messages"
+      },
+      {
+        "id": "remote_streamable_http_tools",
+        "transport": "streamable_http",
+        "url": "https://example.com/mcp",
+        "request_url": "https://example.com/mcp"
+      }
+    ]
+  }
+}
+```
+
+For `stdio`, Primagen starts the MCP server process with `command + args`.
+For `websocket`, Primagen connects directly to `url` and exchanges MCP JSON-RPC messages over WebSocket text frames.
+For `sse`, Primagen reads server events from `url` and sends JSON-RPC requests to `request_url` (defaults to `url` when omitted).
+For `streamable_http`, Primagen sends JSON-RPC requests over HTTP POST and supports both JSON and `text/event-stream` responses; `request_url` defaults to `url` when omitted.
+
 ## Plugin Configuration Example
 
 ```json

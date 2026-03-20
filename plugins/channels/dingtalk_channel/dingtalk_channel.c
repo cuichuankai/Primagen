@@ -58,7 +58,6 @@ typedef struct {
     // Plugin configuration
     char* client_id;
     char* client_secret;
-    bool enabled;
     // Session webhook cache (for replying to conversations)
     SessionWebhook* session_cache;
     size_t session_cache_size;
@@ -279,8 +278,21 @@ static void on_dingtalk_message(const char* conversation_id, const char* content
 
 static void* dingtalk_receive_loop(void* arg) {
     DingTalkChannelData* data = (DingTalkChannelData*)arg;
+    int reconnect_attempt = 0;
 
     while (data->running) {
+        if (!is_token_valid(data)) {
+            refresh_token(data);
+        }
+        if (!data->access_token || data->access_token[0] == '\0') {
+            reconnect_attempt++;
+            int delay = reconnect_attempt < 6 ? (1 << reconnect_attempt) : 60;
+            if (delay > 60) delay = 60;
+            log_error("[DingTalk] Missing access token, reconnect in %ds (attempt %d)", delay, reconnect_attempt);
+            if (data->running) sleep(delay);
+            continue;
+        }
+
         // Get WebSocket URL from DingTalk
         char* ws_url = dingtalk_get_ws_url(data->client_id,
                                            data->client_secret,
@@ -293,21 +305,41 @@ static void* dingtalk_receive_loop(void* arg) {
             if (dingtalk_ws_connect(data->ws, ws_url, data->access_token,
                                     data->client_secret)) {
                 log_info("[DingTalk] WebSocket connected.");
+                reconnect_attempt = 0;
                 // Run WebSocket loop (blocks until disconnected)
                 dingtalk_ws_run(data->ws, on_dingtalk_message, data);
+                if (data->running) {
+                    reconnect_attempt++;
+                    int delay = reconnect_attempt < 6 ? (1 << reconnect_attempt) : 60;
+                    if (delay > 60) delay = 60;
+                    log_warn("[DingTalk] WebSocket disconnected, reconnect in %ds (attempt %d)", delay, reconnect_attempt);
+                    sleep(delay);
+                }
             } else {
+                reconnect_attempt++;
+                int delay = reconnect_attempt < 6 ? (1 << reconnect_attempt) : 60;
+                if (delay > 60) delay = 60;
                 log_error("[DingTalk] WebSocket connect failed.");
+                if (data->running) {
+                    log_warn("[DingTalk] Reconnect in %ds (attempt %d)", delay, reconnect_attempt);
+                    sleep(delay);
+                }
             }
 
             dingtalk_ws_destroy(data->ws);
             data->ws = NULL;
             free(ws_url);
         } else {
+            reconnect_attempt++;
+            int delay = reconnect_attempt < 6 ? (1 << reconnect_attempt) : 60;
+            if (delay > 60) delay = 60;
             log_error("[DingTalk] Failed to get WebSocket URL");
+            refresh_token(data);
+            if (data->running) {
+                log_warn("[DingTalk] Reconnect in %ds (attempt %d)", delay, reconnect_attempt);
+                sleep(delay);
+            }
         }
-
-        // Retry delay
-        if (data->running) sleep(5);
     }
 
     return NULL;
@@ -329,18 +361,18 @@ static bool dingtalk_init(Channel* self, Config* config, MessageBus* bus) {
     data->ws = NULL;
     data->client_id = NULL;
     data->client_secret = NULL;
-    data->enabled = false;
 
     // Get plugin configuration
     PluginConfig* plugin_cfg = config_get_plugin_config(config, "dingtalk_channel");
     if (plugin_cfg && plugin_cfg->config) {
-        cJSON* enabled = cJSON_GetObjectItem(plugin_cfg->config, "enabled");
         cJSON* client_id = cJSON_GetObjectItem(plugin_cfg->config, "clientId");
         cJSON* client_secret = cJSON_GetObjectItem(plugin_cfg->config, "clientSecret");
 
-        data->enabled = enabled && cJSON_IsBool(enabled) ? enabled->valueint : false;
         data->client_id = client_id && cJSON_IsString(client_id) ? strdup(client_id->valuestring) : strdup("");
         data->client_secret = client_secret && cJSON_IsString(client_secret) ? strdup(client_secret->valuestring) : strdup("");
+    } else {
+        data->client_id = strdup("");
+        data->client_secret = strdup("");
     }
 
     self->user_data = data;
@@ -350,8 +382,9 @@ static bool dingtalk_init(Channel* self, Config* config, MessageBus* bus) {
 
 static void dingtalk_start(Channel* self) {
     DingTalkChannelData* data = (DingTalkChannelData*)self->user_data;
-    if (!data->enabled) {
-        log_info("[DingTalk] Channel disabled");
+    if (data->running) return;
+    if (!data->client_id || !data->client_id[0] || !data->client_secret || !data->client_secret[0]) {
+        log_info("[DingTalk] Channel not started (missing credentials)");
         return;
     }
 
@@ -385,7 +418,7 @@ static void dingtalk_stop(Channel* self) {
 
 static void dingtalk_send(Channel* self, OutboundMessage* msg) {
     DingTalkChannelData* data = (DingTalkChannelData*)self->user_data;
-    if (!data->enabled) return;
+    if (!data->client_id || !data->client_id[0] || !data->client_secret || !data->client_secret[0]) return;
 
     // Only process messages meant for this channel
     if (strcmp(msg->channel.data, "dingtalk") != 0) return;
@@ -690,22 +723,6 @@ PLUGIN_EXPORT int plugin_init(PluginManager* manager, void* context) {
 
     log_info("[Plugin:dingtalk_channel] Initializing dingtalk channel plugin");
 
-    // Check if this plugin is enabled in config
-    if (manager && manager->config) {
-        PluginConfig* pc = config_get_plugin_config(manager->config, "dingtalk_channel");
-        if (pc && pc->config) {
-            cJSON* enabled_item = cJSON_GetObjectItem(pc->config, "enabled");
-            if (cJSON_IsBool(enabled_item) && !cJSON_IsTrue(enabled_item)) {
-                log_info("[Plugin:dingtalk_channel] Plugin is disabled in config, skipping registration");
-                return 0;  // Return success but don't register
-            }
-        } else {
-            // No config found means default is disabled
-            log_info("[Plugin:dingtalk_channel] No config found, default to disabled, skipping registration");
-            return 0;
-        }
-    }
-
     // Register the channel factory
     int ret = plugin_register_channel(manager, NULL, "dingtalk", dingtalk_channel_create);
 
@@ -733,7 +750,7 @@ static PluginInfo g_plugin_info = {
     .type = PLUGIN_CHANNEL,
     .name = "dingtalk_channel",
     .description = "DingTalk channel support for Primagen",
-    .plugin_id = "channel_dingtalk"
+    .plugin_id = "dingtalk_channel"
 };
 
 PLUGIN_EXPORT PluginInfo* plugin_get_info(void) {

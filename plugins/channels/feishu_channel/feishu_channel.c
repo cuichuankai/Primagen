@@ -465,13 +465,6 @@ static void feishu_send(Channel* self, OutboundMessage* msg) {
         return;
     }
 
-    struct mg_mgr mgr;
-    struct MemoryStruct chunk = {0};
-    chunk.memory = malloc(1);
-    chunk.memory[0] = '\0';
-
-    mg_mgr_init(&mgr);
-
     char url[512];
     const char* id_type = "open_id";
     if (strncmp(msg->chat_id.data, "oc_", 3) == 0) {
@@ -533,72 +526,88 @@ static void feishu_send(Channel* self, OutboundMessage* msg) {
 
     char* json_str = cJSON_PrintUnformatted(json);
     log_debug("[Feishu Debug] Sending Payload: %s", json_str);
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (!data->access_token) refresh_token(data);
+        if (!data->access_token) {
+            log_error("[Feishu] Not connected (no token)");
+            break;
+        }
 
-    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
-    if (!c) {
-        log_error("[Feishu] Failed to connect for sending message");
-        free(json_str);
-        cJSON_Delete(json);
+        struct mg_mgr mgr;
+        struct MemoryStruct chunk = {0};
+        chunk.memory = malloc(1);
+        chunk.memory[0] = '\0';
+        mg_mgr_init(&mgr);
+
+        struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
+        if (!c) {
+            log_error("[Feishu] Failed to connect for sending message");
+            mg_mgr_free(&mgr);
+            free(chunk.memory);
+            break;
+        }
+
+        struct mg_str host = mg_url_host(url);
+        struct mg_tls_opts opts = {0};
+        opts.ca = mg_str("");
+        opts.name = host;
+        opts.skip_verification = true;
+        if (mg_url_is_ssl(url)) {
+            mg_tls_init(c, &opts);
+        }
+
+        mg_printf(c,
+            "POST %s HTTP/1.0\r\n"
+            "Host: %.*s\r\n"
+            "Content-Type: application/json; charset=utf-8\r\n"
+            "Authorization: Bearer %s\r\n"
+            "Content-Length: %d\r\n"
+            "\r\n"
+            "%s",
+            mg_url_uri(url),
+            (int)host.len, host.buf,
+            data->access_token ? data->access_token : "",
+            (int)strlen(json_str),
+            json_str
+        );
+
+        while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+
+        bool retry = false;
+        if (chunk.size > 0) {
+            log_debug("[Feishu Debug] Response: %s", chunk.memory);
+            cJSON* resp = cJSON_Parse(chunk.memory);
+            if (resp) {
+                cJSON* code = cJSON_GetObjectItem(resp, "code");
+                if (code && code->valueint != 0) {
+                    cJSON* msg_item = cJSON_GetObjectItem(resp, "msg");
+                    log_error("[Feishu] API Error: %d - %s",
+                            code->valueint, msg_item ? msg_item->valuestring : "Unknown");
+                    if ((code->valueint == 99991668 || code->valueint == 99991663) && attempt == 0) {
+                        if (data->access_token) {
+                            free(data->access_token);
+                            data->access_token = NULL;
+                        }
+                        refresh_token(data);
+                        retry = true;
+                        log_warn("[Feishu] Access token refreshed, retry sending once");
+                    }
+                } else {
+                    log_debug("[Feishu] Sent to %s", msg->chat_id.data);
+                }
+                cJSON_Delete(resp);
+            }
+        } else {
+            log_error("[Feishu] Send failed: Empty response");
+        }
+
         mg_mgr_free(&mgr);
         free(chunk.memory);
-        return;
+        if (!retry) break;
     }
 
-    struct mg_str host = mg_url_host(url);
-
-    struct mg_tls_opts opts = {0};
-    opts.ca = mg_str("");
-    opts.name = host;
-    opts.skip_verification = true;
-    if (mg_url_is_ssl(url)) {
-        mg_tls_init(c, &opts);
-    }
-
-    mg_printf(c,
-        "POST %s HTTP/1.0\r\n"
-        "Host: %.*s\r\n"
-        "Content-Type: application/json; charset=utf-8\r\n"
-        "Authorization: Bearer %s\r\n"
-        "Content-Length: %d\r\n"
-        "\r\n"
-        "%s",
-        mg_url_uri(url),
-        (int)host.len, host.buf,
-        data->access_token ? data->access_token : "",
-        (int)strlen(json_str),
-        json_str
-    );
-
-    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
-
-    if (chunk.size > 0) {
-        log_debug("[Feishu Debug] Response: %s", chunk.memory);
-        cJSON* resp = cJSON_Parse(chunk.memory);
-        if (resp) {
-            cJSON* code = cJSON_GetObjectItem(resp, "code");
-            if (code && code->valueint != 0) {
-                cJSON* msg_item = cJSON_GetObjectItem(resp, "msg");
-                log_error("[Feishu] API Error: %d - %s",
-                        code->valueint, msg_item ? msg_item->valuestring : "Unknown");
-                 if (code->valueint == 99991668 || code->valueint == 99991663) {
-                    if (data->access_token) {
-                        free(data->access_token);
-                        data->access_token = NULL;
-                    }
-                }
-            } else {
-                log_debug("[Feishu] Sent to %s", msg->chat_id.data);
-            }
-            cJSON_Delete(resp);
-        }
-    } else {
-        log_error("[Feishu] Send failed: Empty response");
-    }
-
-    free(chunk.memory);
     cJSON_Delete(json);
     free(json_str);
-    mg_mgr_free(&mgr);
 }
 
 static void feishu_destroy(Channel* self) {
@@ -643,22 +652,6 @@ PLUGIN_EXPORT int plugin_init(PluginManager* manager, void* context) {
 
     log_info("[Plugin:feishu_channel] Initializing feishu channel plugin");
 
-    // Check if this plugin is enabled in config
-    if (manager && manager->config) {
-        PluginConfig* pc = config_get_plugin_config(manager->config, "feishu_channel");
-        if (pc && pc->config) {
-            cJSON* enabled_item = cJSON_GetObjectItem(pc->config, "enabled");
-            if (cJSON_IsBool(enabled_item) && !cJSON_IsTrue(enabled_item)) {
-                log_info("[Plugin:feishu_channel] Plugin is disabled in config, skipping registration");
-                return 0;  // Return success but don't register
-            }
-        } else {
-            // No config found means default is disabled
-            log_info("[Plugin:feishu_channel] No config found, default to disabled, skipping registration");
-            return 0;
-        }
-    }
-
     // Register the channel factory
     int ret = plugin_register_channel(manager, NULL, "feishu", feishu_channel_create);
 
@@ -686,7 +679,7 @@ static PluginInfo g_plugin_info = {
     .type = PLUGIN_CHANNEL,
     .name = "feishu_channel",
     .description = "Feishu (Lark) bot channel for Primagen",
-    .plugin_id = "feishu_channel_bot"
+    .plugin_id = "feishu_channel"
 };
 
 PLUGIN_EXPORT PluginInfo* plugin_get_info(void) {

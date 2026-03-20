@@ -26,6 +26,24 @@ typedef struct {
     MCPClient* client;
 } MCPPromptContext;
 
+static bool mcp_error_contains(const char* message, const char* needle) {
+    return message && needle && strstr(message, needle) != NULL;
+}
+
+static bool mcp_needs_reinitialize(const Error* err) {
+    if (!err) return false;
+    return (mcp_error_contains(err->message, "without mcp-session-id header") &&
+            mcp_error_contains(err->message, "initialize request")) ||
+           (mcp_error_contains(err->message, "session") &&
+            mcp_error_contains(err->message, "expired"));
+}
+
+static bool mcp_can_retry(const Error* err) {
+    if (!err) return false;
+    if (mcp_needs_reinitialize(err)) return true;
+    return err->code == ERR_TIMEOUT || err->code == ERR_CONNECTION;
+}
+
 // Execute MCP tool
 static Error mcp_tool_execute(void* user_data, const char* params, String* output) {
     MCPToolContext* ctx = (MCPToolContext*)user_data;
@@ -39,6 +57,21 @@ static Error mcp_tool_execute(void* user_data, const char* params, String* outpu
     // Call MCP tool
     String result = { NULL, 0 };
     Error err = mcp_client_call_tool(ctx->client, ctx->tool_name, params, &result);
+
+    if (err.code != ERR_NONE && mcp_can_retry(&err)) {
+        if (mcp_needs_reinitialize(&err)) {
+            log_warn("[MCP Tool] Session missing, re-initializing MCP client before retry");
+            ctx->client->initialized = false;
+            MCPToolDef* refreshed_tools = NULL;
+            size_t refreshed_count = 0;
+            Error reinit_err = mcp_client_list_tools(ctx->client, &refreshed_tools, &refreshed_count);
+            if (reinit_err.code != ERR_NONE) {
+                log_error("[MCP Tool] MCP re-initialize failed: %s", reinit_err.message);
+            }
+        }
+        log_warn("[MCP Tool] Call failed, retry once for %s: %s", ctx->tool_name, err.message);
+        err = mcp_client_call_tool(ctx->client, ctx->tool_name, params, &result);
+    }
 
     if (err.code != ERR_NONE) {
         log_error("[MCP Tool] Call failed: %s", err.message);
@@ -226,7 +259,7 @@ void mcp_register_tools(ToolRegistry* reg, MCPClient* client) {
 
         // Build tool name with prefix to avoid conflicts
         char full_name[256];
-        snprintf(full_name, sizeof(full_name), "amap_%s", tool->name);
+        snprintf(full_name, sizeof(full_name), "mcp_%s", tool->name);
 
         // Register tool
         Error err = tool_registry_register(reg, full_name, tool->description,

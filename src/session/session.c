@@ -60,6 +60,7 @@ void session_manager_free(SessionManager* mgr) {
             message_free(msg);
         }
         dynamic_array_free(&mgr->sessions[i]->messages);
+        pthread_mutex_destroy(&mgr->sessions[i]->mutex);
         free(mgr->sessions[i]);
     }
     free(mgr->sessions);
@@ -90,6 +91,7 @@ Session* session_manager_create(SessionManager* mgr, const char* key) {
     session->created_at = time(NULL);
     session->updated_at = time(NULL);
     session->last_consolidated = 0;
+    pthread_mutex_init(&session->mutex, NULL);
     mgr->sessions[mgr->count++] = session;
     return session;
 }
@@ -104,7 +106,7 @@ Error session_manager_save(SessionManager* mgr, Session* session) {
     fprintf(f, "{\"_type\":\"metadata\",\"key\":\"%s\",\"created_at\":%ld,\"updated_at\":%ld,\"last_consolidated\":%zu}\n",
             session->key.data, (long)session->created_at, (long)session->updated_at, session->last_consolidated);
 
-    // Write ALL messages (not just unconsolidated) for complete persistence
+    pthread_mutex_lock(&session->mutex);
     for (size_t i = 0; i < session->messages.count; i++) {
         Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
 
@@ -126,6 +128,7 @@ Error session_manager_save(SessionManager* mgr, Session* session) {
         }
         cJSON_Delete(msg_obj);
     }
+    pthread_mutex_unlock(&session->mutex);
     fclose(f);
     return error_new(ERR_NONE, "");
 }
@@ -217,6 +220,8 @@ Error session_manager_load(SessionManager* mgr, const char* key, Session** sessi
 }
 
 void session_add_message(Session* session, Message* msg) {
+    pthread_mutex_lock(&session->mutex);
     dynamic_array_add(&session->messages, &msg);
     session->updated_at = time(NULL);
+    pthread_mutex_unlock(&session->mutex);
 }

@@ -114,7 +114,12 @@ ACPServer* acp_server_new(
 // Free ACPServer
 void acp_server_free(ACPServer* server) {
     if (!server) return;
-
+    if (server->running) acp_server_stop(server);
+    if (server->mgr) {
+        mg_mgr_free(server->mgr);
+        free(server->mgr);
+        server->mgr = NULL;
+    }
     pthread_mutex_destroy(&server->connection_mutex);
     free(server->host);
     free(server);
@@ -145,6 +150,7 @@ int acp_server_start(ACPServer* server, int port, const char* host) {
     server->nc = mg_http_listen(server->mgr, listen_addr, acp_event_handler, server);
     if (!server->nc) {
         log_error("[ACP] Failed to listen on %s", listen_addr);
+        mg_mgr_free(server->mgr);
         free(server->mgr);
         server->mgr = NULL;
         return -1;
@@ -161,17 +167,6 @@ void acp_server_stop(ACPServer* server) {
     if (!server || !server->running) return;
 
     server->running = false;
-
-    if (server->nc) {
-        mg_close_conn(server->nc);
-        server->nc = NULL;
-    }
-
-    if (server->mgr) {
-        mg_mgr_free(server->mgr);
-        free(server->mgr);
-        server->mgr = NULL;
-    }
 
     log_debug("[ACP] Server stopped");
 }
@@ -509,6 +504,7 @@ void acp_handle_chat_responses(struct mg_connection* nc, ACPServer* server, cons
     int added = 0;
 
     if (session) {
+        pthread_mutex_lock(&session->mutex);
         for (size_t i = 0; i < session->messages.count; i++) {
             Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
             if (!msg || msg->role != ROLE_ASSISTANT || msg->content.len == 0) continue;
@@ -525,6 +521,7 @@ void acp_handle_chat_responses(struct mg_connection* nc, ACPServer* server, cons
             last_index = (int)i;
             added++;
         }
+        pthread_mutex_unlock(&session->mutex);
     }
 
     if (total_assistant == 0) {

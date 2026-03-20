@@ -100,6 +100,7 @@ PluginConfig* config_add_plugin_config(Config* cfg, const char* plugin_id) {
     // Initialize new item
     PluginConfig* item = &cfg->plugins.items[cfg->plugins.count];
     item->plugin_id = strdup(plugin_id);
+    item->enabled = false;
     item->config = NULL;
     cfg->plugins.count++;
 
@@ -200,16 +201,16 @@ Config* config_create() {
     cfg->plugins.capacity = 2;
 
     cfg->plugins.items[0].plugin_id = strdup("feishu_channel");
+    cfg->plugins.items[0].enabled = false;
     cfg->plugins.items[0].config = cJSON_CreateObject();
-    cJSON_AddBoolToObject(cfg->plugins.items[0].config, "enabled", false);
     cJSON_AddStringToObject(cfg->plugins.items[0].config, "app_id", "");
     cJSON_AddStringToObject(cfg->plugins.items[0].config, "app_secret", "");
     cJSON_AddBoolToObject(cfg->plugins.items[0].config, "use_card", false);
     cJSON_AddNullToObject(cfg->plugins.items[0].config, "allow_from");
 
     cfg->plugins.items[1].plugin_id = strdup("dingtalk_channel");
+    cfg->plugins.items[1].enabled = false;
     cfg->plugins.items[1].config = cJSON_CreateObject();
-    cJSON_AddBoolToObject(cfg->plugins.items[1].config, "enabled", false);
     cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientId", "");
     cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientSecret", "");
     cJSON_AddBoolToObject(cfg->plugins.items[1].config, "use_card", false);
@@ -428,6 +429,18 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
                 if ((s_item = cJSON_GetObjectItem(server_item, "command"))) {
                     server->command = get_json_string(s_item, "");
                 }
+                if ((s_item = cJSON_GetObjectItem(server_item, "url")) && cJSON_IsString(s_item)) {
+                    free(server->command);
+                    server->command = get_json_string(s_item, "");
+                }
+                if (server->transport_type &&
+                    (strcmp(server->transport_type, "sse") == 0 ||
+                     strcmp(server->transport_type, "streamable_http") == 0)) {
+                    cJSON* request_url_item = cJSON_GetObjectItem(server_item, "request_url");
+                    if (cJSON_IsString(request_url_item) && request_url_item->valuestring) {
+                        string_array_add(&server->args, request_url_item->valuestring);
+                    }
+                }
 
                 cJSON* args = cJSON_GetObjectItem(server_item, "args");
                 if (cJSON_IsArray(args)) {
@@ -460,40 +473,25 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
     if (cJSON_IsArray(plugins)) {
         cJSON* plugin_item;
         cJSON_ArrayForEach(plugin_item, plugins) {
-            // Support both "plugin_id" (preferred) and "id" (legacy) field names
             cJSON* id_item = cJSON_GetObjectItem(plugin_item, "plugin_id");
             if (!cJSON_IsString(id_item)) {
-                id_item = cJSON_GetObjectItem(plugin_item, "id");
+                log_warn("[Config] Plugin missing plugin_id field, skipping");
+                continue;
             }
-            if (!cJSON_IsString(id_item)) {
-                log_warn("[Config] Plugin missing plugin_id and id field, skipping");
+
+            cJSON* inner_config = cJSON_GetObjectItem(plugin_item, "config");
+            if (!cJSON_IsObject(inner_config)) {
+                log_warn("[Config] Plugin %s missing config object, skipping", id_item->valuestring);
                 continue;
             }
 
             const char* plugin_id = id_item->valuestring;
             PluginConfig* pc = config_add_plugin_config(cfg, plugin_id);
             if (pc) {
-                cJSON* config_copy = NULL;
-                cJSON* inner_config = cJSON_GetObjectItem(plugin_item, "config");
-                if (cJSON_IsObject(inner_config)) {
-                    config_copy = cJSON_Duplicate(inner_config, 1);
-                } else {
-                    config_copy = cJSON_CreateObject();
-                    if (config_copy) {
-                        cJSON* child = plugin_item->child;
-                        while (child) {
-                            const char* key = child->string;
-                            if (key && strcmp(key, "id") != 0 && strcmp(key, "plugin_id") != 0) {
-                                cJSON* child_copy = cJSON_Duplicate(child, 1);
-                                if (child_copy) {
-                                    cJSON_AddItemToObject(config_copy, key, child_copy);
-                                }
-                            }
-                            child = child->next;
-                        }
-                    }
-                }
+                cJSON* enabled_item = cJSON_GetObjectItem(plugin_item, "enabled");
+                pc->enabled = cJSON_IsBool(enabled_item) ? cJSON_IsTrue(enabled_item) : false;
 
+                cJSON* config_copy = cJSON_Duplicate(inner_config, 1);
                 if (config_copy) {
                     if (pc->config) {
                         cJSON_Delete(pc->config);
@@ -622,6 +620,57 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
     cJSON_AddBoolToObject(log, "consoleOutput", cfg->log.console_output);
     cJSON_AddItemToObject(json, "log", log);
 
+    // MCP
+    cJSON* mcp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(mcp, "enabled", cfg->mcp.enabled);
+    cJSON* mcp_servers = cJSON_CreateArray();
+    for (size_t i = 0; i < cfg->mcp.server_count; i++) {
+        MCPServerConfig* srv = &cfg->mcp.servers[i];
+        cJSON* server_obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(server_obj, "id", srv->server_id ? srv->server_id : "");
+        cJSON_AddStringToObject(server_obj, "transport", srv->transport_type ? srv->transport_type : "stdio");
+
+        if (srv->transport_type &&
+            (strcmp(srv->transport_type, "websocket") == 0 ||
+             strcmp(srv->transport_type, "sse") == 0 ||
+             strcmp(srv->transport_type, "streamable_http") == 0)) {
+            cJSON_AddStringToObject(server_obj, "url", srv->command ? srv->command : "");
+        } else {
+            cJSON_AddStringToObject(server_obj, "command", srv->command ? srv->command : "");
+        }
+
+        if (srv->transport_type &&
+            (strcmp(srv->transport_type, "sse") == 0 ||
+             strcmp(srv->transport_type, "streamable_http") == 0) &&
+            srv->args.count > 0 && srv->args.items[0].data) {
+            cJSON_AddStringToObject(server_obj, "request_url", srv->args.items[0].data);
+        }
+
+        cJSON* args = cJSON_CreateArray();
+        size_t args_start = 0;
+        if (srv->transport_type &&
+            (strcmp(srv->transport_type, "sse") == 0 ||
+             strcmp(srv->transport_type, "streamable_http") == 0) &&
+            srv->args.count > 0) {
+            args_start = 1;
+        }
+        for (size_t j = args_start; j < srv->args.count; j++) {
+            cJSON_AddItemToArray(args, cJSON_CreateString(srv->args.items[j].data));
+        }
+        cJSON_AddItemToObject(server_obj, "args", args);
+
+        cJSON* env = cJSON_CreateObject();
+        for (size_t j = 0; j < srv->env.count; j++) {
+            EnvVar* env_item = &srv->env.items[j];
+            cJSON_AddStringToObject(env, env_item->key, env_item->value);
+        }
+        cJSON_AddItemToObject(server_obj, "env", env);
+
+        cJSON_AddItemToArray(mcp_servers, server_obj);
+    }
+    cJSON_AddItemToObject(mcp, "servers", mcp_servers);
+    cJSON_AddItemToObject(json, "mcp", mcp);
+
     // Plugins
     if (cfg->plugins.count > 0) {
         cJSON* plugins_array = cJSON_CreateArray();
@@ -630,9 +679,11 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
             if (pc->plugin_id) {
                 cJSON* plugin_obj = cJSON_CreateObject();
                 cJSON_AddStringToObject(plugin_obj, "plugin_id", pc->plugin_id);
+                cJSON_AddBoolToObject(plugin_obj, "enabled", pc->enabled);
                 if (pc->config) {
                     cJSON* config_copy = cJSON_Duplicate(pc->config, 1);
                     if (config_copy) {
+                        cJSON_DeleteItemFromObject(config_copy, "enabled");
                         cJSON_AddItemToObject(plugin_obj, "config", config_copy);
                     }
                 }

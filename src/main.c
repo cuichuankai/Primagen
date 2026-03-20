@@ -226,7 +226,8 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     logger_init(full_log_path);
     /* Apply log config */
     logger_set_config(cfg->log.level, cfg->log.console_output);
-    log_info("[System] Primagen initialized.");
+    log_info("========================================================");
+    log_info("[System] Primagen initializing...");
 
     /* Initialize Components */
     log_debug("[System] Creating MessageBus...");
@@ -300,55 +301,9 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     if (cfg->mcp.enabled) {
         log_debug("[System] Creating MCPManager...");
         MCPManager* mcp_mgr = mcp_manager_create(workspace_path);
-
-        // Add configured MCP servers
-        for (size_t i = 0; i < cfg->mcp.server_count; i++) {
-            MCPServerConfig* srv = &cfg->mcp.servers[i];
-            log_debug("[MCP] Adding server: %s (transport: %s)", srv->server_id, srv->transport_type);
-
-            // Convert StringArray to char**
-            char** args = NULL;
-            if (srv->args.count > 0) {
-                args = malloc(srv->args.count * sizeof(char*));
-                for (size_t j = 0; j < srv->args.count; j++) {
-                    args[j] = srv->args.items[j].data;
-                }
-            }
-
-            mcp_manager_add_client(mcp_mgr, srv->server_id, srv->transport_type,
-                                   srv->command, args, srv->args.count,
-                                   srv->env.items, srv->env.count);
-
-            if (args) free(args);
-        }
-
-        // Connect all clients
-        for (size_t i = 0; i < mcp_mgr->clients_count; i++) {
-            MCPClient* client = mcp_mgr->clients[i];
-            Error err = mcp_client_connect(client);
-            if (err.code == ERR_NONE) {
-                log_debug("[MCP] Connected to %s", client->server_id);
-
-                // List available tools
-                MCPToolDef* tools = NULL;
-                size_t tools_count = 0;
-                err = mcp_client_list_tools(client, &tools, &tools_count);
-                if (err.code == ERR_NONE && tools_count > 0) {
-                    log_debug("[MCP] %s provides %zu tools", client->server_id, tools_count);
-
-                    // Register MCP tools with ToolRegistry
-                    mcp_register_tools(tool_reg, client);
-
-                    for (size_t j = 0; j < tools_count; j++) {
-                        log_debug("  - Tool: %s", tools[j].name);
-                    }
-                }
-
-                // Register MCP resources and prompts tools
-                mcp_register_resources_prompts(tool_reg, client);
-            } else {
-                log_error("[MCP] Failed to connect to %s: %s", client->server_id, err.message);
-            }
+        Error mcp_setup_err = mcp_manager_setup_from_config(mcp_mgr, &cfg->mcp, tool_reg);
+        if (mcp_setup_err.code != ERR_NONE) {
+            log_error("[MCP] Manager setup failed: %s", mcp_setup_err.message);
         }
 
         log_debug("[System] MCP Manager initialized with %zu servers", mcp_mgr->clients_count);
@@ -483,11 +438,10 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     /* Stop and cleanup ACP server */
     if (acp_server) {
         acp_server_stop(acp_server);
-        acp_server_free(acp_server);
-        /* Join ACP poll thread if it was started */
         if (acp_thread_started) {
             pthread_join(acp_tid, NULL);
         }
+        acp_server_free(acp_server);
     }
 
     cron_service_stop(cron_service);

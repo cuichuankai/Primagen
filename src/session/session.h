@@ -3,6 +3,7 @@
 
 #include "../include/common.h"
 #include "../include/message.h"
+#include <pthread.h>
 
 typedef struct {
     String key; // "channel:chat_id"
@@ -10,6 +11,7 @@ typedef struct {
     time_t created_at;
     time_t updated_at;
     size_t last_consolidated;
+    pthread_mutex_t mutex;
 } Session;
 
 typedef struct {

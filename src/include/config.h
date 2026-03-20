@@ -69,6 +69,7 @@ typedef struct {
 // Plugin configuration structures
 typedef struct {
     char* plugin_id;      // Plugin unique identifier
+    bool enabled;
     cJSON* config;        // Plugin configuration JSON object
 } PluginConfig;
 

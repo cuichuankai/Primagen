@@ -2,6 +2,7 @@
 #define MCP_H
 
 #include "../include/common.h"
+#include "../include/config.h"
 #include "../tools/tool.h"
 
 // MCP protocol constants
@@ -54,13 +55,14 @@ typedef struct {
 // MCP client connection
 typedef struct {
     char* server_id;
-    char* transport_type;  // "stdio", "sse", "websocket"
+    char* transport_type;  // "stdio", "sse", "websocket", "streamable_http"
     char* command;         // For stdio transport
     char** args;           // Command arguments
     size_t args_count;
     EnvVarArray env;       // Environment variables
     void* transport_data;  // Transport-specific data
     bool connected;
+    bool initialized;
     MCPToolDef* tools;
     size_t tools_count;
     MCPResource* resources;
@@ -102,6 +104,7 @@ int mcp_manager_add_client(MCPManager* mgr, const char* server_id, const char* t
                            EnvVar* env_vars, size_t env_count);
 void mcp_manager_remove_client(MCPManager* mgr, const char* server_id);
 MCPClient* mcp_manager_get_client(MCPManager* mgr, const char* server_id);
+Error mcp_manager_setup_from_config(MCPManager* mgr, MCPConfig* cfg, ToolRegistry* tool_reg);
 
 // Connection management
 Error mcp_client_connect(MCPClient* client);

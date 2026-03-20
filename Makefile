@@ -70,6 +70,9 @@ OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/config/config.o \
       $(OBJDIR)/mcp/mcp.o \
       $(OBJDIR)/mcp/transport_stdio.o \
+      $(OBJDIR)/mcp/transport_websocket.o \
+      $(OBJDIR)/mcp/transport_sse.o \
+      $(OBJDIR)/mcp/transport_streamable_http.o \
       $(OBJDIR)/mcp/mcp_tools.o \
       $(OBJDIR)/plugin/plugin_manager.o \
       $(OBJDIR)/channels/console.o \

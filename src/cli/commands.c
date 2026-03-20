@@ -201,14 +201,7 @@ int cmd_channels_status(Config* cfg) {
     for (size_t i = 0; i < cfg->plugins.count; i++) {
         PluginConfig* pc = &cfg->plugins.items[i];
         if (pc->plugin_id) {
-            bool enabled = false;
-            if (pc->config) {
-                cJSON* enabled_item = cJSON_GetObjectItem(pc->config, "enabled");
-                if (cJSON_IsBool(enabled_item)) {
-                    enabled = cJSON_IsTrue(enabled_item);
-                }
-            }
-            printf("%s: %s\n", pc->plugin_id, enabled ? "Enabled" : "Disabled");
+            printf("%s: %s\n", pc->plugin_id, pc->enabled ? "Enabled" : "Disabled");
         }
     }
 

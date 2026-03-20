@@ -118,22 +118,6 @@ PLUGIN_EXPORT int plugin_init(PluginManager* manager, void* context) {
 
     log_info("[Plugin:stdout_channel] Initializing stdout channel plugin");
 
-    // Check if this plugin is enabled in config
-    if (manager && manager->config) {
-        PluginConfig* pc = config_get_plugin_config(manager->config, "stdout_channel");
-        if (pc && pc->config) {
-            cJSON* enabled_item = cJSON_GetObjectItem(pc->config, "enabled");
-            if (cJSON_IsBool(enabled_item) && !cJSON_IsTrue(enabled_item)) {
-                log_info("[Plugin:stdout_channel] Plugin is disabled in config, skipping registration");
-                return 0;  // Return success but don't register
-            }
-        } else {
-            // No config found means default to disabled
-            log_info("[Plugin:stdout_channel] No config found, default to disabled, skipping registration");
-            return 0;
-        }
-    }
-
     // Register the channel factory
     int ret = plugin_register_channel(manager, NULL, "stdout", stdout_channel_create);
 
@@ -161,7 +145,7 @@ static PluginInfo g_plugin_info = {
     .type = PLUGIN_CHANNEL,
     .name = "stdout_channel",
     .description = "A demo channel plugin that outputs messages to stdout",
-    .plugin_id = "stdout_channel_demo"
+    .plugin_id = "stdout_channel"
 };
 
 PLUGIN_EXPORT PluginInfo* plugin_get_info(void) {

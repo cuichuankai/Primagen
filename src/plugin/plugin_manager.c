@@ -28,6 +28,7 @@ static void plugin_manager_cleanup_plugin(LoadedPlugin* plugin) {
 
 // Forward declaration for recursive scanning
 static void scan_directory_recursive(const char* dir_path, const char* extension, StringList* list);
+static const PluginConfig* plugin_config_from_so_name(const Config* cfg, const char* path);
 
 // Helper function to add a file to the string list
 static void string_list_add(StringList* list, const char* path) {
@@ -94,6 +95,31 @@ void string_list_free(StringList* list) {
     }
     free(list->files);
     free(list);
+}
+
+static const PluginConfig* plugin_config_from_so_name(const Config* cfg, const char* path) {
+    if (!cfg || !path) return NULL;
+
+    const char* filename = strrchr(path, '/');
+    filename = filename ? filename + 1 : path;
+    if (!filename[0]) return NULL;
+
+    const char* dot = strrchr(filename, '.');
+    size_t id_len = dot ? (size_t)(dot - filename) : strlen(filename);
+    if (id_len == 0 || id_len >= 256) return NULL;
+
+    char plugin_id[256];
+    memcpy(plugin_id, filename, id_len);
+    plugin_id[id_len] = '\0';
+
+    for (size_t i = 0; i < cfg->plugins.count; i++) {
+        PluginConfig* item = &cfg->plugins.items[i];
+        if (item->plugin_id && strcmp(item->plugin_id, plugin_id) == 0) {
+            return item;
+        }
+    }
+
+    return NULL;
 }
 
 bool is_plugin_compatible(const char* path) {
@@ -221,6 +247,11 @@ int plugin_manager_load_external(PluginManager* manager) {
 
     int loaded = 0;
     for (size_t i = 0; i < plugins->count; i++) {
+        const PluginConfig* plugin_cfg = plugin_config_from_so_name(manager->config, plugins->files[i]);
+        if (!plugin_cfg || !plugin_cfg->enabled) {
+            log_debug("[PluginManager] Plugin %s is disabled or not found in config", plugins->files[i]);
+            continue;
+        }
         if (plugin_manager_load_plugin(manager, plugins->files[i]) == 0) {
             loaded++;
         }
@@ -286,6 +317,7 @@ int plugin_manager_load_plugin(PluginManager* manager, const char* path) {
     manager->plugin_count++;
 
     pthread_mutex_unlock(&manager->lock);
+    log_info("[PluginManager] Loaded plugin: %s", plugin->name);
     return 0;
 }
 

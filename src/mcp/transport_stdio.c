@@ -4,6 +4,7 @@
  */
 
 #include "mcp.h"
+#include "transport_internal.h"
 #include "../include/logger.h"
 #include "../vendor/cJSON/cJSON.h"
 #include <stdlib.h>
@@ -17,56 +18,45 @@
 #include <pthread.h>
 #include <signal.h>
 
-// stdio transport data
 typedef struct {
-    pid_t pid;              // Child process PID
-    int stdin_fd;           // Write to child stdin
-    int stdout_fd;          // Read from child stdout
+    pid_t pid;
+    int stdin_fd;
+    int stdout_fd;
     pthread_t reader_thread;
     bool running;
-    char* read_buffer;      // Buffer for accumulating responses
+    char* read_buffer;
     size_t buffer_size;
     size_t buffer_len;
-    pthread_mutex_t mutex;  // Protects read_buffer
-    pthread_cond_t cond;    // Signal when response ready
-
-    // Reconnection tracking
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
     int reconnect_attempts;
     time_t last_disconnect;
-    bool reconnecting;      // Flag to indicate reconnection in progress
+    bool reconnecting;
 } MCPStdioTransport;
 
-// Reconnection configuration
 #define MAX_RECONNECT_ATTEMPTS 5
-#define RECONNECT_BASE_DELAY_MS 1000  // 1 second base delay
-
-// Buffer for reading responses
+#define RECONNECT_BASE_DELAY_MS 1000
 #define READ_BUFFER_SIZE 65536
 #define LINE_BUFFER_SIZE 4096
 
-// Forward declaration
 static void* stdio_reader_thread(void* arg);
 
-// Helper: Set file descriptor to non-blocking
 static int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Helper: Sleep for specified milliseconds
 static void sleep_ms(int ms) {
     usleep(ms * 1000);
 }
 
-// Reconnect to MCP server
 static Error mcp_transport_stdio_reconnect(MCPClient* client) {
     if (!client || !client->transport_data) {
         return error_new(ERR_INVALID_PARAM, "Invalid client or transport");
     }
 
     MCPStdioTransport* transport = (MCPStdioTransport*)client->transport_data;
-
     if (transport->reconnecting) {
         log_debug("[MCP stdio] Reconnection already in progress for %s", client->server_id);
         return error_new(ERR_CONNECTION, "Reconnection already in progress");
@@ -76,21 +66,15 @@ static Error mcp_transport_stdio_reconnect(MCPClient* client) {
     log_debug("[MCP stdio] Attempting reconnection for %s (attempt %d/%d)",
               client->server_id, transport->reconnect_attempts, MAX_RECONNECT_ATTEMPTS);
 
-    // Close old file descriptors
-    if (transport->stdin_fd >= 0) {
-        close(transport->stdin_fd);
-    }
-    if (transport->stdout_fd >= 0) {
-        close(transport->stdout_fd);
+    if (transport->stdin_fd >= 0) close(transport->stdin_fd);
+    if (transport->stdout_fd >= 0) close(transport->stdout_fd);
+
+    if (!pthread_equal(pthread_self(), transport->reader_thread)) {
+        pthread_join(transport->reader_thread, NULL);
     }
 
-    // Wait for old reader thread
-    pthread_join(transport->reader_thread, NULL);
-
-    // Create pipes for stdin and stdout
     int stdin_pipe[2];
     int stdout_pipe[2];
-
     if (pipe(stdin_pipe) < 0) {
         transport->reconnecting = false;
         return error_new(ERR_CONNECTION, "Failed to create stdin pipe");
@@ -113,53 +97,36 @@ static Error mcp_transport_stdio_reconnect(MCPClient* client) {
     }
 
     if (pid == 0) {
-        // Child process
         close(stdin_pipe[1]);
         close(stdout_pipe[0]);
-
         dup2(stdin_pipe[0], STDIN_FILENO);
         dup2(stdout_pipe[1], STDOUT_FILENO);
-
         close(stdin_pipe[0]);
         close(stdout_pipe[1]);
-
-        // Set environment variables
         for (size_t i = 0; i < client->env.count; i++) {
             setenv(client->env.items[i].key, client->env.items[i].value, 1);
         }
-
-        // Build argv
         size_t argc = client->args_count + 1;
         char** argv = malloc((argc + 1) * sizeof(char*));
         argv[0] = client->command;
-        for (size_t i = 0; i < client->args_count; i++) {
-            argv[i + 1] = client->args[i];
-        }
+        for (size_t i = 0; i < client->args_count; i++) argv[i + 1] = client->args[i];
         argv[argc] = NULL;
-
-        // Execute
         execvp(client->command, argv);
         perror("execvp failed");
         _exit(127);
     }
 
-    // Parent process
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
-
     set_nonblocking(stdout_pipe[0]);
 
-    // Update transport
     transport->pid = pid;
     transport->stdin_fd = stdin_pipe[1];
     transport->stdout_fd = stdout_pipe[0];
     transport->running = true;
-
-    // Clear buffer on reconnect
     transport->read_buffer[0] = '\0';
     transport->buffer_len = 0;
 
-    // Start reader thread
     if (pthread_create(&transport->reader_thread, NULL, stdio_reader_thread, client) != 0) {
         log_error("[MCP stdio] Failed to create reader thread for reconnect");
         close(transport->stdin_fd);
@@ -174,31 +141,25 @@ static Error mcp_transport_stdio_reconnect(MCPClient* client) {
     return error_new(ERR_NONE, "");
 }
 
-// Reader thread - reads from child stdout and accumulates responses
 static void* stdio_reader_thread(void* arg) {
     MCPClient* client = (MCPClient*)arg;
     MCPStdioTransport* transport = (MCPStdioTransport*)client->transport_data;
-
     char line[LINE_BUFFER_SIZE];
     size_t line_pos = 0;
 
     while (transport->running) {
         ssize_t n = read(transport->stdout_fd, line + line_pos, sizeof(line) - line_pos - 1);
-
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                usleep(1000);  // 1ms
+                usleep(1000);
                 continue;
             }
             if (errno == EINTR) continue;
-            // Error - attempt reconnection
             log_error("[MCP stdio] Read error for %s: %s", client->server_id, strerror(errno));
             transport->last_disconnect = time(NULL);
             break;
         }
-
         if (n == 0) {
-            // EOF - child exited, attempt reconnection
             log_debug("[MCP stdio] EOF received for %s", client->server_id);
             transport->last_disconnect = time(NULL);
             break;
@@ -206,18 +167,12 @@ static void* stdio_reader_thread(void* arg) {
 
         line_pos += n;
         line[line_pos] = '\0';
-
-        // Look for newline to delimit complete JSON messages
         char* nl = strchr(line, '\n');
         if (nl) {
             *nl = '\0';
-
-            // Try to parse as JSON to validate
             cJSON* json = cJSON_Parse(line);
             if (json) {
                 char* json_str = cJSON_PrintUnformatted(json);
-
-                // Store in buffer
                 pthread_mutex_lock(&transport->mutex);
                 size_t needed = transport->buffer_len + strlen(json_str) + 2;
                 if (needed >= transport->buffer_size) {
@@ -232,82 +187,27 @@ static void* stdio_reader_thread(void* arg) {
                 transport->buffer_len += strlen(json_str);
                 pthread_cond_signal(&transport->cond);
                 pthread_mutex_unlock(&transport->mutex);
-
                 free(json_str);
                 cJSON_Delete(json);
             }
-
-            // Move to next line
             size_t remaining = strlen(nl + 1);
             memmove(line, nl + 1, remaining + 1);
             line_pos = remaining;
         }
     }
 
-    // Connection lost - attempt reconnection with exponential backoff
     if (transport->running && !transport->reconnecting) {
         transport->reconnect_attempts++;
-
         if (transport->reconnect_attempts <= MAX_RECONNECT_ATTEMPTS) {
-            // Calculate delay with exponential backoff
             int delay_ms = RECONNECT_BASE_DELAY_MS * (1 << transport->reconnect_attempts);
             log_debug("[MCP stdio] Waiting %dms before reconnect attempt %d for %s",
                       delay_ms, transport->reconnect_attempts, client->server_id);
             sleep_ms(delay_ms);
-
-            // Attempt reconnection
             Error err = mcp_transport_stdio_reconnect(client);
             if (err.code == ERR_NONE) {
                 log_debug("[MCP stdio] Reconnection successful for %s", client->server_id);
-                transport->reconnect_attempts = 0;  // Reset on success
-
-                // Continue reading - recurse into read loop
-                line_pos = 0;
-                while (transport->running) {
-                    ssize_t n = read(transport->stdout_fd, line + line_pos, sizeof(line) - line_pos - 1);
-
-                    if (n < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            usleep(1000);
-                            continue;
-                        }
-                        if (errno == EINTR) continue;
-                        break;
-                    }
-
-                    if (n == 0) break;  // EOF again
-
-                    line_pos += n;
-                    line[line_pos] = '\0';
-
-                    char* nl = strchr(line, '\n');
-                    if (nl) {
-                        *nl = '\0';
-                        cJSON* json = cJSON_Parse(line);
-                        if (json) {
-                            char* json_str = cJSON_PrintUnformatted(json);
-                            pthread_mutex_lock(&transport->mutex);
-                            size_t needed = transport->buffer_len + strlen(json_str) + 2;
-                            if (needed >= transport->buffer_size) {
-                                transport->buffer_size = needed * 2;
-                                transport->read_buffer = realloc(transport->read_buffer, transport->buffer_size);
-                            }
-                            if (transport->buffer_len > 0) {
-                                strcat(transport->read_buffer, "\n");
-                                transport->buffer_len++;
-                            }
-                            strcat(transport->read_buffer, json_str);
-                            transport->buffer_len += strlen(json_str);
-                            pthread_cond_signal(&transport->cond);
-                            pthread_mutex_unlock(&transport->mutex);
-                            free(json_str);
-                            cJSON_Delete(json);
-                        }
-                        size_t remaining = strlen(nl + 1);
-                        memmove(line, nl + 1, remaining + 1);
-                        line_pos = remaining;
-                    }
-                }
+                transport->reconnect_attempts = 0;
+                return NULL;
             } else {
                 log_error("[MCP stdio] Reconnection failed for %s: %s", client->server_id, err.message);
             }
@@ -322,7 +222,6 @@ static void* stdio_reader_thread(void* arg) {
     return NULL;
 }
 
-// Initialize stdio transport
 static Error mcp_transport_stdio_init(MCPClient* client) {
     if (!client || !client->command) {
         return error_new(ERR_INVALID_PARAM, "Invalid client or command");
@@ -330,13 +229,9 @@ static Error mcp_transport_stdio_init(MCPClient* client) {
 
     log_debug("[MCP stdio] Starting %s with command: %s", client->server_id, client->command);
 
-    // Create pipes for stdin and stdout
-    int stdin_pipe[2];   // parent writes -> child reads
-    int stdout_pipe[2];  // child writes -> parent reads
-
-    if (pipe(stdin_pipe) < 0) {
-        return error_new(ERR_CONNECTION, "Failed to create stdin pipe");
-    }
+    int stdin_pipe[2];
+    int stdout_pipe[2];
+    if (pipe(stdin_pipe) < 0) return error_new(ERR_CONNECTION, "Failed to create stdin pipe");
     if (pipe(stdout_pipe) < 0) {
         close(stdin_pipe[0]);
         close(stdin_pipe[1]);
@@ -353,46 +248,29 @@ static Error mcp_transport_stdio_init(MCPClient* client) {
     }
 
     if (pid == 0) {
-        // Child process
-        close(stdin_pipe[1]);    // Close write end of stdin
-        close(stdout_pipe[0]);   // Close read end of stdout
-
+        close(stdin_pipe[1]);
+        close(stdout_pipe[0]);
         dup2(stdin_pipe[0], STDIN_FILENO);
         dup2(stdout_pipe[1], STDOUT_FILENO);
-
         close(stdin_pipe[0]);
         close(stdout_pipe[1]);
-
-        // Set environment variables
         for (size_t i = 0; i < client->env.count; i++) {
             setenv(client->env.items[i].key, client->env.items[i].value, 1);
         }
-
-        // Build argv
         size_t argc = client->args_count + 1;
         char** argv = malloc((argc + 1) * sizeof(char*));
         argv[0] = client->command;
-        for (size_t i = 0; i < client->args_count; i++) {
-            argv[i + 1] = client->args[i];
-        }
+        for (size_t i = 0; i < client->args_count; i++) argv[i + 1] = client->args[i];
         argv[argc] = NULL;
-
-        // Execute
         execvp(client->command, argv);
-
-        // If exec fails
         perror("execvp failed");
         _exit(127);
     }
 
-    // Parent process
-    close(stdin_pipe[0]);    // Close read end
-    close(stdout_pipe[1]);   // Close write end
-
-    // Set non-blocking for reading
+    close(stdin_pipe[0]);
+    close(stdout_pipe[1]);
     set_nonblocking(stdout_pipe[0]);
 
-    // Create transport data
     MCPStdioTransport* transport = calloc(1, sizeof(MCPStdioTransport));
     transport->pid = pid;
     transport->stdin_fd = stdin_pipe[1];
@@ -404,10 +282,8 @@ static Error mcp_transport_stdio_init(MCPClient* client) {
     transport->buffer_len = 0;
     pthread_mutex_init(&transport->mutex, NULL);
     pthread_cond_init(&transport->cond, NULL);
-
     client->transport_data = transport;
 
-    // Start reader thread
     if (pthread_create(&transport->reader_thread, NULL, stdio_reader_thread, client) != 0) {
         log_error("[MCP stdio] Failed to create reader thread");
         close(transport->stdin_fd);
@@ -422,47 +298,29 @@ static Error mcp_transport_stdio_init(MCPClient* client) {
     return error_new(ERR_NONE, "");
 }
 
-// Send data via stdio transport
 static Error mcp_transport_stdio_send(MCPClient* client, const char* data) {
     if (!client || !client->transport_data) {
         return error_new(ERR_INVALID_PARAM, "Invalid client or transport");
     }
-
     MCPStdioTransport* transport = (MCPStdioTransport*)client->transport_data;
-
     if (!transport->running) {
         return error_new(ERR_CONNECTION, "Transport not running");
     }
-
     size_t len = strlen(data);
     ssize_t written = write(transport->stdin_fd, data, len);
-
     if (written < 0) {
         return error_new(ERR_CONNECTION, "Failed to write to stdin");
     }
-
-    // Write newline to flush
     write(transport->stdin_fd, "\n", 1);
-
     log_debug("[MCP stdio] Sent %zd bytes to %s", written, client->server_id);
     return error_new(ERR_NONE, "");
 }
 
-// Receive data from stdio transport (with timeout in ms)
 static char* mcp_transport_stdio_recv(MCPClient* client, int timeout_ms) {
-    if (!client || !client->transport_data) {
-        return NULL;
-    }
-
+    if (!client || !client->transport_data) return NULL;
     MCPStdioTransport* transport = (MCPStdioTransport*)client->transport_data;
+    if (!transport->running) return NULL;
 
-    if (!transport->running) {
-        return NULL;
-    }
-
-    char* result = NULL;
-
-    // Wait for data with timeout
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += timeout_ms / 1000;
@@ -472,143 +330,44 @@ static char* mcp_transport_stdio_recv(MCPClient* client, int timeout_ms) {
         ts.tv_nsec -= 1000000000;
     }
 
+    char* result = NULL;
     pthread_mutex_lock(&transport->mutex);
-
-    // Wait for data
     while (transport->buffer_len == 0 && transport->running) {
         int ret = pthread_cond_timedwait(&transport->cond, &transport->mutex, &ts);
-        if (ret == ETIMEDOUT) {
-            break;
-        }
+        if (ret == ETIMEDOUT) break;
     }
-
     if (transport->buffer_len > 0) {
         result = strdup(transport->read_buffer);
         transport->read_buffer[0] = '\0';
         transport->buffer_len = 0;
     }
-
     pthread_mutex_unlock(&transport->mutex);
-
     return result;
 }
 
-// Close stdio transport
 static void mcp_transport_stdio_close(MCPClient* client) {
-    if (!client || !client->transport_data) {
-        return;
-    }
-
+    if (!client || !client->transport_data) return;
     MCPStdioTransport* transport = (MCPStdioTransport*)client->transport_data;
-
     transport->running = false;
-
-    // Wait for reader thread
     pthread_join(transport->reader_thread, NULL);
-
-    // Close pipes
     close(transport->stdin_fd);
     close(transport->stdout_fd);
-
-    // Kill child process
     kill(transport->pid, SIGTERM);
     waitpid(transport->pid, NULL, 0);
-
-    // Free resources
     pthread_mutex_destroy(&transport->mutex);
     pthread_cond_destroy(&transport->cond);
     free(transport->read_buffer);
     free(transport);
-
     client->transport_data = NULL;
     log_debug("[MCP stdio] Closed connection to %s", client->server_id);
 }
 
-// Transport vtable
-typedef struct {
-    Error (*init)(MCPClient* client);
-    Error (*send)(MCPClient* client, const char* data);
-    char* (*recv)(MCPClient* client, int timeout_ms);
-    void (*close)(MCPClient* client);
-} MCPTransportOps;
-
-static MCPTransportOps stdio_ops = {
-    .init = mcp_transport_stdio_init,
-    .send = mcp_transport_stdio_send,
-    .recv = mcp_transport_stdio_recv,
-    .close = mcp_transport_stdio_close
-};
-
-// Get transport ops by type
-static MCPTransportOps* get_transport_ops(const char* type) {
-    if (strcmp(type, "stdio") == 0) {
-        return &stdio_ops;
-    }
-    // Add other transports here
-    return NULL;
+MCPTransportOps* mcp_transport_stdio_ops(void) {
+    static MCPTransportOps ops = {
+        .init = mcp_transport_stdio_init,
+        .send = mcp_transport_stdio_send,
+        .recv = mcp_transport_stdio_recv,
+        .close = mcp_transport_stdio_close
+    };
+    return &ops;
 }
-
-// Global transport operations table - used for future transport types
-
-// Initialize transport for client
-Error mcp_client_connect(MCPClient* client) {
-    if (!client) return error_new(ERR_INVALID_PARAM, "client is NULL");
-
-    log_debug("[MCP] Connecting to %s via %s...", client->server_id, client->transport_type);
-
-    MCPTransportOps* ops = get_transport_ops(client->transport_type);
-    if (!ops) {
-        log_error("[MCP] Unknown transport type: %s", client->transport_type);
-        return error_new(ERR_INVALID_PARAM, "Unknown transport type");
-    }
-
-    Error err = ops->init(client);
-    if (err.code == ERR_NONE) {
-        client->connected = true;
-        log_debug("[MCP] Connected to %s", client->server_id);
-    }
-
-    return err;
-}
-
-void mcp_client_disconnect(MCPClient* client) {
-    if (!client) return;
-
-    log_debug("[MCP] Disconnecting from %s", client->server_id);
-
-    MCPTransportOps* ops = get_transport_ops(client->transport_type);
-    if (ops && ops->close) {
-        ops->close(client);
-    }
-
-    client->connected = false;
-}
-
-// Send request and wait for response
-Error mcp_client_send(MCPClient* client, const char* request_json) {
-    if (!client || !request_json) {
-        return error_new(ERR_INVALID_PARAM, "Invalid arguments");
-    }
-
-    MCPTransportOps* ops = get_transport_ops(client->transport_type);
-    if (!ops || !ops->send) {
-        return error_new(ERR_INVALID_PARAM, "Transport not available");
-    }
-
-    return ops->send(client, request_json);
-}
-
-// Receive response with timeout
-char* mcp_client_recv(MCPClient* client, int timeout_ms) {
-    if (!client) return NULL;
-
-    MCPTransportOps* ops = get_transport_ops(client->transport_type);
-    if (!ops || !ops->recv) {
-        return NULL;
-    }
-
-    return ops->recv(client, timeout_ms);
-}
-
-// Send request and receive response (convenience function)
-// Note: Currently implemented inline in MCP method functions

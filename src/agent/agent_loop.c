@@ -131,7 +131,9 @@ static int cmd_help(Config* cfg, const char* workspace_path, int argc, char** ar
 
     // Build help text dynamically
     String help_text = string_new("");
-    string_append(&help_text, "Primagen commands:\n");
+    string_append(&help_text, "\n      Primagen(Primitive Genesis) - AI Agent Framework  \n");
+    string_append(&help_text, "===================================================================  \n");
+    string_append(&help_text, "Primagen commands:  \n");
 
     if (commands && command_count > 0) {
         for (size_t i = 0; i < command_count; i++) {
@@ -140,7 +142,7 @@ static int cmd_help(Config* cfg, const char* workspace_path, int argc, char** ar
             string_append(&help_text, " - ");
             string_append(&help_text, commands[i].description);
             if (i < command_count - 1) {
-                string_append(&help_text, "\n");
+                string_append(&help_text, "  \n");
             }
         }
     } else {
@@ -151,6 +153,95 @@ static int cmd_help(Config* cfg, const char* workspace_path, int argc, char** ar
     message_bus_send_outbound(bus, outbound);
 
     string_free(&help_text);
+    return 0;
+}
+
+static int cmd_tools(Config* cfg, const char* workspace_path, int argc, char** argv) {
+    (void)cfg; (void)workspace_path;
+    if (argc < CMD_ARG_MIN_COUNT) return -1;
+
+    AgentLoop* loop = CMD_ARG_LOOP(argv);
+    const char* channel = CMD_ARG_CHANNEL(argv);
+    const char* chat_id = CMD_ARG_CHAT_ID(argv);
+    MessageBus* bus = CMD_ARG_BUS(argv);
+    if (!loop || !loop->tool_reg) return -1;
+
+    String out = string_new("");
+    string_append(&out, "\nAvailable tools:\n");
+
+    size_t total = loop->tool_reg->count;
+    size_t builtin_count = 0;
+    size_t plugin_count = 0;
+    size_t mcp_count = 0;
+    for (size_t i = 0; i < total; i++) {
+        Tool* t = &loop->tool_reg->tools[i];
+        const char* name = t->def.name.data ? t->def.name.data : "";
+        bool is_mcp = strncmp(name, "primagen_", 9) == 0 || strncmp(name, "mcp_", 4) == 0;
+        if (is_mcp) {
+            mcp_count++;
+        } else if (t->plugin_ref) {
+            plugin_count++;
+        } else {
+            builtin_count++;
+        }
+    }
+
+    char summary[128];
+    snprintf(summary, sizeof(summary), "Total: %zu (builtin: %zu, plugin: %zu, mcp: %zu)\n",
+             total, builtin_count, plugin_count, mcp_count);
+    string_append(&out, summary);
+
+    if (builtin_count > 0) {
+        string_append(&out, "\n[builtin]\n");
+        for (size_t i = 0; i < total; i++) {
+            Tool* t = &loop->tool_reg->tools[i];
+            const char* name = t->def.name.data ? t->def.name.data : "";
+            bool is_mcp = strncmp(name, "primagen_", 9) == 0 || strncmp(name, "mcp_", 4) == 0;
+            if (!is_mcp && !t->plugin_ref) {
+                string_append(&out, "- ");
+                string_append(&out, name);
+                string_append(&out, "\n");
+            }
+        }
+    }
+
+    if (plugin_count > 0) {
+        string_append(&out, "\n[plugin]\n");
+        for (size_t i = 0; i < total; i++) {
+            Tool* t = &loop->tool_reg->tools[i];
+            const char* name = t->def.name.data ? t->def.name.data : "";
+            bool is_mcp = strncmp(name, "primagen_", 9) == 0 || strncmp(name, "mcp_", 4) == 0;
+            if (!is_mcp && t->plugin_ref) {
+                LoadedPlugin* p = (LoadedPlugin*)t->plugin_ref;
+                string_append(&out, "- ");
+                string_append(&out, name);
+                if (p && p->name) {
+                    string_append(&out, " (");
+                    string_append(&out, p->name);
+                    string_append(&out, ")");
+                }
+                string_append(&out, "\n");
+            }
+        }
+    }
+
+    if (mcp_count > 0) {
+        string_append(&out, "\n[mcp]\n");
+        for (size_t i = 0; i < total; i++) {
+            Tool* t = &loop->tool_reg->tools[i];
+            const char* name = t->def.name.data ? t->def.name.data : "";
+            bool is_mcp = strncmp(name, "primagen_", 9) == 0 || strncmp(name, "mcp_", 4) == 0;
+            if (is_mcp) {
+                string_append(&out, "- ");
+                string_append(&out, name);
+                string_append(&out, "\n");
+            }
+        }
+    }
+
+    OutboundMessage* outbound = outbound_message_new(channel, chat_id, out.data);
+    message_bus_send_outbound(bus, outbound);
+    string_free(&out);
     return 0;
 }
 
@@ -171,7 +262,7 @@ static int cmd_reload_plugins(Config* cfg, const char* workspace_path, int argc,
     int reloaded = plugin_manager_load_external(loop->plugin_mgr);
     char response[512];
     snprintf(response, sizeof(response),
-        "Plugin reload complete.\n"
+        "\nPlugin reload complete.\n"
         "External dir: %s\n"
         "New/reloaded plugins: %d\n"
         "Total loaded: %zu",
@@ -295,6 +386,7 @@ void agent_loop_register_builtin_commands(AgentLoop* loop) {
         {"restart", "Restart the bot", cmd_restart},
         {"new", "Start a new conversation", cmd_new},
         {"help", "Show available commands", cmd_help},
+        {"tools", "Show available tools (builtin/plugin/mcp)", cmd_tools},
         {"reload-plugins", "Reload all plugins from the plugins directory", cmd_reload_plugins},
     };
     #define BUILTIN_COMMAND_COUNT (sizeof(builtin_commands) / sizeof(builtin_commands[0]))
@@ -319,7 +411,15 @@ void agent_loop_register_builtin_tools(PluginManager* manager, ToolContext* ctx)
         log_error("[AgentLoop] Invalid parameters for agent_loop_register_builtin_tools");
         return;
     }
+/*
 
+        {"web_search", "Search the web",
+            "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}},\"required\":[\"query\"]}",
+            tool_web_search},
+        {"web_fetch", "Fetch URL content",
+            "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}",
+            tool_web_fetch},
+*/
     // Define builtin tools at runtime (user_data is runtime context)
     struct {
         const char* name;
@@ -342,12 +442,6 @@ void agent_loop_register_builtin_tools(PluginManager* manager, ToolContext* ctx)
         {"exec", "Execute shell command",
             "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}",
             tool_exec},
-        {"web_search", "Search the web",
-            "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}},\"required\":[\"query\"]}",
-            tool_web_search},
-        {"web_fetch", "Fetch URL content",
-            "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}",
-            tool_web_fetch},
         {"send_message", "Send message to user",
             "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"}},\"required\":[\"content\"]}",
             tool_send_message},
