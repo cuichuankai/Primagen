@@ -57,11 +57,9 @@ ifneq ($(ANDROID_NDK),)
     endif
 
     ANDROID_CFLAGS = -fPIC -Wall -Wextra -std=c99 -Os
-    ANDROID_CFLAGS += --target=$(ANDROID_ABI)-none-linux-android$(ANDROID_API)
     ANDROID_CFLAGS += -I$(PRIMAGEN_ROOT)/src/include -I$(PRIMAGEN_ROOT)/src -I$(PRIMAGEN_ROOT)/src/vendor
 
     ANDROID_LDFLAGS = -shared -ldl -pthread
-    ANDROID_LDFLAGS += --target=$(ANDROID_ABI)-none-linux-android$(ANDROID_API)
 else
     ANDROID_CC =
     ANDROID_CFLAGS =
@@ -101,7 +99,8 @@ native: $(BUILD_DIR) $(PLUGIN_SO)
 	@echo "Built $(PLUGIN_SO) for $(HOST_OS) -> $(PLUGIN_OUTPUT_DIR)/"
 
 # Android build (overwrites native .so)
-android: check-ndk $(PLUGIN_SO)
+android: check-ndk
+	@$(MAKE) --no-print-directory TARGET_PLATFORM=android $(PLUGIN_SO)
 	@mkdir -p $(PLUGIN_OUTPUT_DIR)
 	@cp $(PLUGIN_SO) $(PLUGIN_OUTPUT_DIR)/
 	@echo "Built $(PLUGIN_SO) for Android ($(ANDROID_ABI)) -> $(PLUGIN_OUTPUT_DIR)/"

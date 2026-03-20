@@ -9,6 +9,7 @@ typedef struct {
     MessageBus* bus;
     pthread_t thread_id;
     bool running;
+    bool thread_started;
 } ConsoleData;
 
 static void* console_input_loop(void* arg) {
@@ -50,6 +51,7 @@ static bool console_init(Channel* self, Config* cfg, MessageBus* bus) {
     ConsoleData* data = malloc(sizeof(ConsoleData));
     data->bus = bus;
     data->running = false;
+    data->thread_started = false;
     self->user_data = data;
     return true;
 }
@@ -57,7 +59,11 @@ static bool console_init(Channel* self, Config* cfg, MessageBus* bus) {
 static void console_start(Channel* self) {
     ConsoleData* data = (ConsoleData*)self->user_data;
     data->running = true;
-    pthread_create(&data->thread_id, NULL, console_input_loop, self);
+    if (pthread_create(&data->thread_id, NULL, console_input_loop, self) == 0) {
+        data->thread_started = true;
+    } else {
+        data->running = false;
+    }
 }
 
 static void console_stop(Channel* self) {
@@ -79,10 +85,15 @@ static void console_send(Channel* self, OutboundMessage* msg) {
 static void console_destroy(Channel* self) {
     ConsoleData* data = (ConsoleData*)self->user_data;
     if (data) {
-        // Stop the input loop and wait for thread to finish
         data->running = false;
-        pthread_cancel(data->thread_id);  // Cancel the blocking fgets call
-        pthread_join(data->thread_id, NULL);  // Wait for thread to exit and reclaim resources
+        if (data->thread_started) {
+#if defined(__ANDROID__)
+            pthread_detach(data->thread_id);
+#else
+            pthread_cancel(data->thread_id);
+            pthread_join(data->thread_id, NULL);
+#endif
+        }
         free(data);
     }
     free(self);

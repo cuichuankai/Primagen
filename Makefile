@@ -1,5 +1,6 @@
 # Default target
 TARGET ?= macos
+BUILD_TYPE ?= debug
 
 # Android Configuration
 ANDROID_API ?= 24
@@ -16,12 +17,17 @@ ifeq ($(TARGET),android)
     # Correct path for clang in newer NDKs
     CC = $(TOOLCHAIN)/bin/aarch64-linux-android$(ANDROID_API)-clang
 
-    # Android specific flags
-    CFLAGS = -Wall -Wextra -std=c99 -pthread -g -I src/include -I src -I src/vendor -DANDROID -DMG_TLS=MG_TLS_BUILTIN
-    LDFLAGS = -llog
+    # Android specific flags (release)
+    CFLAGS = -Wall -Wextra -std=c99 -pthread -O2 -DNDEBUG -DMG_ENABLE_LOG=0 -I src/include -I src -I src/vendor -DANDROID -DMG_TLS=MG_TLS_BUILTIN
+    LDFLAGS = -llog -Wl,--export-dynamic
 else
     CC = gcc
-    CFLAGS = -Wall -Wextra -std=c99 -pthread -g -I src/include -I src -I src/vendor -DMG_TLS=MG_TLS_BUILTIN -DMG_ENABLE_LINES=1 -DMG_ENABLE_IPV6=1 -DMG_ENABLE_SSI=1 -DMG_UECC_SUPPORTS_secp256r1=1 -DMG_ENABLE_CHACHA20=0
+    BASE_CFLAGS = -Wall -Wextra -std=c99 -pthread -I src/include -I src -I src/vendor -DMG_TLS=MG_TLS_BUILTIN -DMG_ENABLE_LINES=1 -DMG_ENABLE_IPV6=1 -DMG_ENABLE_SSI=1 -DMG_UECC_SUPPORTS_secp256r1=1 -DMG_ENABLE_CHACHA20=0
+    ifeq ($(BUILD_TYPE),release)
+        CFLAGS = $(BASE_CFLAGS) -O2 -DNDEBUG -DMG_ENABLE_LOG=0
+    else
+        CFLAGS = $(BASE_CFLAGS) -g -O0
+    endif
     LDFLAGS = -ldl
 endif
 
@@ -85,88 +91,7 @@ OBJ = $(OBJDIR)/common/common.o \
 $(OBJDIR)/primagen: $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDFLAGS)
 
-$(OBJDIR)/common/%.o: $(SRCDIR)/common/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/tools/%.o: $(SRCDIR)/tools/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/session/%.o: $(SRCDIR)/session/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/memory/%.o: $(SRCDIR)/memory/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/context/%.o: $(SRCDIR)/context/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/bus/%.o: $(SRCDIR)/bus/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/agent/%.o: $(SRCDIR)/agent/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/providers/%.o: $(SRCDIR)/providers/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/subagent/%.o: $(SRCDIR)/subagent/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/cron/%.o: $(SRCDIR)/cron/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/heartbeat/%.o: $(SRCDIR)/heartbeat/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/skills/%.o: $(SRCDIR)/skills/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/config/%.o: $(SRCDIR)/config/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/mcp/%.o: $(SRCDIR)/mcp/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/channels/%.o: $(SRCDIR)/channels/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/cli/%.o: $(SRCDIR)/cli/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/acp/%.o: $(SRCDIR)/acp/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/vendor/cJSON/%.o: $(SRCDIR)/vendor/cJSON/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/vendor/mongoose/%.o: $(SRCDIR)/vendor/mongoose/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/main.o: $(SRCDIR)/main.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Plugin system
-$(OBJDIR)/plugin/%.o: $(SRCDIR)/plugin/%.c
+$(OBJDIR)/%.o: $(SRCDIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
