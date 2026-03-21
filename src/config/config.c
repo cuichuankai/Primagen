@@ -249,6 +249,7 @@ void config_destroy(Config* cfg) {
         free(cfg->mcp.servers[i].command);
         string_array_free(&cfg->mcp.servers[i].args);
         env_var_array_free(&cfg->mcp.servers[i].env);
+        env_var_array_free(&cfg->mcp.servers[i].headers);
     }
     free(cfg->mcp.servers);
 
@@ -418,6 +419,7 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
                 memset(server, 0, sizeof(MCPServerConfig));
                 server->args = string_array_new();
                 server->env = env_var_array_new();
+                server->headers = env_var_array_new();
 
                 cJSON* s_item;
                 if ((s_item = cJSON_GetObjectItem(server_item, "id"))) {
@@ -459,6 +461,16 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
                     cJSON_ArrayForEach(env_item, env) {
                         if (cJSON_IsString(env_item)) {
                             env_var_array_add(&server->env, env_item->string, env_item->valuestring);
+                        }
+                    }
+                }
+
+                cJSON* headers = cJSON_GetObjectItem(server_item, "headers");
+                if (cJSON_IsObject(headers)) {
+                    cJSON* header_item;
+                    cJSON_ArrayForEach(header_item, headers) {
+                        if (cJSON_IsString(header_item)) {
+                            env_var_array_add(&server->headers, header_item->string, header_item->valuestring);
                         }
                     }
                 }
@@ -665,6 +677,13 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
             cJSON_AddStringToObject(env, env_item->key, env_item->value);
         }
         cJSON_AddItemToObject(server_obj, "env", env);
+
+        cJSON* headers = cJSON_CreateObject();
+        for (size_t j = 0; j < srv->headers.count; j++) {
+            EnvVar* header_item = &srv->headers.items[j];
+            cJSON_AddStringToObject(headers, header_item->key, header_item->value);
+        }
+        cJSON_AddItemToObject(server_obj, "headers", headers);
 
         cJSON_AddItemToArray(mcp_servers, server_obj);
     }

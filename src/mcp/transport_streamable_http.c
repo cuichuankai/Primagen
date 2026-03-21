@@ -30,6 +30,21 @@ typedef struct {
 #define STREAMABLE_HTTP_BUFFER_SIZE 65536
 #define STREAMABLE_HTTP_POST_TIMEOUT_MS 30000
 
+static bool is_reserved_http_header(const char* key) {
+    if (!key) return false;
+    return strcasecmp(key, "Host") == 0 || strcasecmp(key, "Content-Length") == 0;
+}
+
+static void append_custom_headers(struct mg_connection* c, MCPClient* client) {
+    if (!c || !client) return;
+    for (size_t i = 0; i < client->headers.count; i++) {
+        EnvVar* h = &client->headers.items[i];
+        if (!h->key || !h->value) continue;
+        if (is_reserved_http_header(h->key)) continue;
+        mg_printf(c, "%s: %s\r\n", h->key, h->value);
+    }
+}
+
 static const char* get_header_value_ci(struct mg_http_message* hm, const char* header_name) {
     if (!hm || !header_name) return NULL;
     size_t target_len = strlen(header_name);
@@ -270,14 +285,14 @@ retry_send:
                   "Accept: application/json, text/event-stream\r\n"
                   "MCP-Protocol-Version: %s\r\n"
                   "MCP-Session-Id: %s\r\n"
-                  "Content-Length: %d\r\n\r\n"
-                  "%s",
+                  "Content-Length: %d\r\n",
                   mg_url_uri(post_url),
                   (int) host.len, host.buf,
                   MCP_PROTOCOL_VERSION,
                   transport->session_id,
-                  (int) strlen(data),
-                  data);
+                  (int) strlen(data));
+        append_custom_headers(c, client);
+        mg_printf(c, "\r\n%s", data);
     } else {
         mg_printf(c,
                   "POST %s HTTP/1.1\r\n"
@@ -285,13 +300,13 @@ retry_send:
                   "Content-Type: application/json\r\n"
                   "Accept: application/json, text/event-stream\r\n"
                   "MCP-Protocol-Version: %s\r\n"
-                  "Content-Length: %d\r\n\r\n"
-                  "%s",
+                  "Content-Length: %d\r\n",
                   mg_url_uri(post_url),
                   (int) host.len, host.buf,
                   MCP_PROTOCOL_VERSION,
-                  (int) strlen(data),
-                  data);
+                  (int) strlen(data));
+        append_custom_headers(c, client);
+        mg_printf(c, "\r\n%s", data);
     }
 
     uint64_t start_ms = mg_millis();

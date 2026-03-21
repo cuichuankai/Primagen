@@ -57,6 +57,7 @@ typedef struct {
     char* command;
     StringArray args;
     EnvVarArray env;       // Environment variables for this server
+    EnvVarArray headers;   // Custom HTTP headers for sse/streamable_http
 } MCPServerConfig;
 
 typedef struct {

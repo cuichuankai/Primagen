@@ -60,6 +60,7 @@ typedef struct {
     char** args;           // Command arguments
     size_t args_count;
     EnvVarArray env;       // Environment variables
+    EnvVarArray headers;   // Custom HTTP headers
     void* transport_data;  // Transport-specific data
     bool connected;
     bool initialized;
@@ -101,7 +102,8 @@ void mcp_manager_free(MCPManager* mgr);
 // Client management
 int mcp_manager_add_client(MCPManager* mgr, const char* server_id, const char* transport,
                            const char* command, char** args, size_t args_count,
-                           EnvVar* env_vars, size_t env_count);
+                           EnvVar* env_vars, size_t env_count,
+                           EnvVar* headers, size_t headers_count);
 void mcp_manager_remove_client(MCPManager* mgr, const char* server_id);
 MCPClient* mcp_manager_get_client(MCPManager* mgr, const char* server_id);
 Error mcp_manager_setup_from_config(MCPManager* mgr, MCPConfig* cfg, ToolRegistry* tool_reg);

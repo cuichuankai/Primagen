@@ -164,23 +164,33 @@ Other commands:
         "id": "remote_sse_tools",
         "transport": "sse",
         "url": "http://127.0.0.1:8000/sse",
-        "request_url": "http://127.0.0.1:8000/messages"
+        "request_url": "http://127.0.0.1:8000/messages",
+        "headers": {
+          "Authorization": "Bearer <token>",
+          "X-Api-Key": "<api-key>"
+        }
       },
       {
         "id": "remote_streamable_http_tools",
         "transport": "streamable_http",
         "url": "https://example.com/mcp",
-        "request_url": "https://example.com/mcp"
+        "request_url": "https://example.com/mcp",
+        "headers": {
+          "Authorization": "Bearer <token>",
+          "X-Api-Key": "<api-key>"
+        }
       }
     ]
   }
 }
 ```
 
-For `stdio`, Primagen starts the MCP server process with `command + args`.
-For `websocket`, Primagen connects directly to `url` and exchanges MCP JSON-RPC messages over WebSocket text frames.
-For `sse`, Primagen reads server events from `url` and sends JSON-RPC requests to `request_url` (defaults to `url` when omitted).
-For `streamable_http`, Primagen sends JSON-RPC requests over HTTP POST and supports both JSON and `text/event-stream` responses; `request_url` defaults to `url` when omitted.
+- For `stdio`, Primagen starts the MCP server process with `command + args`.
+- For `websocket`, Primagen connects directly to `url` and exchanges MCP JSON-RPC messages over WebSocket text frames.
+- For `sse`, Primagen reads server events from `url` and sends JSON-RPC requests to `request_url` (defaults to `url` when omitted).
+- For `streamable_http`, Primagen sends JSON-RPC requests over HTTP POST and supports both JSON and `text/event-stream` responses; `request_url` defaults to `url` when omitted.
+>For `sse` and `streamable_http`, you can add a `headers` object to send custom HTTP headers (for example `Authorization`).  
+> Custom headers are sent as real HTTP headers (not in JSON payload); `Host` and `Content-Length` are reserved and cannot be overridden.  
 
 ## Plugin Configuration Example
 

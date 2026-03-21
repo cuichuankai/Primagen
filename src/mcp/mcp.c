@@ -199,6 +199,11 @@ void mcp_manager_free(MCPManager* mgr) {
                 free(client->env.items[j].value);
             }
             free(client->env.items);
+            for (size_t j = 0; j < client->headers.count; j++) {
+                free(client->headers.items[j].key);
+                free(client->headers.items[j].value);
+            }
+            free(client->headers.items);
 
             mcp_free_tools(client);
             mcp_free_resources(client);
@@ -215,7 +220,8 @@ void mcp_manager_free(MCPManager* mgr) {
 // Add a new MCP client
 int mcp_manager_add_client(MCPManager* mgr, const char* server_id, const char* transport,
                            const char* command, char** args, size_t args_count,
-                           EnvVar* env_vars, size_t env_count) {
+                           EnvVar* env_vars, size_t env_count,
+                           EnvVar* headers, size_t headers_count) {
     if (!mgr || !server_id || !transport) return -1;
 
     // Check if client already exists
@@ -353,6 +359,74 @@ int mcp_manager_add_client(MCPManager* mgr, const char* server_id, const char* t
         }
     }
 
+    if (headers && headers_count > 0) {
+        client->headers.items = malloc(headers_count * sizeof(EnvVar));
+        if (!client->headers.items) {
+            for (size_t j = 0; j < client->env.count; j++) {
+                free(client->env.items[j].key);
+                free(client->env.items[j].value);
+            }
+            free(client->env.items);
+            if (client->args) {
+                for (size_t i = 0; i < client->args_count; i++) free(client->args[i]);
+                free(client->args);
+            }
+            free(client->command);
+            free(client->transport_type);
+            free(client->server_id);
+            free(client);
+            return -1;
+        }
+        client->headers.count = headers_count;
+        for (size_t i = 0; i < headers_count; i++) {
+            client->headers.items[i].key = strdup(headers[i].key);
+            if (!client->headers.items[i].key) {
+                for (size_t j = 0; j < i; j++) {
+                    free(client->headers.items[j].key);
+                    free(client->headers.items[j].value);
+                }
+                free(client->headers.items);
+                for (size_t j = 0; j < client->env.count; j++) {
+                    free(client->env.items[j].key);
+                    free(client->env.items[j].value);
+                }
+                free(client->env.items);
+                if (client->args) {
+                    for (size_t j = 0; j < client->args_count; j++) free(client->args[j]);
+                    free(client->args);
+                }
+                free(client->command);
+                free(client->transport_type);
+                free(client->server_id);
+                free(client);
+                return -1;
+            }
+            client->headers.items[i].value = strdup(headers[i].value);
+            if (!client->headers.items[i].value) {
+                free(client->headers.items[i].key);
+                for (size_t j = 0; j < i; j++) {
+                    free(client->headers.items[j].key);
+                    free(client->headers.items[j].value);
+                }
+                free(client->headers.items);
+                for (size_t j = 0; j < client->env.count; j++) {
+                    free(client->env.items[j].key);
+                    free(client->env.items[j].value);
+                }
+                free(client->env.items);
+                if (client->args) {
+                    for (size_t j = 0; j < client->args_count; j++) free(client->args[j]);
+                    free(client->args);
+                }
+                free(client->command);
+                free(client->transport_type);
+                free(client->server_id);
+                free(client);
+                return -1;
+            }
+        }
+    }
+
     client->connected = false;
     client->initialized = false;
     client->tools = NULL;
@@ -392,6 +466,16 @@ void mcp_manager_remove_client(MCPManager* mgr, const char* server_id) {
                 free(client->args[j]);
             }
             free(client->args);
+            for (size_t j = 0; j < client->env.count; j++) {
+                free(client->env.items[j].key);
+                free(client->env.items[j].value);
+            }
+            free(client->env.items);
+            for (size_t j = 0; j < client->headers.count; j++) {
+                free(client->headers.items[j].key);
+                free(client->headers.items[j].value);
+            }
+            free(client->headers.items);
             mcp_free_tools(client);
             mcp_free_resources(client);
             mcp_free_prompts(client);
@@ -436,7 +520,8 @@ Error mcp_manager_setup_from_config(MCPManager* mgr, MCPConfig* cfg, ToolRegistr
 
         int add_idx = mcp_manager_add_client(mgr, srv->server_id, srv->transport_type,
                                              srv->command, args, srv->args.count,
-                                             srv->env.items, srv->env.count);
+                                             srv->env.items, srv->env.count,
+                                             srv->headers.items, srv->headers.count);
         if (args) free(args);
         if (add_idx < 0) {
             log_error("[MCP] Failed to add server: %s", srv->server_id);
