@@ -192,28 +192,36 @@ Error tool_memory(void* user_data, const char* args_json, String* result) {
         return error_new(ERR_INVALID_PARAM, "Missing arguments: provide 'history_entry' and/or 'memory_update'");
     }
     
-    // Handle simple content (treat as fact)
+    bool facts_changed = false;
+
     if (content && !memory_update) {
         memory_add_fact(ctx->memory, content);
+        facts_changed = true;
     }
-    
-    // Handle history entry
-    if (history_entry) {
-        memory_add_history(ctx->memory, history_entry);
-    }
-    
-    // Handle memory update (full replacement/update of facts)
-    if (memory_update) {
 
-        string_free(&ctx->memory->memory_md);
-        ctx->memory->memory_md = string_new(memory_update);
+    if (history_entry) {
+        Error append_err = memory_append_history(ctx->memory, ctx->workspace, history_entry);
+        if (append_err.code != ERR_NONE) {
+            cJSON_Delete(json);
+            return append_err;
+        }
     }
-    
-    // Persist immediately
-    Error err = memory_save(ctx->memory, ctx->workspace);
-    if (err.code != ERR_NONE) {
-        cJSON_Delete(json);
-        return err;
+
+    if (memory_update) {
+        Error set_err = memory_set_facts(ctx->memory, memory_update);
+        if (set_err.code != ERR_NONE) {
+            cJSON_Delete(json);
+            return set_err;
+        }
+        facts_changed = true;
+    }
+
+    if (facts_changed) {
+        Error err = memory_save(ctx->memory, ctx->workspace);
+        if (err.code != ERR_NONE) {
+            cJSON_Delete(json);
+            return err;
+        }
     }
     
     *result = string_new("Memory consolidated/updated successfully");
@@ -473,6 +481,7 @@ Error tool_list_dir(void* user_data, const char* args_json, String* result) {
     }
     
     struct dirent* dir;
+    string_free(result);
     *result = string_new("");
     
     while ((dir = readdir(d)) != NULL) {
@@ -685,6 +694,7 @@ Error tool_web_search(void* user_data, const char* args_json, String* result) {
     }
     
     if (i == 1) {
+        string_free(result);
         *result = string_new("No results found.");
     }
     

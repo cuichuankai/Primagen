@@ -4,6 +4,7 @@
 #include "../include/common.h"
 #include "../include/message.h"
 #include "../include/config.h"
+#include <pthread.h>
 
 typedef struct {
     String memory_md; // Long-term facts
@@ -11,6 +12,7 @@ typedef struct {
     size_t max_tokens; // Maximum tokens before consolidation
     size_t current_tokens; // Current estimated token count
     double consolidation_threshold; // Threshold ratio for consolidation
+    pthread_mutex_t mutex;
 } Memory;
 
 // Functions
@@ -21,6 +23,8 @@ Error memory_load(Memory* mem, const char* workspace_path);
 Error memory_save(Memory* mem, const char* workspace_path);
 void memory_add_fact(Memory* mem, const char* fact);
 void memory_add_history(Memory* mem, const char* entry);
+Error memory_append_history(Memory* mem, const char* workspace_path, const char* entry);
+Error memory_set_facts(Memory* mem, const char* memory_update);
 
 // Token estimation and consolidation
 size_t memory_estimate_tokens(Memory* mem);

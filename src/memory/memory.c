@@ -2,9 +2,66 @@
 #include "../include/common.h"
 #include "../include/utils.h"
 #include <sys/stat.h>
+#include <ctype.h>
 
 #define DEFAULT_MAX_TOKENS 4000  // Maximum tokens before consolidation
 #define CONSOLIDATION_THRESHOLD 0.8  // Consolidate when 80% full
+
+static void append_history_buffer_unlocked(Memory* mem, const char* entry) {
+    char* new_data = malloc(mem->history_md.len + strlen(entry) + 2);
+    if (!new_data) return;
+    strcpy(new_data, mem->history_md.data);
+    strcat(new_data, entry);
+    strcat(new_data, "\n");
+    string_free(&mem->history_md);
+    mem->history_md = string_new(new_data);
+    free(new_data);
+    mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+}
+
+static bool fact_exists_unlocked(Memory* mem, const char* fact) {
+    size_t need = strlen(fact) + 4;
+    char* needle = malloc(need);
+    if (!needle) return false;
+    snprintf(needle, need, "- %s", fact);
+    bool exists = strstr(mem->memory_md.data, needle) != NULL;
+    free(needle);
+    return exists;
+}
+
+static void add_fact_unlocked(Memory* mem, const char* fact) {
+    if (!mem || !fact || fact[0] == '\0') return;
+    if (fact_exists_unlocked(mem, fact)) return;
+    const char* section = "## Important Notes";
+    char* pos = strstr(mem->memory_md.data, section);
+    size_t insert_idx = mem->memory_md.len;
+    if (pos) {
+        pos += strlen(section);
+        char* next = strstr(pos, "\n## ");
+        if (next) {
+            insert_idx = (size_t)(next - mem->memory_md.data);
+        }
+    }
+    size_t fact_len = strlen(fact);
+    bool need_newline = (insert_idx > 0 && mem->memory_md.data[insert_idx - 1] != '\n');
+    size_t new_total_len = mem->memory_md.len + fact_len + 20;
+    char* new_data = malloc(new_total_len);
+    if (!new_data) return;
+    if (insert_idx > 0) {
+        memcpy(new_data, mem->memory_md.data, insert_idx);
+    }
+    new_data[insert_idx] = '\0';
+    if (need_newline) strcat(new_data, "\n");
+    strcat(new_data, "- ");
+    strcat(new_data, fact);
+    strcat(new_data, "\n");
+    if (insert_idx < mem->memory_md.len) {
+        strcat(new_data, mem->memory_md.data + insert_idx);
+    }
+    string_free(&mem->memory_md);
+    mem->memory_md = string_new(new_data);
+    free(new_data);
+}
 
 Memory* memory_new() {
     return memory_new_with_config(NULL);
@@ -21,11 +78,13 @@ Memory* memory_new_with_config(Config* config) {
     mem->current_tokens = 0;
     mem->consolidation_threshold = config && config->agent.memory_consolidation_threshold > 0
                                    ? config->agent.memory_consolidation_threshold : CONSOLIDATION_THRESHOLD;
+    pthread_mutex_init(&mem->mutex, NULL);
     return mem;
 }
 
 void memory_free(Memory* mem) {
     if (!mem) return;
+    pthread_mutex_destroy(&mem->mutex);
     string_free(&mem->memory_md);
     string_free(&mem->history_md);
     free(mem);
@@ -35,7 +94,9 @@ Error memory_load(Memory* mem, const char* workspace_path) {
     char path[512];
     FILE* f;
     
-    // Ensure memory directory exists
+    if (!mem || !workspace_path) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
+    pthread_mutex_lock(&mem->mutex);
+
     snprintf(path, sizeof(path), "%s/memory", workspace_path);
     mkdir(path, 0755);
 
@@ -62,6 +123,7 @@ Error memory_load(Memory* mem, const char* workspace_path) {
         if (f) {
             fputs(default_mem, f);
             fclose(f);
+            string_free(&mem->memory_md);
             mem->memory_md = string_new(default_mem);
         }
     }
@@ -82,12 +144,18 @@ Error memory_load(Memory* mem, const char* workspace_path) {
             free(buf);
         }
         fclose(f);
+    } else {
+        string_free(&mem->history_md);
+        mem->history_md = string_new("");
     }
-    
+    mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    pthread_mutex_unlock(&mem->mutex);
     return error_new(ERR_NONE, "");
 }
 
 Error memory_save(Memory* mem, const char* workspace_path) {
+    if (!mem || !workspace_path) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
+    pthread_mutex_lock(&mem->mutex);
     char path[512];
     FILE* f;
     
@@ -98,88 +166,75 @@ Error memory_save(Memory* mem, const char* workspace_path) {
     // Save MEMORY.md
     snprintf(path, sizeof(path), "%s/memory/MEMORY.md", workspace_path);
     f = fopen(path, "w");
-    if (!f) return error_new(ERR_FILE, "Cannot save MEMORY.md");
+    if (!f) {
+        pthread_mutex_unlock(&mem->mutex);
+        return error_new(ERR_FILE, "Cannot save MEMORY.md");
+    }
     fwrite(mem->memory_md.data, 1, mem->memory_md.len, f);
     fclose(f);
     
     // Save HISTORY.md
     snprintf(path, sizeof(path), "%s/memory/HISTORY.md", workspace_path);
     f = fopen(path, "w");
-    if (!f) return error_new(ERR_FILE, "Cannot save HISTORY.md");
+    if (!f) {
+        pthread_mutex_unlock(&mem->mutex);
+        return error_new(ERR_FILE, "Cannot save HISTORY.md");
+    }
     fwrite(mem->history_md.data, 1, mem->history_md.len, f);
     fclose(f);
-    
+    pthread_mutex_unlock(&mem->mutex);
     return error_new(ERR_NONE, "");
 }
 
 void memory_add_fact(Memory* mem, const char* fact) {
-    const char* section = "## Important Notes";
-    char* pos = strstr(mem->memory_md.data, section);
-    
-    // Default to appending at the end
-    size_t insert_idx = mem->memory_md.len;
-    
-    if (pos) {
-        // Move pos to end of section header
-        pos += strlen(section);
-        
-        // Find next section
-        char* next = strstr(pos, "\n## ");
-        if (next) {
-            insert_idx = next - mem->memory_md.data;
-        }
-    }
-    
-    // Calculate lengths
-    size_t fact_len = strlen(fact);
-    // Determine padding needed before fact
-    bool need_newline = (insert_idx > 0 && mem->memory_md.data[insert_idx-1] != '\n');
-    
-    // Total new length: original + padding + "\n- " + fact + "\n" + null
-    // Padding: 1 char if needed
-    // "\n- ": 3 chars (or "- " if already newlined)
-    // "\n": 1 char (trailing)
-    // Safety margin: 10
-    size_t new_total_len = mem->memory_md.len + fact_len + 20;
-    
-    char* new_data = malloc(new_total_len);
-    if (!new_data) return;
-    
-    // Copy prefix
-    if (insert_idx > 0) {
-        memcpy(new_data, mem->memory_md.data, insert_idx);
-    }
-    new_data[insert_idx] = '\0';
-    
-    // Append fact
-    if (need_newline) strcat(new_data, "\n");
-    strcat(new_data, "- ");
-    strcat(new_data, fact);
-    strcat(new_data, "\n");
-    
-    // Append suffix (rest of the file)
-    if (insert_idx < mem->memory_md.len) {
-        strcat(new_data, mem->memory_md.data + insert_idx);
-    }
-    
-    string_free(&mem->memory_md);
-    mem->memory_md = string_new(new_data);
-    free(new_data);
+    if (!mem || !fact || fact[0] == '\0') return;
+    pthread_mutex_lock(&mem->mutex);
+    add_fact_unlocked(mem, fact);
+    mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    pthread_mutex_unlock(&mem->mutex);
 }
 
 void memory_add_history(Memory* mem, const char* entry) {
-    // Append to history_md
-    char* new_data = malloc(mem->history_md.len + strlen(entry) + 2);
-    if (!new_data) return;  // Memory allocation failed, silently skip
-    strcpy(new_data, mem->history_md.data);
-    strcat(new_data, entry);
-    strcat(new_data, "\n");
-    string_free(&mem->history_md);
-    mem->history_md = string_new(new_data);
-    free(new_data);
+    if (!mem || !entry) return;
+    pthread_mutex_lock(&mem->mutex);
+    append_history_buffer_unlocked(mem, entry);
+    pthread_mutex_unlock(&mem->mutex);
+}
 
-    // Update token count
-    mem->current_tokens = memory_estimate_tokens(mem);
+Error memory_append_history(Memory* mem, const char* workspace_path, const char* entry) {
+    if (!mem || !workspace_path || !entry) {
+        return error_new(ERR_INVALID_PARAM, "Invalid arguments");
+    }
+
+    pthread_mutex_lock(&mem->mutex);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/memory", workspace_path);
+    mkdir(path, 0755);
+
+    snprintf(path, sizeof(path), "%s/memory/HISTORY.md", workspace_path);
+    FILE* f = fopen(path, "a");
+    if (!f) {
+        pthread_mutex_unlock(&mem->mutex);
+        return error_new(ERR_FILE, "Cannot append HISTORY.md");
+    }
+
+    fputs(entry, f);
+    fputs("\n", f);
+    fclose(f);
+
+    append_history_buffer_unlocked(mem, entry);
+    pthread_mutex_unlock(&mem->mutex);
+    return error_new(ERR_NONE, "");
+}
+
+Error memory_set_facts(Memory* mem, const char* memory_update) {
+    if (!mem || !memory_update) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
+    pthread_mutex_lock(&mem->mutex);
+    string_free(&mem->memory_md);
+    mem->memory_md = string_new(memory_update);
+    mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    pthread_mutex_unlock(&mem->mutex);
+    return error_new(ERR_NONE, "");
 }
 
 /**
@@ -187,7 +242,10 @@ void memory_add_history(Memory* mem, const char* entry) {
  */
 size_t memory_estimate_tokens(Memory* mem) {
     if (!mem) return 0;
-    return estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    pthread_mutex_lock(&mem->mutex);
+    size_t t = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    pthread_mutex_unlock(&mem->mutex);
+    return t;
 }
 
 /**
@@ -195,11 +253,12 @@ size_t memory_estimate_tokens(Memory* mem) {
  */
 int memory_needs_consolidation(Memory* mem) {
     if (!mem) return 0;
-
-    size_t current = memory_estimate_tokens(mem);
+    pthread_mutex_lock(&mem->mutex);
+    size_t current = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
     mem->current_tokens = current;
-
-    return current > (mem->max_tokens * mem->consolidation_threshold);
+    int needed = current > (mem->max_tokens * mem->consolidation_threshold);
+    pthread_mutex_unlock(&mem->mutex);
+    return needed;
 }
 
 /**
@@ -208,18 +267,17 @@ int memory_needs_consolidation(Memory* mem) {
  */
 Error memory_consolidate(Memory* mem, const char* workspace_path) {
     if (!mem || !workspace_path) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
-
-    // Check if consolidation is needed
-    if (!memory_needs_consolidation(mem)) {
+    pthread_mutex_lock(&mem->mutex);
+    size_t current = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    mem->current_tokens = current;
+    if (!(current > (mem->max_tokens * mem->consolidation_threshold))) {
+        pthread_mutex_unlock(&mem->mutex);
         return error_new(ERR_NONE, "");
     }
 
-    // Simple consolidation: keep only recent history
-    // Find the last N entries (by counting newlines)
     const char* data = mem->history_md.data;
     size_t len = mem->history_md.len;
 
-    // Keep last 5 entries (count newlines)
     int entries_to_keep = 5;
     const char* cut_pos = data + len;
     int newline_count = 0;
@@ -231,9 +289,17 @@ Error memory_consolidate(Memory* mem, const char* workspace_path) {
         }
     }
 
-    // Create consolidated history
+    size_t old_len = (cut_pos > data) ? (size_t)(cut_pos - data) : 0;
+    char* old_part = NULL;
+    if (old_len > 0) {
+        old_part = malloc(old_len + 1);
+        if (old_part) {
+            memcpy(old_part, data, old_len);
+            old_part[old_len] = '\0';
+        }
+    }
+
     if (cut_pos > data) {
-        // Add consolidation marker
         const char* marker = "\n\n[Previous history consolidated to save space]\n";
         size_t marker_len = strlen(marker);
         size_t remaining_len = len - (cut_pos - data);
@@ -248,7 +314,48 @@ Error memory_consolidate(Memory* mem, const char* workspace_path) {
             free(new_history);
         }
     }
-
-    // Save consolidated memory
-    return memory_save(mem, workspace_path);
+    if (old_part) {
+            char* line = strtok(old_part, "\n");
+            int added = 0;
+            while (line && added < 5) {
+                while (*line && isspace((unsigned char)*line)) line++;
+                if (*line != '\0' && strstr(line, "consolidated to save space") == NULL) {
+                    const char* fact = line;
+                    if (line[0] == '[') {
+                        char* after = strchr(line, ']');
+                        if (after && after[1] == ' ') fact = after + 2;
+                    }
+                    if (*fact != '\0' && !fact_exists_unlocked(mem, fact)) {
+                        add_fact_unlocked(mem, fact);
+                        added++;
+                    }
+                }
+                line = strtok(NULL, "\n");
+            }
+        free(old_part);
+    }
+    mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    char mem_copy[512];
+    snprintf(mem_copy, sizeof(mem_copy), "%s/memory", workspace_path);
+    mkdir(mem_copy, 0755);
+    char memory_file[512];
+    snprintf(memory_file, sizeof(memory_file), "%s/memory/MEMORY.md", workspace_path);
+    FILE* f1 = fopen(memory_file, "w");
+    if (!f1) {
+        pthread_mutex_unlock(&mem->mutex);
+        return error_new(ERR_FILE, "Cannot save MEMORY.md");
+    }
+    fwrite(mem->memory_md.data, 1, mem->memory_md.len, f1);
+    fclose(f1);
+    char history_file[512];
+    snprintf(history_file, sizeof(history_file), "%s/memory/HISTORY.md", workspace_path);
+    FILE* f2 = fopen(history_file, "w");
+    if (!f2) {
+        pthread_mutex_unlock(&mem->mutex);
+        return error_new(ERR_FILE, "Cannot save HISTORY.md");
+    }
+    fwrite(mem->history_md.data, 1, mem->history_md.len, f2);
+    fclose(f2);
+    pthread_mutex_unlock(&mem->mutex);
+    return error_new(ERR_NONE, "");
 }

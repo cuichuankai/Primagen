@@ -110,16 +110,28 @@ Error session_manager_save(SessionManager* mgr, Session* session) {
     for (size_t i = 0; i < session->messages.count; i++) {
         Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
 
-        // Skip saving tool calls/results to persistent session file to keep history clean
-        // We only save User and Assistant messages (with content)
-        if (msg->role == ROLE_TOOL) continue;
-        if (msg->role == ROLE_ASSISTANT && msg->tool_calls_count > 0 && msg->content.len == 0) continue;
-
         // Use cJSON to properly escape content
         cJSON* msg_obj = cJSON_CreateObject();
-        cJSON_AddStringToObject(msg_obj, "role", msg->role == ROLE_USER ? "user" : "assistant");
+        if (msg->role == ROLE_USER) cJSON_AddStringToObject(msg_obj, "role", "user");
+        else if (msg->role == ROLE_ASSISTANT) cJSON_AddStringToObject(msg_obj, "role", "assistant");
+        else cJSON_AddStringToObject(msg_obj, "role", "tool");
         cJSON_AddStringToObject(msg_obj, "content", msg->content.data);
         cJSON_AddStringToObject(msg_obj, "timestamp", msg->timestamp.data);
+        if (msg->role == ROLE_ASSISTANT && msg->tool_calls_count > 0) {
+            cJSON* tcs = cJSON_CreateArray();
+            for (size_t j = 0; j < msg->tool_calls_count; j++) {
+                cJSON* tc = cJSON_CreateObject();
+                cJSON_AddStringToObject(tc, "id", msg->tool_calls[j].id.data);
+                cJSON_AddStringToObject(tc, "name", msg->tool_calls[j].name.data);
+                cJSON_AddStringToObject(tc, "arguments", msg->tool_calls[j].arguments.data);
+                cJSON_AddItemToArray(tcs, tc);
+            }
+            cJSON_AddItemToObject(msg_obj, "tool_calls", tcs);
+        }
+        if (msg->role == ROLE_TOOL) {
+            if (msg->tool_call_id.len > 0) cJSON_AddStringToObject(msg_obj, "tool_call_id", msg->tool_call_id.data);
+            if (msg->name.len > 0) cJSON_AddStringToObject(msg_obj, "name", msg->name.data);
+        }
 
         char* msg_json = cJSON_PrintUnformatted(msg_obj);
         if (msg_json) {
@@ -180,15 +192,9 @@ Error session_manager_load(SessionManager* mgr, const char* key, Session** sessi
         cJSON* role_item = cJSON_GetObjectItem(json, "role");
         cJSON* content_item = cJSON_GetObjectItem(json, "content");
 
-        if (cJSON_IsString(role_item) && cJSON_IsString(content_item)) {
+        if (cJSON_IsString(role_item) && (cJSON_IsString(content_item) || cJSON_IsNull(content_item))) {
             char* role_str = role_item->valuestring;
-            char* content_str = content_item->valuestring;
-
-            // Skip empty content to clean up bad history
-            if (strlen(content_str) == 0) {
-                cJSON_Delete(json);
-                continue;
-            }
+            const char* content_str = cJSON_IsString(content_item) ? content_item->valuestring : "";
 
             MessageRole role = ROLE_USER;
             if (strcmp(role_str, "assistant") == 0) role = ROLE_ASSISTANT;
@@ -201,6 +207,32 @@ Error session_manager_load(SessionManager* mgr, const char* key, Session** sessi
             if (cJSON_IsString(ts_item)) {
                 string_free(&msg->timestamp);
                 msg->timestamp = string_new(ts_item->valuestring);
+            }
+            if (role == ROLE_ASSISTANT) {
+                cJSON* tcs = cJSON_GetObjectItem(json, "tool_calls");
+                if (cJSON_IsArray(tcs)) {
+                    int tc_count = cJSON_GetArraySize(tcs);
+                    for (int i = 0; i < tc_count; i++) {
+                        cJSON* tc = cJSON_GetArrayItem(tcs, i);
+                        cJSON* id_item = cJSON_GetObjectItem(tc, "id");
+                        cJSON* name_item = cJSON_GetObjectItem(tc, "name");
+                        cJSON* args_item = cJSON_GetObjectItem(tc, "arguments");
+                        if (cJSON_IsString(id_item) && cJSON_IsString(name_item) && cJSON_IsString(args_item)) {
+                            message_add_tool_call(msg, id_item->valuestring, name_item->valuestring, args_item->valuestring);
+                        }
+                    }
+                }
+            } else if (role == ROLE_TOOL) {
+                cJSON* tcid_item = cJSON_GetObjectItem(json, "tool_call_id");
+                if (cJSON_IsString(tcid_item)) {
+                    string_free(&msg->tool_call_id);
+                    msg->tool_call_id = string_new(tcid_item->valuestring);
+                }
+                cJSON* name_item = cJSON_GetObjectItem(json, "name");
+                if (cJSON_IsString(name_item)) {
+                    string_free(&msg->name);
+                    msg->name = string_new(name_item->valuestring);
+                }
             }
 
             session_add_message(session, msg);

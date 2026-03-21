@@ -39,6 +39,77 @@ static void send_error_response(AgentLoop* loop, const char* channel, const char
     message_bus_send_outbound(loop->bus, outbound);
 }
 
+static bool agent_loop_is_running(AgentLoop* loop) {
+    bool running = false;
+    pthread_mutex_lock(&loop->state_mutex);
+    running = loop->running;
+    pthread_mutex_unlock(&loop->state_mutex);
+    return running;
+}
+
+static void agent_loop_set_running(AgentLoop* loop, bool running) {
+    pthread_mutex_lock(&loop->state_mutex);
+    loop->running = running;
+    pthread_mutex_unlock(&loop->state_mutex);
+}
+
+static void maybe_auto_consolidate_memory(AgentLoop* loop, Session* session, const char* session_key, const char* latest_user_content) {
+    if (!loop || !session || !loop->ctx_builder || !loop->ctx_builder->memory) return;
+
+    size_t memory_window = 100;
+    if (loop->config && loop->config->agent.memory_window > 0) {
+        memory_window = (size_t) loop->config->agent.memory_window;
+    }
+
+    if (session->messages.count < session->last_consolidated) {
+        session->last_consolidated = session->messages.count;
+    }
+
+    size_t delta = session->messages.count - session->last_consolidated;
+    if (delta < memory_window) return;
+
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", tm_info);
+
+    char latest_excerpt[256] = {0};
+    if (latest_user_content && latest_user_content[0] != '\0') {
+        size_t n = strlen(latest_user_content);
+        if (n > 220) n = 220;
+        for (size_t i = 0; i < n; i++) {
+            char c = latest_user_content[i];
+            latest_excerpt[i] = (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
+        }
+        latest_excerpt[n] = '\0';
+    } else {
+        strcpy(latest_excerpt, "(empty)");
+    }
+
+    char history_entry[1024];
+    snprintf(history_entry, sizeof(history_entry),
+             "[%s] Auto consolidation for session %s: archived %zu messages since index %zu. Latest user message: %s",
+             ts, session_key, delta, session->last_consolidated, latest_excerpt);
+
+    Error append_err = memory_append_history(loop->ctx_builder->memory, loop->workspace_path, history_entry);
+    if (append_err.code != ERR_NONE) {
+        log_error("[AgentLoop] Auto memory append failed: %s", append_err.message);
+        return;
+    }
+
+    Error consolidate_err = memory_consolidate(loop->ctx_builder->memory, loop->workspace_path);
+    if (consolidate_err.code != ERR_NONE) {
+        log_error("[AgentLoop] Auto memory consolidate failed: %s", consolidate_err.message);
+        return;
+    }
+
+    session->last_consolidated = session->messages.count;
+    Error save_err = session_manager_save(loop->session_mgr, session);
+    if (save_err.code != ERR_NONE) {
+        log_error("[AgentLoop] Failed to persist session consolidation cursor: %s", save_err.message);
+    }
+}
+
 /* =============================================================================
    Built-in Commands - Follow CommandFunc signature exactly
    Context passed via argv: [loop, session_key, channel, chat_id, bus, ...user_args]
@@ -330,6 +401,7 @@ AgentLoop* agent_loop_new(SessionManager* session_mgr, ContextBuilder* ctx_build
     loop->active_tasks = NULL;
     loop->current_session_key[0] = '\0';
     pthread_mutex_init(&loop->task_mutex, NULL);
+    pthread_mutex_init(&loop->state_mutex, NULL);
 
     log_debug("[AgentLoop] Created new instance");
     return loop;
@@ -353,6 +425,7 @@ void agent_loop_free(AgentLoop* loop) {
     pthread_mutex_unlock(&loop->task_mutex);
 
     pthread_mutex_destroy(&loop->task_mutex);
+    pthread_mutex_destroy(&loop->state_mutex);
     log_debug("[AgentLoop] Freed instance");
     free(loop);
 }
@@ -365,7 +438,7 @@ void agent_loop_set_llm_provider(AgentLoop* loop, LLMProvider provider) {
 
 void agent_loop_stop(AgentLoop* loop) {
     if (!loop) return;
-    loop->running = false;
+    agent_loop_set_running(loop, false);
     log_debug("[AgentLoop] Stop requested");
 }
 
@@ -664,7 +737,9 @@ static void add_active_task(AgentLoop* loop, const char* task_id, const char* se
     ActiveTaskNode* node = malloc(sizeof(ActiveTaskNode));
     if (node) {
         strncpy(node->task_id, task_id, sizeof(node->task_id) - 1);
+        node->task_id[sizeof(node->task_id) - 1] = '\0';
         strncpy(node->session_key, session_key, sizeof(node->session_key) - 1);
+        node->session_key[sizeof(node->session_key) - 1] = '\0';
         node->thread = thread;
         node->cancelling = false;
         node->next = loop->active_tasks;
@@ -731,7 +806,7 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
 
     log_debug("[AgentLoop] Processing message for session: %s", key);
 
-    while (!conversation_turn_done && turn < max_turns && loop->running) {
+    while (!conversation_turn_done && turn < max_turns && agent_loop_is_running(loop)) {
         turn++;
         log_debug("[AgentLoop] Turn %d/%d", turn, max_turns);
 
@@ -857,10 +932,10 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
    ============================================================================= */
 
 void agent_loop_run(AgentLoop* loop) {
-    loop->running = true;
+    agent_loop_set_running(loop, true);
     log_debug("[AgentLoop] Started");
 
-    while (loop->running) {
+    while (agent_loop_is_running(loop)) {
         InboundMessage* inbound = message_bus_receive_inbound(loop->bus);
         if (!inbound) {
             usleep(100000);
@@ -869,7 +944,7 @@ void agent_loop_run(AgentLoop* loop) {
 
         if (strcmp(inbound->channel.data, "system") == 0 && strcmp(inbound->content.data, "exit") == 0) {
             log_debug("[AgentLoop] System exit received, shutting down");
-            loop->running = false;
+            agent_loop_set_running(loop, false);
             inbound_message_free(inbound);
             break;
         }
@@ -906,6 +981,7 @@ void agent_loop_run(AgentLoop* loop) {
 
         Message* user_msg = message_new(ROLE_USER, inbound->content.data);
         session_add_message(session, user_msg);
+        maybe_auto_consolidate_memory(loop, session, key, inbound->content.data);
 
         char task_id[32];
         snprintf(task_id, sizeof(task_id), "task_%ld", time(NULL));

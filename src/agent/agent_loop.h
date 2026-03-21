@@ -42,6 +42,7 @@ struct AgentLoop {
 
     // Task tracking
     pthread_mutex_t task_mutex;
+    pthread_mutex_t state_mutex;
     ActiveTaskNode* active_tasks;
     char current_session_key[256];  // For /stop command
 };
