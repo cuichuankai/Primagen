@@ -338,6 +338,11 @@ void plugin_manager_unload_plugin(PluginManager* manager, LoadedPlugin* plugin) 
 int plugin_manager_reload_plugin(PluginManager* manager, const char* plugin_id) {
     if (!manager || !plugin_id) return -1;
 
+    PluginInitFunc init_fn = NULL;
+    PluginCleanupFunc cleanup_fn = NULL;
+    void* handle = NULL;
+    const char* path = NULL;
+
     pthread_mutex_lock(&manager->lock);
 
     // Find the plugin
@@ -358,8 +363,9 @@ int plugin_manager_reload_plugin(PluginManager* manager, const char* plugin_id) 
     log_debug("[PluginManager] Reloading plugin: %s", plugin->name);
 
     // Call cleanup
-    if (plugin->cleanup) {
-        plugin->cleanup();
+    cleanup_fn = plugin->cleanup;
+    if (cleanup_fn) {
+        cleanup_fn();
     }
 
     // Close and reopen
@@ -386,16 +392,29 @@ int plugin_manager_reload_plugin(PluginManager* manager, const char* plugin_id) 
     }
 
     // Re-initialize
-    if (plugin->init) {
-        int ret = plugin->init(manager, NULL);
+    init_fn = plugin->init;
+    handle = plugin->handle;
+    path = plugin->path;
+
+    pthread_mutex_unlock(&manager->lock);
+
+    if (init_fn) {
+        int ret = init_fn(manager, NULL);
         if (ret != 0) {
-            log_error("[PluginManager] Plugin re-init failed: %s", plugin->path);
+            log_error("[PluginManager] Plugin re-init failed: %s", path ? path : "(unknown)");
+            pthread_mutex_lock(&manager->lock);
+            for (LoadedPlugin* p = manager->plugins; p; p = p->next) {
+                if (p == plugin && p->handle == handle) {
+                    dlclose(p->handle);
+                    p->handle = NULL;
+                    break;
+                }
+            }
             pthread_mutex_unlock(&manager->lock);
             return -1;
         }
     }
 
-    pthread_mutex_unlock(&manager->lock);
     log_debug("[PluginManager] Plugin reloaded: %s", plugin->name);
     return 0;
 }

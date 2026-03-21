@@ -182,12 +182,6 @@ static void* subagent_task_runner(void* arg) {
     tool_registry_register(task_data->tool_reg, "exec", "Execute shell command",
         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}",
         tool_exec, &tool_ctx);
-    tool_registry_register(task_data->tool_reg, "web_search", "Search the web",
-        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}},\"required\":[\"query\"]}",
-        tool_web_search, &tool_ctx);
-    tool_registry_register(task_data->tool_reg, "web_fetch", "Fetch URL content",
-        "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}",
-        tool_web_fetch, &tool_ctx);
     tool_registry_register(task_data->tool_reg, "send_message", "Send message to user",
         "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"}},\"required\":[\"content\"]}",
         tool_send_message, &tool_ctx);

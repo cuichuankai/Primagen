@@ -196,9 +196,14 @@ Config* config_create() {
     cfg->heartbeat.interval_s = 300;
 
     // Allocate plugins on heap (not stack!) so they persist after function returns
-    cfg->plugins.items = malloc(2 * sizeof(PluginConfig));
-    cfg->plugins.count = 2;
-    cfg->plugins.capacity = 2;
+    cfg->plugins.items = malloc(3 * sizeof(PluginConfig));
+    if (!cfg->plugins.items) {
+        cfg->plugins.count = 0;
+        cfg->plugins.capacity = 0;
+        return cfg;
+    }
+    cfg->plugins.count = 3;
+    cfg->plugins.capacity = 3;
 
     cfg->plugins.items[0].plugin_id = strdup("feishu_channel");
     cfg->plugins.items[0].enabled = false;
@@ -215,6 +220,13 @@ Config* config_create() {
     cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientSecret", "");
     cJSON_AddBoolToObject(cfg->plugins.items[1].config, "use_card", false);
     cJSON_AddNullToObject(cfg->plugins.items[1].config, "allow_from");
+
+    cfg->plugins.items[2].plugin_id = strdup("web_tools");
+    cfg->plugins.items[2].enabled = true;
+    cfg->plugins.items[2].config = cJSON_CreateObject();
+    cJSON_AddBoolToObject(cfg->plugins.items[2].config, "search_enabled", true);
+    cJSON_AddStringToObject(cfg->plugins.items[2].config, "search_api_key", "");
+    cJSON_AddStringToObject(cfg->plugins.items[2].config, "proxy", "");
 
     // Default log config
     cfg->log.level = strdup("INFO");
@@ -567,7 +579,15 @@ void config_load_from_env(Config* cfg) {
     if (env_web_proxy) { free(cfg->tools.web.proxy); cfg->tools.web.proxy = strdup(env_web_proxy); }
 
     const char* env_search_api_key = get_env_string("PRIMAGEN_TOOLS_WEB_SEARCH_API_KEY", NULL);
-    if (env_search_api_key) { free(cfg->tools.web.search.api_key); cfg->tools.web.search.api_key = strdup(env_search_api_key); }
+    if (env_search_api_key) {
+        free(cfg->tools.web.search.api_key);
+        cfg->tools.web.search.api_key = strdup(env_search_api_key);
+        PluginConfig* web_tools = config_get_plugin_config(cfg, "web_tools");
+        if (web_tools && web_tools->config) {
+            cJSON_DeleteItemFromObject(web_tools->config, "search_api_key");
+            cJSON_AddStringToObject(web_tools->config, "search_api_key", env_search_api_key);
+        }
+    }
 
     // Heartbeat config - PRIMAGEN_HEARTBEAT_*
     const char* env_hb_enabled = get_env_string("PRIMAGEN_HEARTBEAT_ENABLED", NULL);

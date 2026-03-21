@@ -34,10 +34,6 @@ Error tool_list_dir(void* user_data, const char* args_json, String* result);
 // Shell tool
 Error tool_exec(void* user_data, const char* args_json, String* result);
 
-// Web tools
-Error tool_web_search(void* user_data, const char* args_json, String* result);
-Error tool_web_fetch(void* user_data, const char* args_json, String* result);
-
 // Message tool
 Error tool_send_message(void* user_data, const char* args_json, String* result);
 

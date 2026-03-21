@@ -362,8 +362,6 @@ extern Error tool_write_file(void* user_data, const char* args_json, String* res
 extern Error tool_edit_file(void* user_data, const char* args_json, String* result);
 extern Error tool_list_dir(void* user_data, const char* args_json, String* result);
 extern Error tool_exec(void* user_data, const char* args_json, String* result);
-extern Error tool_web_search(void* user_data, const char* args_json, String* result);
-extern Error tool_web_fetch(void* user_data, const char* args_json, String* result);
 extern Error tool_send_message(void* user_data, const char* args_json, String* result);
 extern Error tool_spawn(void* user_data, const char* args_json, String* result);
 extern Error tool_cron(void* user_data, const char* args_json, String* result);
@@ -484,15 +482,6 @@ void agent_loop_register_builtin_tools(PluginManager* manager, ToolContext* ctx)
         log_error("[AgentLoop] Invalid parameters for agent_loop_register_builtin_tools");
         return;
     }
-/*
-
-        {"web_search", "Search the web",
-            "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}},\"required\":[\"query\"]}",
-            tool_web_search},
-        {"web_fetch", "Fetch URL content",
-            "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}",
-            tool_web_fetch},
-*/
     // Define builtin tools at runtime (user_data is runtime context)
     struct {
         const char* name;

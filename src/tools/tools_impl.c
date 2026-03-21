@@ -2,7 +2,6 @@
 #include "tool_validation.h"
 #include "../vendor/cJSON/cJSON.h"
 #include "../bus/message_bus.h"
-#include "../vendor/mongoose/mongoose.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,39 +9,12 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <dirent.h>
-#include <ctype.h>
 
 #define MAX_READ_SIZE 128000
 #define TOOL_CONTEXT_MAGIC 0x50474E31
 
 // Error hint for tool failures (helps LLM recover)
 #define TOOL_ERROR_HINT "\n\n[Analyze the error above and try a different approach.]"
-
-// Helper struct for mongoose response
-struct MemoryStruct {
-    char *memory;
-    size_t size;
-    bool done;
-};
-
-static void fn(struct mg_connection *c, int ev, void *ev_data) {
-  struct MemoryStruct *ms = (struct MemoryStruct *) c->fn_data;
-  if (ev == MG_EV_HTTP_MSG) {
-    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    size_t new_size = ms->size + hm->body.len;
-    ms->memory = realloc(ms->memory, new_size + 1);
-    // mongoose 7.x uses buf/len for mg_str but some versions use ptr.
-    // Let's check mongoose.h. It seems to be 'buf' or 'ptr' depending on version.
-    // If 'ptr' error, likely it is 'buf' (const char* buf).
-    memcpy(ms->memory + ms->size, hm->body.buf, hm->body.len);
-    ms->size = new_size;
-    ms->memory[ms->size] = '\0';
-    c->is_closing = 1;
-    ms->done = true;
-  } else if (ev == MG_EV_ERROR) {
-      ms->done = true;
-  }
-}
 
 // Helper to get string from JSON
 static char* get_json_string(cJSON* root, const char* key) {
@@ -51,14 +23,6 @@ static char* get_json_string(cJSON* root, const char* key) {
         return item->valuestring;
     }
     return NULL;
-}
-
-static int get_json_int(cJSON* root, const char* key, int default_val) {
-    cJSON* item = cJSON_GetObjectItem(root, key);
-    if (cJSON_IsNumber(item)) {
-        return item->valueint;
-    }
-    return default_val;
 }
 
 static bool is_placeholder_value(const char* s) {
@@ -152,22 +116,6 @@ static void ensure_dir(const char* path) {
         }
         mkdir(tmp, 0755);
     }
-}
-
-// Simple HTML strip tags
-static void strip_tags(char* src, char* dst) {
-    int in_tag = 0;
-    while (*src) {
-        if (*src == '<') {
-            in_tag = 1;
-        } else if (*src == '>') {
-            in_tag = 0;
-        } else if (!in_tag) {
-            *dst++ = *src;
-        }
-        src++;
-    }
-    *dst = 0;
 }
 
 // --- Tools Implementation ---
@@ -569,204 +517,6 @@ Error tool_exec(void* user_data, const char* args_json, String* result) {
     }
     string_append(result, status_str);
 
-    cJSON_Delete(json);
-    return error_new(ERR_NONE, "");
-}
-
-Error tool_web_search(void* user_data, const char* args_json, String* result) {
-    (void)user_data;
-    cJSON* json = cJSON_Parse(args_json);
-    if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
-
-    char* query = get_json_string(json, "query");
-    int count = get_json_int(json, "count", 5);
-    if (count < 1) count = 1;
-    if (count > 10) count = 10;
-
-    if (!query) {
-        cJSON_Delete(json);
-        return error_new(ERR_INVALID_PARAM, "Missing 'query' argument");
-    }
-
-    const char* api_key = getenv("BRAVE_API_KEY");
-    if (!api_key) {
-        cJSON_Delete(json);
-        return error_new(ERR_INVALID_PARAM, "BRAVE_API_KEY not set");
-    }
-
-    struct mg_mgr mgr;
-    struct MemoryStruct chunk = {0};
-    chunk.memory = malloc(1);
-    if (!chunk.memory) {
-        cJSON_Delete(json);
-        return error_new(ERR_MEMORY, "Memory allocation failed");
-    }
-    chunk.memory[0] = '\0';
-
-    mg_mgr_init(&mgr);
-
-    char url[1024];
-    // Simple URL encoding manually or use mg_url_encode if available, 
-    // but mongoose doesn't expose a simple string encode helper easily.
-    // Let's just put query as is for now or implement simple encoder.
-    // Actually, Brave API expects query param.
-    // We should encode spaces at least.
-    
-    // Quick and dirty URL encoder for spaces
-    char encoded_query[2048] = {0};
-    size_t qlen = strlen(query);
-    size_t eidx = 0;
-    for (size_t i=0; i<qlen && eidx < sizeof(encoded_query)-4; i++) {
-        if (isalnum(query[i]) || query[i] == '-' || query[i] == '_' || query[i] == '.' || query[i] == '~') {
-            encoded_query[eidx++] = query[i];
-        } else {
-            snprintf(encoded_query + eidx, 4, "%%%02X", (unsigned char)query[i]);
-            eidx += 3;
-        }
-    }
-    
-    snprintf(url, sizeof(url), "https://api.search.brave.com/res/v1/web/search?q=%s&count=%d", encoded_query, count);
-    
-    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
-    if (!c) {
-        cJSON_Delete(json);
-        mg_mgr_free(&mgr);
-        free(chunk.memory);
-        return error_new(ERR_NETWORK, "Failed to connect to Search provider");
-    }
-    
-    // struct mg_tls_opts opts = {0};
-    // opts.ca = mg_str("ca.pem");
-
-    struct mg_str host = mg_url_host(url);
-    mg_printf(c, 
-        "GET %s HTTP/1.0\r\n"
-        "Host: %.*s\r\n"
-        "Accept: application/json\r\n"
-        "X-Subscription-Token: %s\r\n"
-        "\r\n",
-        mg_url_uri(url), 
-        (int)host.len, host.buf,
-        api_key
-    );
-
-    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
-    mg_mgr_free(&mgr);
-    
-    if (chunk.size == 0) {
-        free(chunk.memory);
-        cJSON_Delete(json);
-        return error_new(ERR_NETWORK, "Empty response from Search provider");
-    }
-
-    cJSON* resp = cJSON_Parse(chunk.memory);
-    free(chunk.memory);
-    
-    if (!resp) {
-        cJSON_Delete(json);
-        return error_new(ERR_JSON, "Failed to parse search response");
-    }
-    
-    cJSON* web = cJSON_GetObjectItem(resp, "web");
-    cJSON* results = cJSON_GetObjectItem(web, "results");
-    
-    *result = string_new("");
-    char line[1024];
-    snprintf(line, sizeof(line), "Results for: %s\n", query);
-    string_append(result, line);
-    
-    int i = 1;
-    cJSON* item;
-    cJSON_ArrayForEach(item, results) {
-        cJSON* title = cJSON_GetObjectItem(item, "title");
-        cJSON* url_item = cJSON_GetObjectItem(item, "url");
-        cJSON* desc = cJSON_GetObjectItem(item, "description");
-        
-        snprintf(line, sizeof(line), "%d. %s\n   %s\n", i++, 
-                 title ? title->valuestring : "",
-                 url_item ? url_item->valuestring : "");
-        string_append(result, line);
-        if (desc && desc->valuestring) {
-            string_append(result, "   ");
-            string_append(result, desc->valuestring);
-            string_append(result, "\n");
-        }
-    }
-    
-    if (i == 1) {
-        string_free(result);
-        *result = string_new("No results found.");
-    }
-    
-    cJSON_Delete(resp);
-    cJSON_Delete(json);
-    return error_new(ERR_NONE, "");
-}
-
-Error tool_web_fetch(void* user_data, const char* args_json, String* result) {
-    (void)user_data;
-    cJSON* json = cJSON_Parse(args_json);
-    if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
-
-    char* url = get_json_string(json, "url");
-    if (!url) {
-        cJSON_Delete(json);
-        return error_new(ERR_INVALID_PARAM, "Missing 'url' argument");
-    }
-
-    struct mg_mgr mgr;
-    struct MemoryStruct chunk = {0};
-    chunk.memory = malloc(1);
-    if (!chunk.memory) {
-        cJSON_Delete(json);
-        return error_new(ERR_MEMORY, "Memory allocation failed");
-    }
-    chunk.memory[0] = '\0';
-
-    mg_mgr_init(&mgr);
-    
-    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
-    if (!c) {
-        cJSON_Delete(json);
-        mg_mgr_free(&mgr);
-        free(chunk.memory);
-        return error_new(ERR_NETWORK, "Failed to connect to URL");
-    }
-    
-    // struct mg_tls_opts opts = {0};
-    // opts.ca = mg_str("ca.pem");
-
-    struct mg_str host = mg_url_host(url);
-    mg_printf(c, 
-        "GET %s HTTP/1.0\r\n"
-        "Host: %.*s\r\n"
-        "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36\r\n"
-        "\r\n",
-        mg_url_uri(url), 
-        (int)host.len, host.buf
-    );
-    
-    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
-    mg_mgr_free(&mgr);
-    
-    if (chunk.size == 0) {
-        free(chunk.memory);
-        cJSON_Delete(json);
-        return error_new(ERR_NETWORK, "Empty response or network error");
-    }
-    
-    char* text = malloc(chunk.size + 1);
-    if (!text) {
-        free(chunk.memory);
-        cJSON_Delete(json);
-        return error_new(ERR_MEMORY, "Out of memory");
-    }
-    
-    strip_tags(chunk.memory, text);
-    free(chunk.memory);
-    
-    *result = string_new(text);
-    free(text);
     cJSON_Delete(json);
     return error_new(ERR_NONE, "");
 }
