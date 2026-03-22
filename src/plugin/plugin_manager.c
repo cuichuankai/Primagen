@@ -296,7 +296,7 @@ int plugin_manager_load_plugin(PluginManager* manager, const char* path) {
     // Initialize the plugin (outside lock to avoid deadlock)
     int ret = 0;
     if (plugin->init) {
-        ret = plugin->init(manager, NULL);
+        ret = plugin->init(manager, plugin);
         if (ret != 0) {
             log_error("[PluginManager] Plugin init failed: %s", path);
             dlclose(plugin->handle);

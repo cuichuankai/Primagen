@@ -5,6 +5,7 @@
 #include "../tools/tool_executor.h"
 #include "../include/utils.h"
 #include "../plugin/plugin_manager.h"
+#include "../vendor/cJSON/cJSON.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -12,16 +13,15 @@
 extern char* strip_think_tags(const char* text);
 
 /* =============================================================================
-   Command Parameter Macros - Standard argv layout for all commands
+   Command Runtime Context - Hide AgentLoop and transport internals from commands
    ============================================================================= */
 
-// Standard argv layout: [loop, session_key, channel, chat_id, bus, ...user_args]
-#define CMD_ARG_LOOP(argv)         ((AgentLoop*)(argv)[0])
-#define CMD_ARG_SESSION_KEY(argv)  ((const char*)(argv)[1])
-#define CMD_ARG_CHANNEL(argv)      ((const char*)(argv)[2])
-#define CMD_ARG_CHAT_ID(argv)      ((const char*)(argv)[3])
-#define CMD_ARG_BUS(argv)          ((MessageBus*)(argv)[4])
-#define CMD_ARG_MIN_COUNT          (5)  // Minimum argc for commands
+typedef struct {
+    AgentLoop* loop;
+    const char* session_key;
+    const char* channel;
+    const char* chat_id;
+} CommandRuntimeData;
 
 /* =============================================================================
    Helper Functions
@@ -112,65 +112,44 @@ static void maybe_auto_consolidate_memory(AgentLoop* loop, Session* session, con
 
 /* =============================================================================
    Built-in Commands - Follow CommandFunc signature exactly
-   Context passed via argv: [loop, session_key, channel, chat_id, bus, ...user_args]
+   Context passed via CommandContext and user arguments in argv
    ============================================================================= */
 
-static int cmd_stop(Config* cfg, const char* workspace_path, int argc, char** argv) {
-    (void)cfg; (void)workspace_path;
-    if (argc < CMD_ARG_MIN_COUNT) return -1;
+static int command_ctx_send_response(CommandContext* ctx, const char* message) {
+    if (!ctx || !ctx->user_data || !message) return -1;
+    CommandRuntimeData* data = (CommandRuntimeData*)ctx->user_data;
+    if (!data->loop || !data->loop->bus || !data->channel || !data->chat_id) return -1;
+    OutboundMessage* outbound = outbound_message_new(data->channel, data->chat_id, message);
+    message_bus_send_outbound(data->loop->bus, outbound);
+    return 0;
+}
 
-    AgentLoop* loop = CMD_ARG_LOOP(argv);
-    const char* session_key = CMD_ARG_SESSION_KEY(argv);
-    const char* channel = CMD_ARG_CHANNEL(argv);
-    const char* chat_id = CMD_ARG_CHAT_ID(argv);
-    MessageBus* bus = CMD_ARG_BUS(argv);
-
-    if (!loop || !session_key) return 0;
+static int command_ctx_stop_active_tasks(CommandContext* ctx) {
+    if (!ctx || !ctx->user_data) return -1;
+    CommandRuntimeData* data = (CommandRuntimeData*)ctx->user_data;
+    if (!data->loop || !data->session_key) return 0;
 
     int cancelled = 0;
-    pthread_mutex_lock(&loop->task_mutex);
-    ActiveTaskNode* current = loop->active_tasks;
+    pthread_mutex_lock(&data->loop->task_mutex);
+    ActiveTaskNode* current = data->loop->active_tasks;
     while (current) {
-        if (strcmp(current->session_key, session_key) == 0 && !current->cancelling) {
+        if (strcmp(current->session_key, data->session_key) == 0 && !current->cancelling) {
             current->cancelling = true;
             cancelled++;
         }
         current = current->next;
     }
-    pthread_mutex_unlock(&loop->task_mutex);
-
-    char response[256];
-    snprintf(response, sizeof(response), cancelled > 0 ? "Stopped %d task(s)." : "No active task to stop.", cancelled);
-    OutboundMessage* outbound = outbound_message_new(channel, chat_id, response);
-    message_bus_send_outbound(bus, outbound);
+    pthread_mutex_unlock(&data->loop->task_mutex);
     return cancelled;
 }
 
-static int cmd_restart(Config* cfg, const char* workspace_path, int argc, char** argv) {
-    (void)cfg; (void)workspace_path;
-    if (argc < CMD_ARG_MIN_COUNT) return -1;
+static int command_ctx_reset_session(CommandContext* ctx) {
+    if (!ctx || !ctx->user_data) return -1;
+    CommandRuntimeData* data = (CommandRuntimeData*)ctx->user_data;
+    if (!data->loop || !data->loop->session_mgr || !data->session_key) return -1;
 
-    AgentLoop* loop = CMD_ARG_LOOP(argv);
-    const char* channel = CMD_ARG_CHANNEL(argv);
-    const char* chat_id = CMD_ARG_CHAT_ID(argv);
-
-    OutboundMessage* outbound = outbound_message_new(channel, chat_id, "Restarting...");
-    message_bus_send_outbound(loop->bus, outbound);
-    log_debug("[AgentLoop] Restart requested but requires external wrapper");
-    return 0;
-}
-
-static int cmd_new(Config* cfg, const char* workspace_path, int argc, char** argv) {
-    (void)cfg; (void)workspace_path;
-    if (argc < CMD_ARG_MIN_COUNT) return -1;
-
-    AgentLoop* loop = CMD_ARG_LOOP(argv);
-    const char* session_key = CMD_ARG_SESSION_KEY(argv);
-    const char* channel = CMD_ARG_CHANNEL(argv);
-    const char* chat_id = CMD_ARG_CHAT_ID(argv);
-
-    Session* session = session_manager_get(loop->session_mgr, session_key);
-    if (!session) session_manager_load(loop->session_mgr, session_key, &session);
+    Session* session = session_manager_get(data->loop->session_mgr, data->session_key);
+    if (!session) session_manager_load(data->loop->session_mgr, data->session_key, &session);
     if (!session) return -1;
 
     for (size_t i = 0; i < session->messages.count; i++) {
@@ -180,27 +159,82 @@ static int cmd_new(Config* cfg, const char* workspace_path, int argc, char** arg
     dynamic_array_clear_impl(&session->messages);
     session->last_consolidated = 0;
     session->updated_at = time(NULL);
-    session_manager_save(loop->session_mgr, session);
-
-    OutboundMessage* outbound = outbound_message_new(channel, chat_id, "New session started.");
-    message_bus_send_outbound(loop->bus, outbound);
+    session_manager_save(data->loop->session_mgr, session);
     return 0;
 }
 
-static int cmd_help(Config* cfg, const char* workspace_path, int argc, char** argv) {
-    (void)cfg; (void)workspace_path;
-    if (argc < CMD_ARG_MIN_COUNT) return -1;
+static CommandPluginDef* command_ctx_get_registered_commands(CommandContext* ctx, size_t* out_count) {
+    if (!ctx || !ctx->user_data || !out_count) return NULL;
+    CommandRuntimeData* data = (CommandRuntimeData*)ctx->user_data;
+    if (!data->loop || !data->loop->plugin_mgr) {
+        *out_count = 0;
+        return NULL;
+    }
+    return plugin_manager_get_commands(data->loop->plugin_mgr, out_count);
+}
 
-    AgentLoop* loop = CMD_ARG_LOOP(argv);
-    const char* channel = CMD_ARG_CHANNEL(argv);
-    const char* chat_id = CMD_ARG_CHAT_ID(argv);
-    MessageBus* bus = CMD_ARG_BUS(argv);
+static ToolRegistry* command_ctx_get_tool_registry(CommandContext* ctx) {
+    if (!ctx || !ctx->user_data) return NULL;
+    CommandRuntimeData* data = (CommandRuntimeData*)ctx->user_data;
+    if (!data->loop) return NULL;
+    return data->loop->tool_reg;
+}
 
-    // Get all registered commands dynamically from PluginManager
+static PluginManager* command_ctx_get_plugin_manager(CommandContext* ctx) {
+    if (!ctx || !ctx->user_data) return NULL;
+    CommandRuntimeData* data = (CommandRuntimeData*)ctx->user_data;
+    if (!data->loop) return NULL;
+    return data->loop->plugin_mgr;
+}
+
+static int cmd_stop(CommandContext* ctx, Config* cfg, const char* workspace_path, int argc, char** argv) {
+    (void)cfg;
+    (void)workspace_path;
+    (void)argc;
+    (void)argv;
+
+    int cancelled = ctx && ctx->stop_active_tasks ? ctx->stop_active_tasks(ctx) : -1;
+    if (cancelled < 0) return -1;
+
+    char response[256];
+    snprintf(response, sizeof(response), cancelled > 0 ? "Stopped %d task(s)." : "No active task to stop.", cancelled);
+    if (!ctx || !ctx->send_response) return -1;
+    ctx->send_response(ctx, response);
+    return cancelled;
+}
+
+static int cmd_restart(CommandContext* ctx, Config* cfg, const char* workspace_path, int argc, char** argv) {
+    (void)cfg;
+    (void)workspace_path;
+    (void)argc;
+    (void)argv;
+    if (!ctx || !ctx->send_response) return -1;
+    ctx->send_response(ctx, "Restarting...");
+    log_debug("[AgentLoop] Restart requested but requires external wrapper");
+    return 0;
+}
+
+static int cmd_new(CommandContext* ctx, Config* cfg, const char* workspace_path, int argc, char** argv) {
+    (void)cfg;
+    (void)workspace_path;
+    (void)argc;
+    (void)argv;
+    if (!ctx || !ctx->reset_session || !ctx->send_response) return -1;
+    if (ctx->reset_session(ctx) != 0) return -1;
+    ctx->send_response(ctx, "New session started.");
+    return 0;
+}
+
+static int cmd_help(CommandContext* ctx, Config* cfg, const char* workspace_path, int argc, char** argv) {
+    (void)cfg;
+    (void)workspace_path;
+    (void)argc;
+    (void)argv;
+    if (!ctx || !ctx->get_registered_commands || !ctx->send_response) return -1;
+
     size_t command_count = 0;
-    CommandPluginDef* commands = plugin_manager_get_commands(loop->plugin_mgr, &command_count);
+    CommandPluginDef* commands = ctx->get_registered_commands(ctx, &command_count);
 
-    // Build help text dynamically
     String help_text = string_new("");
     string_append(&help_text, "\n      Primagen(Primitive Genesis) - AI Agent Framework  \n");
     string_append(&help_text, "===================================================================  \n");
@@ -220,32 +254,30 @@ static int cmd_help(Config* cfg, const char* workspace_path, int argc, char** ar
         string_append(&help_text, "No commands registered.");
     }
 
-    OutboundMessage* outbound = outbound_message_new(channel, chat_id, help_text.data);
-    message_bus_send_outbound(bus, outbound);
-
+    ctx->send_response(ctx, help_text.data);
     string_free(&help_text);
     return 0;
 }
 
-static int cmd_tools(Config* cfg, const char* workspace_path, int argc, char** argv) {
-    (void)cfg; (void)workspace_path;
-    if (argc < CMD_ARG_MIN_COUNT) return -1;
+static int cmd_tools(CommandContext* ctx, Config* cfg, const char* workspace_path, int argc, char** argv) {
+    (void)cfg;
+    (void)workspace_path;
+    (void)argc;
+    (void)argv;
+    if (!ctx || !ctx->get_tool_registry || !ctx->send_response) return -1;
 
-    AgentLoop* loop = CMD_ARG_LOOP(argv);
-    const char* channel = CMD_ARG_CHANNEL(argv);
-    const char* chat_id = CMD_ARG_CHAT_ID(argv);
-    MessageBus* bus = CMD_ARG_BUS(argv);
-    if (!loop || !loop->tool_reg) return -1;
+    ToolRegistry* tool_reg = ctx->get_tool_registry(ctx);
+    if (!tool_reg) return -1;
 
     String out = string_new("");
     string_append(&out, "\nAvailable tools:\n");
 
-    size_t total = loop->tool_reg->count;
+    size_t total = tool_reg->count;
     size_t builtin_count = 0;
     size_t plugin_count = 0;
     size_t mcp_count = 0;
     for (size_t i = 0; i < total; i++) {
-        Tool* t = &loop->tool_reg->tools[i];
+        Tool* t = &tool_reg->tools[i];
         const char* name = t->def.name.data ? t->def.name.data : "";
         bool is_mcp = strncmp(name, "primagen_", 9) == 0 || strncmp(name, "mcp_", 4) == 0;
         if (is_mcp) {
@@ -265,7 +297,7 @@ static int cmd_tools(Config* cfg, const char* workspace_path, int argc, char** a
     if (builtin_count > 0) {
         string_append(&out, "\n[builtin]\n");
         for (size_t i = 0; i < total; i++) {
-            Tool* t = &loop->tool_reg->tools[i];
+            Tool* t = &tool_reg->tools[i];
             const char* name = t->def.name.data ? t->def.name.data : "";
             bool is_mcp = strncmp(name, "primagen_", 9) == 0 || strncmp(name, "mcp_", 4) == 0;
             if (!is_mcp && !t->plugin_ref) {
@@ -279,7 +311,7 @@ static int cmd_tools(Config* cfg, const char* workspace_path, int argc, char** a
     if (plugin_count > 0) {
         string_append(&out, "\n[plugin]\n");
         for (size_t i = 0; i < total; i++) {
-            Tool* t = &loop->tool_reg->tools[i];
+            Tool* t = &tool_reg->tools[i];
             const char* name = t->def.name.data ? t->def.name.data : "";
             bool is_mcp = strncmp(name, "primagen_", 9) == 0 || strncmp(name, "mcp_", 4) == 0;
             if (!is_mcp && t->plugin_ref) {
@@ -299,7 +331,7 @@ static int cmd_tools(Config* cfg, const char* workspace_path, int argc, char** a
     if (mcp_count > 0) {
         string_append(&out, "\n[mcp]\n");
         for (size_t i = 0; i < total; i++) {
-            Tool* t = &loop->tool_reg->tools[i];
+            Tool* t = &tool_reg->tools[i];
             const char* name = t->def.name.data ? t->def.name.data : "";
             bool is_mcp = strncmp(name, "primagen_", 9) == 0 || strncmp(name, "mcp_", 4) == 0;
             if (is_mcp) {
@@ -310,37 +342,33 @@ static int cmd_tools(Config* cfg, const char* workspace_path, int argc, char** a
         }
     }
 
-    OutboundMessage* outbound = outbound_message_new(channel, chat_id, out.data);
-    message_bus_send_outbound(bus, outbound);
+    ctx->send_response(ctx, out.data);
     string_free(&out);
     return 0;
 }
 
-static int cmd_reload_plugins(Config* cfg, const char* workspace_path, int argc, char** argv) {
-    (void)cfg; (void)workspace_path;
-    if (argc < CMD_ARG_MIN_COUNT) return -1;
+static int cmd_reload_plugins(CommandContext* ctx, Config* cfg, const char* workspace_path, int argc, char** argv) {
+    (void)cfg;
+    (void)workspace_path;
+    (void)argc;
+    (void)argv;
+    if (!ctx || !ctx->get_plugin_manager || !ctx->send_response) return -1;
 
-    AgentLoop* loop = CMD_ARG_LOOP(argv);
-    const char* channel = CMD_ARG_CHANNEL(argv);
-    const char* chat_id = CMD_ARG_CHAT_ID(argv);
-
-    if (!loop || !loop->plugin_mgr) {
-        OutboundMessage* outbound = outbound_message_new(channel, chat_id, "Plugin manager not initialized.");
-        message_bus_send_outbound(loop->bus, outbound);
+    PluginManager* plugin_mgr = ctx->get_plugin_manager(ctx);
+    if (!plugin_mgr) {
+        ctx->send_response(ctx, "Plugin manager not initialized.");
         return -1;
     }
 
-    int reloaded = plugin_manager_load_external(loop->plugin_mgr);
+    int reloaded = plugin_manager_load_external(plugin_mgr);
     char response[512];
     snprintf(response, sizeof(response),
         "\nPlugin reload complete.\n"
         "External dir: %s\n"
         "New/reloaded plugins: %d\n"
         "Total loaded: %zu",
-        loop->plugin_mgr->external_dir, reloaded, loop->plugin_mgr->plugin_count);
-
-    OutboundMessage* outbound = outbound_message_new(channel, chat_id, response);
-    message_bus_send_outbound(loop->bus, outbound);
+        plugin_mgr->external_dir, reloaded, plugin_mgr->plugin_count);
+    ctx->send_response(ctx, response);
     return 0;
 }
 
@@ -398,8 +426,13 @@ AgentLoop* agent_loop_new(SessionManager* session_mgr, ContextBuilder* ctx_build
     loop->llm_call = NULL;
     loop->active_tasks = NULL;
     loop->current_session_key[0] = '\0';
+    loop->inbox_head = NULL;
+    loop->inbox_tail = NULL;
+    loop->processing_thread_started = false;
     pthread_mutex_init(&loop->task_mutex, NULL);
     pthread_mutex_init(&loop->state_mutex, NULL);
+    pthread_mutex_init(&loop->inbox_mutex, NULL);
+    pthread_cond_init(&loop->inbox_cond, NULL);
 
     log_debug("[AgentLoop] Created new instance");
     return loop;
@@ -407,6 +440,14 @@ AgentLoop* agent_loop_new(SessionManager* session_mgr, ContextBuilder* ctx_build
 
 void agent_loop_free(AgentLoop* loop) {
     if (!loop) return;
+
+    if (agent_loop_is_running(loop) || loop->processing_thread_started) {
+        agent_loop_stop(loop);
+        if (loop->processing_thread_started && !pthread_equal(pthread_self(), loop->processing_thread)) {
+            pthread_join(loop->processing_thread, NULL);
+            loop->processing_thread_started = false;
+        }
+    }
 
     if (loop->tool_executor) {
         tool_executor_destroy(loop->tool_executor);
@@ -424,6 +465,21 @@ void agent_loop_free(AgentLoop* loop) {
 
     pthread_mutex_destroy(&loop->task_mutex);
     pthread_mutex_destroy(&loop->state_mutex);
+    pthread_mutex_lock(&loop->inbox_mutex);
+    InboundTaskNode* inbox_node = loop->inbox_head;
+    while (inbox_node) {
+        InboundTaskNode* next = inbox_node->next;
+        if (inbox_node->inbound) {
+            inbound_message_free(inbox_node->inbound);
+        }
+        free(inbox_node);
+        inbox_node = next;
+    }
+    loop->inbox_head = NULL;
+    loop->inbox_tail = NULL;
+    pthread_mutex_unlock(&loop->inbox_mutex);
+    pthread_mutex_destroy(&loop->inbox_mutex);
+    pthread_cond_destroy(&loop->inbox_cond);
     log_debug("[AgentLoop] Freed instance");
     free(loop);
 }
@@ -437,6 +493,10 @@ void agent_loop_set_llm_provider(AgentLoop* loop, LLMProvider provider) {
 void agent_loop_stop(AgentLoop* loop) {
     if (!loop) return;
     agent_loop_set_running(loop, false);
+    message_bus_close(loop->bus);
+    pthread_mutex_lock(&loop->inbox_mutex);
+    pthread_cond_broadcast(&loop->inbox_cond);
+    pthread_mutex_unlock(&loop->inbox_mutex);
     log_debug("[AgentLoop] Stop requested");
 }
 
@@ -595,6 +655,10 @@ void agent_loop_register_builtin_channels(PluginManager* manager, Config* cfg) {
 static void add_active_task(AgentLoop* loop, const char* task_id, const char* session_key, pthread_t thread);
 static void remove_active_task(AgentLoop* loop, const char* task_id);
 static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* session);
+static void process_inbound_message(AgentLoop* loop, InboundMessage* inbound);
+static void enqueue_inbound_task(AgentLoop* loop, InboundMessage* inbound);
+static InboundMessage* dequeue_inbound_task(AgentLoop* loop);
+static void* agent_loop_processing_worker(void* arg);
 
 static void parse_slash_command(const char* full_content, char* cmd_name, size_t cmd_name_size, const char** args_start_out) {
     if (!full_content || !cmd_name || cmd_name_size == 0) {
@@ -647,24 +711,35 @@ static bool handle_plugin_command(AgentLoop* loop, const char* channel, const ch
     if (handler) {
         log_debug("[AgentLoop] Executing command: /%s", cmd_name);
 
-        // Build argv with context: [loop, session_key, channel, chat_id, bus, ...user_args]
+        CommandRuntimeData runtime_data = {
+            .loop = loop,
+            .session_key = session_key,
+            .channel = channel,
+            .chat_id = chat_id
+        };
+        CommandContext cmd_ctx = {
+            .user_data = &runtime_data,
+            .send_response = command_ctx_send_response,
+            .stop_active_tasks = command_ctx_stop_active_tasks,
+            .reset_session = command_ctx_reset_session,
+            .get_registered_commands = command_ctx_get_registered_commands,
+            .get_tool_registry = command_ctx_get_tool_registry,
+            .get_plugin_manager = command_ctx_get_plugin_manager
+        };
+
         char* argv[16] = {0};
         int argc = 0;
 
-        argv[argc++] = (char*)loop;
-        argv[argc++] = (char*)session_key;
-        argv[argc++] = (char*)channel;
-        argv[argc++] = (char*)chat_id;
-        argv[argc++] = (char*)loop->bus;
-
-        char* args_copy = strdup(args_start);
-        char* token = strtok(args_copy, " ");
-        while (token && argc < 15) {
-            argv[argc++] = token;
-            token = strtok(NULL, " ");
+        char* args_copy = strdup(args_start ? args_start : "");
+        if (args_copy) {
+            char* token = strtok(args_copy, " ");
+            while (token && argc < 16) {
+                argv[argc++] = token;
+                token = strtok(NULL, " ");
+            }
         }
 
-        int result = handler(loop->config, loop->workspace_path, argc, argv);
+        int result = handler(&cmd_ctx, loop->config, loop->workspace_path, argc, argv);
 
         log_debug("[AgentLoop] Command /%s executed with result: %d", cmd_name, result);
         free(args_copy);
@@ -672,6 +747,71 @@ static bool handle_plugin_command(AgentLoop* loop, const char* channel, const ch
     }
 
     return false;
+}
+
+static bool build_tool_args_json(const char* tool_name, const char* args_start, String* out_json) {
+    if (!tool_name || !out_json) return false;
+    const char* args = args_start ? args_start : "";
+    while (*args == ' ') args++;
+    if (args[0] == '\0') {
+        *out_json = string_new("{}");
+        return true;
+    }
+    if (args[0] == '{') {
+        *out_json = string_new(args);
+        return true;
+    }
+
+    const char* key = NULL;
+    if (strcmp(tool_name, "web_fetch") == 0) key = "url";
+    else if (strcmp(tool_name, "web_search") == 0) key = "query";
+    else if (strcmp(tool_name, "exec") == 0) key = "command";
+    else if (strcmp(tool_name, "read_file") == 0 || strcmp(tool_name, "list_dir") == 0) key = "path";
+    if (!key) return false;
+
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return false;
+    cJSON_AddStringToObject(root, key, args);
+    char* text = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!text) return false;
+    *out_json = string_new(text);
+    free(text);
+    return true;
+}
+
+static bool handle_tool_fallback_command(AgentLoop* loop, InboundMessage* inbound, const char* full_content) {
+    if (!loop || !loop->tool_reg || !inbound || !full_content) return false;
+
+    char tool_name[64] = {0};
+    const char* args_start = NULL;
+    parse_slash_command(full_content, tool_name, sizeof(tool_name), &args_start);
+    if (tool_name[0] == '\0') return false;
+
+    Tool* tool = tool_registry_get(loop->tool_reg, tool_name);
+    if (!tool) return false;
+
+    String args_json = {0};
+    if (!build_tool_args_json(tool_name, args_start, &args_json)) return false;
+
+    String result = string_new("");
+    Error exec_err = tool_registry_execute(loop->tool_reg, tool_name, args_json.data, &result);
+    string_free(&args_json);
+
+    if (exec_err.code != ERR_NONE) {
+        char response[512];
+        snprintf(response, sizeof(response), "Tool '%s' execution failed: %s", tool_name, exec_err.message);
+        OutboundMessage* outbound = outbound_message_new(inbound->channel.data, inbound->chat_id.data, response);
+        message_bus_send_outbound(loop->bus, outbound);
+        string_free(&result);
+        return true;
+    }
+
+    const char* response_text = (result.data && result.data[0] != '\0') ? result.data : "Tool executed successfully.";
+    OutboundMessage* outbound = outbound_message_new(inbound->channel.data, inbound->chat_id.data, response_text);
+    message_bus_send_outbound(loop->bus, outbound);
+    string_free(&result);
+    return true;
 }
 
 static bool handle_skill_fallback_command(AgentLoop* loop, InboundMessage* inbound, Session* session, const char* session_key, const char* full_content) {
@@ -916,20 +1056,123 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
     return error_new(ERR_NONE, "");
 }
 
-/* =============================================================================
-   Main Agent Loop - Unified command handling
-   ============================================================================= */
+static void process_inbound_message(AgentLoop* loop, InboundMessage* inbound) {
+    if (!loop || !inbound) return;
+    if (inbound->content.len == 0) return;
+
+    char key[256];
+    snprintf(key, sizeof(key), "%s:%s", inbound->channel.data, inbound->chat_id.data);
+    Session* session = session_manager_get(loop->session_mgr, key);
+    if (!session) {
+        session_manager_load(loop->session_mgr, key, &session);
+        log_debug("[AgentLoop] Loaded session: %s", key);
+    }
+    if (!session) {
+        OutboundMessage* outbound = outbound_message_new(inbound->channel.data, inbound->chat_id.data, "Session unavailable.");
+        message_bus_send_outbound(loop->bus, outbound);
+        return;
+    }
+
+    const char* content = inbound->content.data;
+    if (content[0] == '/') {
+        bool handled = handle_plugin_command(loop, inbound->channel.data, inbound->chat_id.data, key, content);
+        if (!handled) {
+            handled = handle_tool_fallback_command(loop, inbound, content);
+        }
+        if (!handled) {
+            handled = handle_skill_fallback_command(loop, inbound, session, key, content);
+        }
+        if (!handled) {
+            char response[256];
+            snprintf(response, sizeof(response), "Unknown command: %s. Type /help for available commands.", content);
+            OutboundMessage* outbound = outbound_message_new(inbound->channel.data, inbound->chat_id.data, response);
+            message_bus_send_outbound(loop->bus, outbound);
+        }
+        return;
+    }
+
+    Message* user_msg = message_new(ROLE_USER, inbound->content.data);
+    session_add_message(session, user_msg);
+    maybe_auto_consolidate_memory(loop, session, key, inbound->content.data);
+
+    char task_id[32];
+    snprintf(task_id, sizeof(task_id), "task_%ld", time(NULL));
+    pthread_t current_thread = pthread_self();
+    add_active_task(loop, task_id, key, current_thread);
+    process_message(loop, inbound, session);
+    remove_active_task(loop, task_id);
+}
+
+static void enqueue_inbound_task(AgentLoop* loop, InboundMessage* inbound) {
+    if (!loop || !inbound) return;
+    InboundTaskNode* node = malloc(sizeof(InboundTaskNode));
+    if (!node) {
+        inbound_message_free(inbound);
+        return;
+    }
+    node->inbound = inbound;
+    node->next = NULL;
+
+    pthread_mutex_lock(&loop->inbox_mutex);
+    if (loop->inbox_tail) {
+        loop->inbox_tail->next = node;
+    } else {
+        loop->inbox_head = node;
+    }
+    loop->inbox_tail = node;
+    pthread_cond_signal(&loop->inbox_cond);
+    pthread_mutex_unlock(&loop->inbox_mutex);
+}
+
+static InboundMessage* dequeue_inbound_task(AgentLoop* loop) {
+    if (!loop) return NULL;
+    pthread_mutex_lock(&loop->inbox_mutex);
+    while (loop->inbox_head == NULL && agent_loop_is_running(loop)) {
+        pthread_cond_wait(&loop->inbox_cond, &loop->inbox_mutex);
+    }
+    if (loop->inbox_head == NULL) {
+        pthread_mutex_unlock(&loop->inbox_mutex);
+        return NULL;
+    }
+    InboundTaskNode* node = loop->inbox_head;
+    loop->inbox_head = node->next;
+    if (loop->inbox_head == NULL) {
+        loop->inbox_tail = NULL;
+    }
+    pthread_mutex_unlock(&loop->inbox_mutex);
+
+    InboundMessage* inbound = node->inbound;
+    free(node);
+    return inbound;
+}
+
+static void* agent_loop_processing_worker(void* arg) {
+    AgentLoop* loop = (AgentLoop*)arg;
+    while (true) {
+        InboundMessage* inbound = dequeue_inbound_task(loop);
+        if (!inbound) {
+            if (!agent_loop_is_running(loop)) break;
+            continue;
+        }
+        process_inbound_message(loop, inbound);
+        inbound_message_free(inbound);
+    }
+    return NULL;
+}
 
 void agent_loop_run(AgentLoop* loop) {
     agent_loop_set_running(loop, true);
-    log_debug("[AgentLoop] Started");
+    if (pthread_create(&loop->processing_thread, NULL, agent_loop_processing_worker, loop) != 0) {
+        agent_loop_set_running(loop, false);
+        log_error("[AgentLoop] Failed to start processing worker");
+        return;
+    }
+    loop->processing_thread_started = true;
 
+    log_debug("[AgentLoop] Started");
     while (agent_loop_is_running(loop)) {
-        InboundMessage* inbound = message_bus_receive_inbound(loop->bus);
-        if (!inbound) {
-            usleep(100000);
-            continue;
-        }
+        InboundMessage* inbound = message_bus_receive_inbound_timed(loop->bus, 200);
+        if (!inbound) continue;
 
         if (strcmp(inbound->channel.data, "system") == 0 && strcmp(inbound->content.data, "exit") == 0) {
             log_debug("[AgentLoop] System exit received, shutting down");
@@ -938,50 +1181,17 @@ void agent_loop_run(AgentLoop* loop) {
             break;
         }
 
-        if (inbound->content.len == 0) {
+        if (!agent_loop_is_running(loop)) {
             inbound_message_free(inbound);
-            continue;
+            break;
         }
-
-        char key[256];
-        snprintf(key, sizeof(key), "%s:%s", inbound->channel.data, inbound->chat_id.data);
-        Session* session = session_manager_get(loop->session_mgr, key);
-        if (!session) {
-            session_manager_load(loop->session_mgr, key, &session);
-            log_debug("[AgentLoop] Loaded session: %s", key);
-        }
-
-        /* Unified slash command handling - all commands go through plugin system */
-        const char* content = inbound->content.data;
-        if (content[0] == '/') {
-            bool handled = handle_plugin_command(loop, inbound->channel.data, inbound->chat_id.data, key, content);
-            if (!handled) {
-                handled = handle_skill_fallback_command(loop, inbound, session, key, content);
-            }
-            if (!handled) {
-                char response[256];
-                snprintf(response, sizeof(response), "Unknown command: %s. Type /help for available commands.", content);
-                OutboundMessage* outbound = outbound_message_new(inbound->channel.data, inbound->chat_id.data, response);
-                message_bus_send_outbound(loop->bus, outbound);
-            }
-            inbound_message_free(inbound);
-            continue;
-        }
-
-        Message* user_msg = message_new(ROLE_USER, inbound->content.data);
-        session_add_message(session, user_msg);
-        maybe_auto_consolidate_memory(loop, session, key, inbound->content.data);
-
-        char task_id[32];
-        snprintf(task_id, sizeof(task_id), "task_%ld", time(NULL));
-        pthread_t current_thread = pthread_self();
-        add_active_task(loop, task_id, key, current_thread);
-
-        process_message(loop, inbound, session);
-
-        remove_active_task(loop, task_id);
-        inbound_message_free(inbound);
+        enqueue_inbound_task(loop, inbound);
     }
 
+    pthread_mutex_lock(&loop->inbox_mutex);
+    pthread_cond_broadcast(&loop->inbox_cond);
+    pthread_mutex_unlock(&loop->inbox_mutex);
+    pthread_join(loop->processing_thread, NULL);
+    loop->processing_thread_started = false;
     log_debug("[AgentLoop] Stopped");
 }

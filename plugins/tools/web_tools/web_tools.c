@@ -76,6 +76,15 @@ static const cJSON* get_plugin_cfg(PluginManager* manager) {
     return pc->config;
 }
 
+static void setup_tls_if_needed(struct mg_connection* c, const char* url) {
+    if (!c || !url) return;
+    if (!mg_url_is_ssl(url)) return;
+    struct mg_tls_opts opts = {0};
+    opts.ca = mg_str("");
+    opts.name = mg_url_host(url);
+    mg_tls_init(c, &opts);
+}
+
 static bool get_search_enabled(PluginManager* manager) {
     bool enabled = true;
     if (manager && manager->config) {
@@ -164,6 +173,7 @@ static Error web_search_impl(void* user_data, const char* args_json, String* res
         cJSON_Delete(json);
         return error_new(ERR_NETWORK, "Failed to connect to Search provider");
     }
+    setup_tls_if_needed(c, url);
 
     struct mg_str host = mg_url_host(url);
     mg_printf(c,
@@ -266,6 +276,7 @@ static Error web_fetch_impl(void* user_data, const char* args_json, String* resu
         cJSON_Delete(json);
         return error_new(ERR_NETWORK, "Failed to connect to URL");
     }
+    setup_tls_if_needed(c, url);
 
     struct mg_str host = mg_url_host(url);
     mg_printf(c,
@@ -310,8 +321,8 @@ static Error web_fetch_impl(void* user_data, const char* args_json, String* resu
 }
 
 PLUGIN_EXPORT int plugin_init(PluginManager* manager, void* context) {
-    (void) context;
     if (!manager) return -1;
+    LoadedPlugin* plugin = (LoadedPlugin*)context;
 
     WebToolContext* search_ctx = malloc(sizeof(WebToolContext));
     WebToolContext* fetch_ctx = malloc(sizeof(WebToolContext));
@@ -324,11 +335,11 @@ PLUGIN_EXPORT int plugin_init(PluginManager* manager, void* context) {
     fetch_ctx->manager = manager;
 
     int ret1 = plugin_register_tool(
-        manager, NULL, "web_search", "Search the web",
+        manager, plugin, "web_search", "Search the web",
         "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}},\"required\":[\"query\"]}",
         web_search_impl, search_ctx);
     int ret2 = plugin_register_tool(
-        manager, NULL, "web_fetch", "Fetch URL content",
+        manager, plugin, "web_fetch", "Fetch URL content",
         "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}",
         web_fetch_impl, fetch_ctx);
 

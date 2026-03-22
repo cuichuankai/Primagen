@@ -28,6 +28,11 @@ typedef struct ActiveTaskNode {
     struct ActiveTaskNode* next;
 } ActiveTaskNode;
 
+typedef struct InboundTaskNode {
+    InboundMessage* inbound;
+    struct InboundTaskNode* next;
+} InboundTaskNode;
+
 struct AgentLoop {
     SessionManager* session_mgr;
     ContextBuilder* ctx_builder;
@@ -45,6 +50,12 @@ struct AgentLoop {
     pthread_mutex_t state_mutex;
     ActiveTaskNode* active_tasks;
     char current_session_key[256];  // For /stop command
+    pthread_mutex_t inbox_mutex;
+    pthread_cond_t inbox_cond;
+    InboundTaskNode* inbox_head;
+    InboundTaskNode* inbox_tail;
+    pthread_t processing_thread;
+    bool processing_thread_started;
 };
 
 // Functions

@@ -24,6 +24,8 @@ typedef enum {
 
 // Forward declarations
 struct PluginManager;
+typedef struct CommandContext CommandContext;
+typedef struct CommandPluginDef CommandPluginDef;
 
 // Channel forward declarations (defined in channel.h)
 // Channel and ChannelCreateFunc are defined in channel.h
@@ -51,13 +53,23 @@ typedef struct {
 // Command Plugin Interface
 // =============================================================================
 
-typedef int (*CommandFunc)(Config* cfg, const char* workspace_path, int argc, char** argv);
+struct CommandContext {
+    void* user_data;
+    int (*send_response)(CommandContext* ctx, const char* message);
+    int (*stop_active_tasks)(CommandContext* ctx);
+    int (*reset_session)(CommandContext* ctx);
+    CommandPluginDef* (*get_registered_commands)(CommandContext* ctx, size_t* out_count);
+    ToolRegistry* (*get_tool_registry)(CommandContext* ctx);
+    struct PluginManager* (*get_plugin_manager)(CommandContext* ctx);
+};
 
-typedef struct {
+typedef int (*CommandFunc)(CommandContext* ctx, Config* cfg, const char* workspace_path, int argc, char** argv);
+
+struct CommandPluginDef {
     char* name;
     char* description;
     CommandFunc handler;
-} CommandPluginDef;
+};
 
 // =============================================================================
 // Plugin Information Structure

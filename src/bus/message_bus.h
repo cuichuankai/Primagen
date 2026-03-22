@@ -10,6 +10,8 @@ typedef struct {
     size_t front;
     size_t rear;
     size_t capacity;
+    int message_kind;
+    bool closed;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } MessageQueue;
@@ -21,9 +23,11 @@ typedef struct {
 
 // Functions
 MessageBus* message_bus_new();
+void message_bus_close(MessageBus* bus);
 void message_bus_free(MessageBus* bus);
 void message_bus_send_inbound(MessageBus* bus, InboundMessage* msg);
 InboundMessage* message_bus_receive_inbound(MessageBus* bus);
+InboundMessage* message_bus_receive_inbound_timed(MessageBus* bus, int timeout_ms);
 void message_bus_send_outbound(MessageBus* bus, OutboundMessage* msg);
 OutboundMessage* message_bus_receive_outbound(MessageBus* bus);
 
