@@ -74,28 +74,32 @@ void* outbound_thread(void* arg) {
     log_debug("[OutboundThread] Started, channel_count=%d", channel_count);
     while (1) {
         OutboundMessage* outbound = message_bus_receive_outbound(bus);
-        if (outbound) {
-            log_debug("[OutboundThread] Sending message to channel=%s, chat_id=%s",
-                     outbound->channel.data, outbound->chat_id.data);
-            /* Dispatch to channels */
-            int sent = 0;
-            bool broadcast = strcmp(outbound->channel.data, "*") == 0 || strcmp(outbound->channel.data, "all") == 0;
-            for (int i = 0; i < channel_count; i++) {
-                if (!channels[i]->send) continue;
-                bool direct_match = strcmp(channels[i]->name, outbound->channel.data) == 0;
-                bool cli_console_alias = strcmp(outbound->channel.data, "cli") == 0 && strcmp(channels[i]->name, "console") == 0;
-                if (broadcast || direct_match || cli_console_alias) {
-                    channels[i]->send(channels[i], outbound);
-                    sent++;
-                    log_debug("[OutboundThread] Sent to channel %d: %s", i, channels[i]->name);
-                }
+        if (!outbound) {
+            if (message_bus_is_outbound_closed(bus)) {
+                break;
             }
-            if (sent == 0) {
-                log_error("[OutboundThread] No channels available to send message!");
-            }
-            outbound_message_free(outbound);
+            continue;
         }
+        log_debug("[OutboundThread] Sending message to channel=%s, chat_id=%s",
+                 outbound->channel.data, outbound->chat_id.data);
+        int sent = 0;
+        bool broadcast = strcmp(outbound->channel.data, "*") == 0 || strcmp(outbound->channel.data, "all") == 0;
+        for (int i = 0; i < channel_count; i++) {
+            if (!channels[i]->send) continue;
+            bool direct_match = strcmp(channels[i]->name, outbound->channel.data) == 0;
+            bool cli_console_alias = strcmp(outbound->channel.data, "cli") == 0 && strcmp(channels[i]->name, "console") == 0;
+            if (broadcast || direct_match || cli_console_alias) {
+                channels[i]->send(channels[i], outbound);
+                sent++;
+                log_debug("[OutboundThread] Sent to channel %d: %s", i, channels[i]->name);
+            }
+        }
+        if (sent == 0) {
+            log_error("[OutboundThread] No channels available to send message!");
+        }
+        outbound_message_free(outbound);
     }
+    log_debug("[OutboundThread] Stopped");
     return NULL;
 }
 
@@ -214,6 +218,15 @@ int main(int argc, char* argv[]) {
 
 /* Extracted logic for running the agent loop */
 int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_message, int acp_port) {
+    int rc = 0;
+    MCPManager* mcp_mgr = NULL;
+    ToolContext* tool_ctx = NULL;
+    AgentLoop* loop = NULL;
+    ACPServer* acp_server = NULL;
+    pthread_t agent_tid = 0, outbound_tid = 0, acp_tid = 0;
+    bool agent_thread_started = false;
+    bool outbound_thread_started = false;
+    bool acp_thread_started = false;
     printf("      Primagen(Primitive Genesis) - AI Agent Framework\n");
     printf("===================================================================\n");
 
@@ -300,13 +313,16 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     /* Initialize MCP Manager */
     if (cfg->mcp.enabled) {
         log_debug("[System] Creating MCPManager...");
-        MCPManager* mcp_mgr = mcp_manager_create(workspace_path);
-        Error mcp_setup_err = mcp_manager_setup_from_config(mcp_mgr, &cfg->mcp, tool_reg);
-        if (mcp_setup_err.code != ERR_NONE) {
-            log_error("[MCP] Manager setup failed: %s", mcp_setup_err.message);
+        mcp_mgr = mcp_manager_create(workspace_path);
+        if (!mcp_mgr) {
+            log_error("[MCP] Failed to create manager");
+        } else {
+            Error mcp_setup_err = mcp_manager_setup_from_config(mcp_mgr, &cfg->mcp, tool_reg);
+            if (mcp_setup_err.code != ERR_NONE) {
+                log_error("[MCP] Manager setup failed: %s", mcp_setup_err.message);
+            }
+            log_debug("[System] MCP Manager initialized with %zu servers", mcp_mgr->clients_count);
         }
-
-        log_debug("[System] MCP Manager initialized with %zu servers", mcp_mgr->clients_count);
     } else {
         log_info("[System] MCP disabled");
     }
@@ -334,7 +350,12 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
 
     /* Create Tool Context */
     log_debug("[System] Creating ToolContext...");
-    ToolContext* tool_ctx = malloc(sizeof(ToolContext));
+    tool_ctx = malloc(sizeof(ToolContext));
+    if (!tool_ctx) {
+        log_error("[System] Failed to allocate ToolContext");
+        rc = 1;
+        goto cleanup;
+    }
     tool_ctx->magic = 0x50474E31;
     tool_ctx->bus = bus;
     tool_ctx->subagent_mgr = subagent_mgr;
@@ -368,14 +389,18 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
 
     /* Create Agent Loop */
     log_debug("[System] Creating AgentLoop...");
-    AgentLoop* loop = agent_loop_new(session_mgr, ctx_builder, tool_reg, bus, cfg, plugin_mgr, workspace_path);
+    loop = agent_loop_new(session_mgr, ctx_builder, tool_reg, bus, cfg, plugin_mgr, workspace_path);
+    if (!loop) {
+        log_error("[System] Failed to create AgentLoop");
+        rc = 1;
+        goto cleanup;
+    }
     agent_loop_set_llm_provider(loop, llm_provider_call);
 
     /* Register built-in commands with PluginManager */
     agent_loop_register_builtin_commands(loop);
 
     /* Initialize ACP Server if port specified */
-    ACPServer* acp_server = NULL;
     if (acp_port > 0) {
         log_debug("[System] Creating ACPServer on port %d...", acp_port);
         acp_server = acp_server_new(bus, tool_reg, loop, session_mgr, cfg);
@@ -392,19 +417,21 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
 
     /* Start Threads */
     log_debug("[System] Starting agent thread...");
-    pthread_t agent_tid, outbound_tid, acp_tid;
-    bool acp_thread_started = false;
 
     if (pthread_create(&agent_tid, NULL, agent_thread, loop) != 0) {
         fprintf(stderr, "Failed to create agent thread\n");
-        return 1;
+        rc = 1;
+        goto cleanup;
     }
+    agent_thread_started = true;
 
     log_debug("[System] Starting outbound thread...");
     if (pthread_create(&outbound_tid, NULL, outbound_thread, bus) != 0) {
         fprintf(stderr, "Failed to create outbound thread\n");
-        return 1;
+        rc = 1;
+        goto cleanup;
     }
+    outbound_thread_started = true;
 
     /* Start ACP poll thread if ACP server is running */
     if (acp_server && acp_server->running) {
@@ -427,7 +454,22 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     /* Main thread waits (Channels run in their own threads or main loop) */
     /* Console channel spawns a thread, so we just wait here */
     pthread_join(agent_tid, NULL);
-    /* pthread_join(outbound_tid, NULL); - Unreachable unless agent stops */
+    agent_thread_started = false;
+    message_bus_close(bus);
+    pthread_join(outbound_tid, NULL);
+    outbound_thread_started = false;
+
+cleanup:
+    if (rc != 0 && loop && agent_thread_started) {
+        agent_loop_stop(loop);
+    }
+    if (agent_thread_started) {
+        pthread_join(agent_tid, NULL);
+    }
+    if (outbound_thread_started) {
+        message_bus_close(bus);
+        pthread_join(outbound_tid, NULL);
+    }
 
     /* Cleanup */
     for (int i = 0; i < channel_count; i++) {
@@ -455,9 +497,16 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     if (plugin_mgr) {
         plugin_manager_free(plugin_mgr);
     }
+    if (mcp_mgr) {
+        mcp_manager_free(mcp_mgr);
+    }
+
+    if (loop && !agent_thread_started) {
+        agent_loop_free(loop);
+    }
 
     /* curl_global_cleanup(); - Removed for Mongoose migration */
     logger_cleanup();
 
-    return 0;
+    return rc;
 }

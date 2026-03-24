@@ -19,6 +19,7 @@ typedef struct {
     size_t count;
     size_t capacity;
     String workspace_path;
+    pthread_mutex_t mutex;
 } SessionManager;
 
 // Functions

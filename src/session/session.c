@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <ctype.h>
+#include <stdint.h>
 
 static void build_session_file_path(SessionManager* mgr, const char* key, char* filepath, size_t filepath_size) {
     char sanitized[512];
@@ -23,13 +24,41 @@ static void build_session_file_path(SessionManager* mgr, const char* key, char* 
     snprintf(filepath, filepath_size, "%s/sessions/%s.jsonl", mgr->workspace_path.data, sanitized);
 }
 
+static Session* session_manager_create_unlocked(SessionManager* mgr, const char* key) {
+    if (!mgr || !key) return NULL;
+    if (mgr->count >= mgr->capacity) {
+        if (mgr->capacity > SIZE_MAX / 2) return NULL;
+        size_t new_capacity = mgr->capacity * 2;
+        if (new_capacity > SIZE_MAX / sizeof(Session*)) return NULL;
+        Session** new_sessions = realloc(mgr->sessions, new_capacity * sizeof(Session*));
+        if (!new_sessions) return NULL;
+        mgr->sessions = new_sessions;
+        mgr->capacity = new_capacity;
+    }
+    Session* session = calloc(1, sizeof(Session));
+    if (!session) return NULL;
+    session->key = string_new(key);
+    session->messages = dynamic_array_new(sizeof(Message*));
+    session->created_at = time(NULL);
+    session->updated_at = time(NULL);
+    session->last_consolidated = 0;
+    pthread_mutex_init(&session->mutex, NULL);
+    mgr->sessions[mgr->count++] = session;
+    return session;
+}
+
 SessionManager* session_manager_new(const char* workspace_path) {
     SessionManager* mgr = malloc(sizeof(SessionManager));
     if (!mgr) return NULL;
     mgr->count = 0;
     mgr->capacity = 8;
     mgr->sessions = malloc(mgr->capacity * sizeof(Session*));
+    if (!mgr->sessions) {
+        free(mgr);
+        return NULL;
+    }
     mgr->workspace_path = string_new(workspace_path);
+    pthread_mutex_init(&mgr->mutex, NULL);
     // Create sessions directory if not exists (including parent directories)
     char path[512];
     snprintf(path, sizeof(path), "%s/sessions", workspace_path);
@@ -65,34 +94,32 @@ void session_manager_free(SessionManager* mgr) {
     }
     free(mgr->sessions);
     string_free(&mgr->workspace_path);
+    pthread_mutex_destroy(&mgr->mutex);
     free(mgr);
 }
 
 Session* session_manager_get(SessionManager* mgr, const char* key) {
+    if (!mgr || !key) return NULL;
     String key_str = string_new(key);
+    pthread_mutex_lock(&mgr->mutex);
     for (size_t i = 0; i < mgr->count; i++) {
         if (string_equals(&mgr->sessions[i]->key, &key_str)) {
+            Session* found = mgr->sessions[i];
+            pthread_mutex_unlock(&mgr->mutex);
             string_free(&key_str);
-            return mgr->sessions[i];
+            return found;
         }
     }
+    pthread_mutex_unlock(&mgr->mutex);
     string_free(&key_str);
     return NULL;
 }
 
 Session* session_manager_create(SessionManager* mgr, const char* key) {
-    if (mgr->count >= mgr->capacity) {
-        mgr->capacity *= 2;
-        mgr->sessions = realloc(mgr->sessions, mgr->capacity * sizeof(Session*));
-    }
-    Session* session = malloc(sizeof(Session));
-    session->key = string_new(key);
-    session->messages = dynamic_array_new(sizeof(Message*));
-    session->created_at = time(NULL);
-    session->updated_at = time(NULL);
-    session->last_consolidated = 0;
-    pthread_mutex_init(&session->mutex, NULL);
-    mgr->sessions[mgr->count++] = session;
+    if (!mgr || !key) return NULL;
+    pthread_mutex_lock(&mgr->mutex);
+    Session* session = session_manager_create_unlocked(mgr, key);
+    pthread_mutex_unlock(&mgr->mutex);
     return session;
 }
 

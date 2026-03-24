@@ -152,6 +152,7 @@ static int command_ctx_reset_session(CommandContext* ctx) {
     if (!session) session_manager_load(data->loop->session_mgr, data->session_key, &session);
     if (!session) return -1;
 
+    pthread_mutex_lock(&session->mutex);
     for (size_t i = 0; i < session->messages.count; i++) {
         Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
         message_free(msg);
@@ -159,6 +160,7 @@ static int command_ctx_reset_session(CommandContext* ctx) {
     dynamic_array_clear_impl(&session->messages);
     session->last_consolidated = 0;
     session->updated_at = time(NULL);
+    pthread_mutex_unlock(&session->mutex);
     session_manager_save(data->loop->session_mgr, session);
     return 0;
 }
@@ -492,9 +494,11 @@ void agent_loop_set_llm_provider(AgentLoop* loop, LLMProvider provider) {
 
 void agent_loop_stop(AgentLoop* loop) {
     if (!loop) return;
-    agent_loop_set_running(loop, false);
-    message_bus_close(loop->bus);
     pthread_mutex_lock(&loop->inbox_mutex);
+    pthread_mutex_lock(&loop->state_mutex);
+    loop->running = false;
+    pthread_mutex_unlock(&loop->state_mutex);
+    message_bus_close(loop->bus);
     pthread_cond_broadcast(&loop->inbox_cond);
     pthread_mutex_unlock(&loop->inbox_mutex);
     log_debug("[AgentLoop] Stop requested");
@@ -923,6 +927,7 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
     snprintf(key, sizeof(key), "%s:%s", inbound->channel.data, inbound->chat_id.data);
 
     strncpy(loop->current_session_key, key, sizeof(loop->current_session_key) - 1);
+    loop->current_session_key[sizeof(loop->current_session_key) - 1] = '\0';
 
     refresh_tool_routes(loop, inbound->channel.data, inbound->chat_id.data);
 

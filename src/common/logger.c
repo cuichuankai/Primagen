@@ -6,12 +6,16 @@
 #include <pthread.h>
 #include <sys/time.h>
 #include <errno.h>
+#include <unistd.h>
 
 /* Global logger state */
 static FILE* log_file = NULL;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int current_log_level = 1; /* 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR */
 static bool console_enabled = true;
+static char log_file_path_buf[1024] = {0};
+static size_t log_max_bytes = 10 * 1024 * 1024;
+static int log_max_files = 3;
 
 static bool starts_with(const char* s, const char* prefix) {
     if (!s || !prefix) return false;
@@ -37,6 +41,29 @@ static bool should_demote_channel_info(const char* message) {
            starts_with(message, "[Plugin:feishu_channel]");
 }
 
+static void rotate_logs_if_needed_unlocked() {
+    if (!log_file || log_file_path_buf[0] == '\0') return;
+    long current_pos = ftell(log_file);
+    if (current_pos < 0) return;
+    if ((size_t)current_pos < log_max_bytes) return;
+
+    fclose(log_file);
+    log_file = NULL;
+
+    for (int i = log_max_files - 1; i >= 1; --i) {
+        char old_path[1200];
+        char new_path[1200];
+        snprintf(old_path, sizeof(old_path), "%s.%d", log_file_path_buf, i);
+        snprintf(new_path, sizeof(new_path), "%s.%d", log_file_path_buf, i + 1);
+        rename(old_path, new_path);
+    }
+
+    char rotated_path[1200];
+    snprintf(rotated_path, sizeof(rotated_path), "%s.1", log_file_path_buf);
+    rename(log_file_path_buf, rotated_path);
+    log_file = fopen(log_file_path_buf, "a");
+}
+
 /* Forward declaration */
 static void log_v_with_loc(const char* level, const char* fmt, va_list args,
                            const char* file, int line, const char* func);
@@ -53,12 +80,17 @@ static int get_level_int(const char* level) {
 /* Initialize logger with file path */
 void logger_init(const char* log_file_path) {
     if (log_file) return;
+    if (!log_file_path || log_file_path[0] == '\0') {
+        fprintf(stderr, "Failed to open log file: invalid path\n");
+        return;
+    }
 
     log_file = fopen(log_file_path, "a");
     if (!log_file) {
         fprintf(stderr, "Failed to open log file: %s\n", log_file_path);
         return;
     }
+    snprintf(log_file_path_buf, sizeof(log_file_path_buf), "%s", log_file_path ? log_file_path : "");
     log_debug("[Logger] Initialized with file: %s", log_file_path);
 }
 
@@ -161,6 +193,7 @@ static void log_v_with_loc(const char* level, const char* fmt, va_list args,
 
     /* File output */
     if (log_file) {
+        rotate_logs_if_needed_unlocked();
         if (file && line > 0) {
             const char* fname = strrchr(file, '/');
             fname = fname ? fname + 1 : file;
@@ -238,6 +271,7 @@ void log_error_errno(const char* fmt, ...) {
 
             /* Output to file */
             if (log_file) {
+                rotate_logs_if_needed_unlocked();
                 fprintf(log_file, "[%s] %s\n", "ERROR", message);
                 fflush(log_file);
             }

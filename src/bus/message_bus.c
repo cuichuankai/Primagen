@@ -181,21 +181,40 @@ void message_bus_free(MessageBus* bus) {
 }
 
 void message_bus_send_inbound(MessageBus* bus, InboundMessage* msg) {
+    if (!bus) {
+        inbound_message_free(msg);
+        return;
+    }
     message_queue_send(&bus->inbound, msg);
 }
 
 InboundMessage* message_bus_receive_inbound(MessageBus* bus) {
+    if (!bus) return NULL;
     return (InboundMessage*)message_queue_receive(&bus->inbound);
 }
 
 InboundMessage* message_bus_receive_inbound_timed(MessageBus* bus, int timeout_ms) {
+    if (!bus) return NULL;
     return (InboundMessage*)message_queue_receive_timed(&bus->inbound, timeout_ms);
 }
 
 void message_bus_send_outbound(MessageBus* bus, OutboundMessage* msg) {
+    if (!bus) {
+        outbound_message_free(msg);
+        return;
+    }
     message_queue_send(&bus->outbound, msg);
 }
 
 OutboundMessage* message_bus_receive_outbound(MessageBus* bus) {
+    if (!bus) return NULL;
     return (OutboundMessage*)message_queue_receive(&bus->outbound);
+}
+
+bool message_bus_is_outbound_closed(MessageBus* bus) {
+    if (!bus) return true;
+    pthread_mutex_lock(&bus->outbound.mutex);
+    bool closed = bus->outbound.closed;
+    pthread_mutex_unlock(&bus->outbound.mutex);
+    return closed;
 }

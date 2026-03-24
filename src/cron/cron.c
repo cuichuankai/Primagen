@@ -30,6 +30,15 @@ typedef enum {
     CRON_SCHEDULE_RECURRING = 2
 } CronScheduleType;
 
+static bool cron_service_is_running(CronService* service) {
+    if (!service) return false;
+    bool running = false;
+    pthread_mutex_lock(&service->mutex);
+    running = service->running;
+    pthread_mutex_unlock(&service->mutex);
+    return running;
+}
+
 static bool parse_daily_schedule(const char* schedule, int* hour, int* minute) {
     if (!schedule || !hour || !minute) return false;
     int parsed_hour = -1;
@@ -366,7 +375,7 @@ static void load_jobs(CronService* service) {
 static void* cron_worker(void* arg) {
     CronService* service = (CronService*)arg;
 
-    while (service->running) {
+    while (cron_service_is_running(service)) {
         time_t now = time(NULL);
         bool modified = false;
         
@@ -464,12 +473,19 @@ void cron_service_destroy(CronService* service) {
 }
 
 bool cron_service_start(CronService* service) {
-    if (!service || service->running) return false;
-
+    if (!service) return false;
+    pthread_mutex_lock(&service->mutex);
+    if (service->running) {
+        pthread_mutex_unlock(&service->mutex);
+        return false;
+    }
     service->running = true;
+    pthread_mutex_unlock(&service->mutex);
 
     if (pthread_create(&service->worker_thread, NULL, cron_worker, service) != 0) {
+        pthread_mutex_lock(&service->mutex);
         service->running = false;
+        pthread_mutex_unlock(&service->mutex);
         return false;
     }
 
@@ -477,10 +493,15 @@ bool cron_service_start(CronService* service) {
 }
 
 void cron_service_stop(CronService* service) {
-    if (!service || !service->running) return;
-
+    if (!service) return;
+    pthread_mutex_lock(&service->mutex);
+    bool was_running = service->running;
     service->running = false;
-    pthread_join(service->worker_thread, NULL);
+    pthread_t worker = service->worker_thread;
+    pthread_mutex_unlock(&service->mutex);
+    if (!was_running) return;
+    if (pthread_equal(pthread_self(), worker)) return;
+    pthread_join(worker, NULL);
 }
 
 void cron_service_set_callback(CronService* service, CronCallback callback) {

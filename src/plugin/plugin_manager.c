@@ -426,8 +426,30 @@ LoadedPlugin* plugin_manager_find_plugin(PluginManager* manager, const char* plu
 
     for (LoadedPlugin* p = manager->plugins; p; p = p->next) {
         if (strcmp(p->id, plugin_id) == 0) {
+            LoadedPlugin* copy = calloc(1, sizeof(LoadedPlugin));
+            if (!copy) {
+                pthread_mutex_unlock(&manager->lock);
+                return NULL;
+            }
+            copy->id = p->id ? strdup(p->id) : NULL;
+            copy->name = p->name ? strdup(p->name) : NULL;
+            copy->path = p->path ? strdup(p->path) : NULL;
+            copy->type = p->type;
+            copy->handle = NULL;
+            copy->info = NULL;
+            copy->init = NULL;
+            copy->cleanup = NULL;
+            copy->next = NULL;
+            if ((p->id && !copy->id) || (p->name && !copy->name) || (p->path && !copy->path)) {
+                free(copy->id);
+                free(copy->name);
+                free(copy->path);
+                free(copy);
+                pthread_mutex_unlock(&manager->lock);
+                return NULL;
+            }
             pthread_mutex_unlock(&manager->lock);
-            return p;
+            return copy;
         }
     }
 
@@ -442,13 +464,43 @@ LoadedPlugin* plugin_manager_find_plugin_by_name(PluginManager* manager, const c
 
     for (LoadedPlugin* p = manager->plugins; p; p = p->next) {
         if (strcmp(p->name, name) == 0) {
+            LoadedPlugin* copy = calloc(1, sizeof(LoadedPlugin));
+            if (!copy) {
+                pthread_mutex_unlock(&manager->lock);
+                return NULL;
+            }
+            copy->id = p->id ? strdup(p->id) : NULL;
+            copy->name = p->name ? strdup(p->name) : NULL;
+            copy->path = p->path ? strdup(p->path) : NULL;
+            copy->type = p->type;
+            copy->handle = NULL;
+            copy->info = NULL;
+            copy->init = NULL;
+            copy->cleanup = NULL;
+            copy->next = NULL;
+            if ((p->id && !copy->id) || (p->name && !copy->name) || (p->path && !copy->path)) {
+                free(copy->id);
+                free(copy->name);
+                free(copy->path);
+                free(copy);
+                pthread_mutex_unlock(&manager->lock);
+                return NULL;
+            }
             pthread_mutex_unlock(&manager->lock);
-            return p;
+            return copy;
         }
     }
 
     pthread_mutex_unlock(&manager->lock);
     return NULL;
+}
+
+void plugin_manager_free_plugin_snapshot(LoadedPlugin* plugin) {
+    if (!plugin) return;
+    free(plugin->id);
+    free(plugin->name);
+    free(plugin->path);
+    free(plugin);
 }
 
 // =============================================================================

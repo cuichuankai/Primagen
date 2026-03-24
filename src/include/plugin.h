@@ -151,6 +151,7 @@ int plugin_manager_reload_plugin(PluginManager* manager, const char* plugin_id);
 // Plugin discovery
 LoadedPlugin* plugin_manager_find_plugin(PluginManager* manager, const char* plugin_id);
 LoadedPlugin* plugin_manager_find_plugin_by_name(PluginManager* manager, const char* name);
+void plugin_manager_free_plugin_snapshot(LoadedPlugin* plugin);
 
 // Registration helpers (for plugins to register themselves)
 int plugin_manager_register_tool(PluginManager* manager, ToolPluginDef* tool_def);

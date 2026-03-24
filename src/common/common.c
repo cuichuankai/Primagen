@@ -1,4 +1,5 @@
-#include "common.h"
+#include "../include/common.h"
+#include <stdint.h>
 
 String string_new(const char* str) {
     String s;
@@ -31,10 +32,13 @@ String string_copy(const String* s) {
 }
 
 void string_append(String* s, const char* str) {
-    if (!str) return;
+    if (!s || !str) return;
     size_t str_len = strlen(str);
-    s->data = realloc(s->data, s->len + str_len + 1);
-    if (!s->data) return;
+    if (str_len > SIZE_MAX - s->len - 1) return;
+    size_t new_size = s->len + str_len + 1;
+    char* new_data = realloc(s->data, new_size);
+    if (!new_data) return;
+    s->data = new_data;
     strcpy(s->data + s->len, str);
     s->len += str_len;
 }
@@ -62,9 +66,15 @@ void string_array_free(StringArray* arr) {
 }
 
 void string_array_add(StringArray* arr, const char* str) {
+    if (!arr) return;
     if (arr->count >= arr->capacity) {
-        arr->capacity *= 2;
-        arr->items = realloc(arr->items, arr->capacity * sizeof(String));
+        if (arr->capacity > SIZE_MAX / 2) return;
+        size_t new_capacity = arr->capacity * 2;
+        if (new_capacity > SIZE_MAX / sizeof(String)) return;
+        String* new_items = realloc(arr->items, new_capacity * sizeof(String));
+        if (!new_items) return;
+        arr->items = new_items;
+        arr->capacity = new_capacity;
     }
     arr->items[arr->count] = string_new(str);
     arr->count++;
@@ -93,9 +103,15 @@ void* dynamic_array_get(DynamicArray* arr, size_t index) {
 }
 
 void dynamic_array_add(DynamicArray* arr, void* item) {
+    if (!arr || !item) return;
     if (arr->count >= arr->capacity) {
-        arr->capacity *= 2;
-        arr->items = realloc(arr->items, arr->capacity * arr->item_size);
+        if (arr->capacity > SIZE_MAX / 2) return;
+        size_t new_capacity = arr->capacity * 2;
+        if (arr->item_size > 0 && new_capacity > SIZE_MAX / arr->item_size) return;
+        void* new_items = realloc(arr->items, new_capacity * arr->item_size);
+        if (!new_items) return;
+        arr->items = new_items;
+        arr->capacity = new_capacity;
     }
     memcpy((char*)arr->items + arr->count * arr->item_size, item, arr->item_size);
     arr->count++;

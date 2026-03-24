@@ -149,7 +149,13 @@ int tool_executor_submit(ToolExecutor* executor, const char* tool_name,
     if (!request) return -1;
 
     request->tool_name = strdup(tool_name);
-    request->arguments = strdup(arguments);
+    request->arguments = strdup(arguments ? arguments : "{}");
+    if (!request->tool_name || !request->arguments) {
+        free(request->tool_name);
+        free(request->arguments);
+        free(request);
+        return -1;
+    }
     request->context = context;
     request->callback = callback;
     request->next = NULL;
@@ -173,23 +179,44 @@ typedef struct {
     String* result;
     Error* err;
     bool done;
+    bool timed_out;
+    int refs;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } SyncExecutionContext;
+
+static void sync_context_release(SyncExecutionContext* ctx) {
+    if (!ctx) return;
+    bool should_free = false;
+    pthread_mutex_lock(&ctx->mutex);
+    ctx->refs--;
+    if (ctx->refs == 0) {
+        should_free = true;
+    }
+    pthread_mutex_unlock(&ctx->mutex);
+    if (should_free) {
+        pthread_mutex_destroy(&ctx->mutex);
+        pthread_cond_destroy(&ctx->cond);
+        free(ctx);
+    }
+}
 
 static void sync_callback(void* context, const char* tool_name, const char* result, Error err) {
     (void)tool_name;  // May be used in future extensions
     SyncExecutionContext* ctx = (SyncExecutionContext*)context;
     pthread_mutex_lock(&ctx->mutex);
-    if (result && ctx->result) {
+    if (!ctx->timed_out && result && ctx->result) {
         string_append(ctx->result, result);
     }
-    if (ctx->err) {
+    if (!ctx->timed_out && ctx->err) {
         *ctx->err = err;
     }
-    ctx->done = true;
-    pthread_cond_signal(&ctx->cond);
+    if (!ctx->timed_out) {
+        ctx->done = true;
+        pthread_cond_signal(&ctx->cond);
+    }
     pthread_mutex_unlock(&ctx->mutex);
+    sync_context_release(ctx);
 }
 
 Error tool_executor_execute_sync(ToolExecutor* executor, const char* tool_name,
@@ -198,24 +225,30 @@ Error tool_executor_execute_sync(ToolExecutor* executor, const char* tool_name,
         return error_new(ERR_INVALID_PARAM, "Invalid parameters");
     }
 
-    SyncExecutionContext ctx;
+    SyncExecutionContext* ctx = calloc(1, sizeof(SyncExecutionContext));
+    if (!ctx) {
+        return error_new(ERR_MEMORY, "Failed to allocate sync execution context");
+    }
+
     Error sync_err = error_new(ERR_NONE, "");
-    ctx.result = result;
-    ctx.err = &sync_err;
-    ctx.done = false;
-    pthread_mutex_init(&ctx.mutex, NULL);
-    pthread_cond_init(&ctx.cond, NULL);
+    ctx->result = result;
+    ctx->err = &sync_err;
+    ctx->done = false;
+    ctx->timed_out = false;
+    ctx->refs = 2;
+    pthread_mutex_init(&ctx->mutex, NULL);
+    pthread_cond_init(&ctx->cond, NULL);
 
     // Submit request
-    int ret = tool_executor_submit(executor, tool_name, arguments, &ctx, sync_callback);
+    int ret = tool_executor_submit(executor, tool_name, arguments, ctx, sync_callback);
     if (ret != 0) {
-        pthread_mutex_destroy(&ctx.mutex);
-        pthread_cond_destroy(&ctx.cond);
+        sync_context_release(ctx);
+        sync_context_release(ctx);
         return error_new(ERR_TOOL, "Failed to submit tool execution");
     }
 
     // Wait for completion with timeout
-    pthread_mutex_lock(&ctx.mutex);
+    pthread_mutex_lock(&ctx->mutex);
 
     if (timeout_ms > 0) {
         struct timespec ts;
@@ -227,24 +260,23 @@ Error tool_executor_execute_sync(ToolExecutor* executor, const char* tool_name,
             ts.tv_nsec -= 1000000000;
         }
 
-        while (!ctx.done && errno != ETIMEDOUT) {
-            int rc = pthread_cond_timedwait(&ctx.cond, &ctx.mutex, &ts);
+        while (!ctx->done) {
+            int rc = pthread_cond_timedwait(&ctx->cond, &ctx->mutex, &ts);
             if (rc == ETIMEDOUT) {
-                pthread_mutex_unlock(&ctx.mutex);
-                pthread_mutex_destroy(&ctx.mutex);
-                pthread_cond_destroy(&ctx.cond);
+                ctx->timed_out = true;
+                pthread_mutex_unlock(&ctx->mutex);
+                sync_context_release(ctx);
                 return error_new(ERR_TIMEOUT, "Tool execution timed out");
             }
         }
     } else {
-        while (!ctx.done) {
-            pthread_cond_wait(&ctx.cond, &ctx.mutex);
+        while (!ctx->done) {
+            pthread_cond_wait(&ctx->cond, &ctx->mutex);
         }
     }
 
-    pthread_mutex_unlock(&ctx.mutex);
-    pthread_mutex_destroy(&ctx.mutex);
-    pthread_cond_destroy(&ctx.cond);
+    pthread_mutex_unlock(&ctx->mutex);
+    sync_context_release(ctx);
 
     return sync_err;
 }

@@ -174,9 +174,11 @@ void acp_server_stop(ACPServer* server) {
 // HTTP event handler
 void acp_event_handler(struct mg_connection* nc, int ev, void* ev_data) {
     if (ev != MG_EV_HTTP_MSG) return;
+    if (!nc || !ev_data || !nc->fn_data) return;
 
     ACPServer* server = (ACPServer*)nc->fn_data;
     struct mg_http_message* hm = (struct mg_http_message*)ev_data;
+    if (!server || !hm) return;
 
     // Track connections
     pthread_mutex_lock(&server->connection_mutex);

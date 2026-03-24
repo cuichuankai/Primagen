@@ -100,8 +100,10 @@ static void ensure_dir(const char* path) {
     char *p = NULL;
     size_t len;
 
+    if (!path || path[0] == '\0') return;
     snprintf(tmp, sizeof(tmp), "%s", path);
     len = strlen(tmp);
+    if (len == 0) return;
     if (tmp[len - 1] == '/') tmp[len - 1] = 0;
     
     char* last_slash = strrchr(tmp, '/');

@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 
 typedef struct {
     pid_t pid;
@@ -108,6 +109,7 @@ static Error mcp_transport_stdio_reconnect(MCPClient* client) {
         }
         size_t argc = client->args_count + 1;
         char** argv = malloc((argc + 1) * sizeof(char*));
+        if (!argv) _exit(127);
         argv[0] = client->command;
         for (size_t i = 0; i < client->args_count; i++) argv[i + 1] = client->args[i];
         argv[argc] = NULL;
@@ -173,11 +175,48 @@ static void* stdio_reader_thread(void* arg) {
             cJSON* json = cJSON_Parse(line);
             if (json) {
                 char* json_str = cJSON_PrintUnformatted(json);
+                if (!json_str) {
+                    cJSON_Delete(json);
+                    size_t remaining = strlen(nl + 1);
+                    memmove(line, nl + 1, remaining + 1);
+                    line_pos = remaining;
+                    continue;
+                }
                 pthread_mutex_lock(&transport->mutex);
-                size_t needed = transport->buffer_len + strlen(json_str) + 2;
+                size_t json_len = strlen(json_str);
+                if (json_len > SIZE_MAX - transport->buffer_len - 2) {
+                    pthread_mutex_unlock(&transport->mutex);
+                    free(json_str);
+                    cJSON_Delete(json);
+                    size_t remaining = strlen(nl + 1);
+                    memmove(line, nl + 1, remaining + 1);
+                    line_pos = remaining;
+                    continue;
+                }
+                size_t needed = transport->buffer_len + json_len + 2;
                 if (needed >= transport->buffer_size) {
-                    transport->buffer_size = needed * 2;
-                    transport->read_buffer = realloc(transport->read_buffer, transport->buffer_size);
+                    if (needed > SIZE_MAX / 2) {
+                        pthread_mutex_unlock(&transport->mutex);
+                        free(json_str);
+                        cJSON_Delete(json);
+                        size_t remaining = strlen(nl + 1);
+                        memmove(line, nl + 1, remaining + 1);
+                        line_pos = remaining;
+                        continue;
+                    }
+                    size_t new_size = needed * 2;
+                    char* new_buf = realloc(transport->read_buffer, new_size);
+                    if (!new_buf) {
+                        pthread_mutex_unlock(&transport->mutex);
+                        free(json_str);
+                        cJSON_Delete(json);
+                        size_t remaining = strlen(nl + 1);
+                        memmove(line, nl + 1, remaining + 1);
+                        line_pos = remaining;
+                        continue;
+                    }
+                    transport->read_buffer = new_buf;
+                    transport->buffer_size = new_size;
                 }
                 if (transport->buffer_len > 0) {
                     strcat(transport->read_buffer, "\n");
@@ -259,6 +298,7 @@ static Error mcp_transport_stdio_init(MCPClient* client) {
         }
         size_t argc = client->args_count + 1;
         char** argv = malloc((argc + 1) * sizeof(char*));
+        if (!argv) _exit(127);
         argv[0] = client->command;
         for (size_t i = 0; i < client->args_count; i++) argv[i + 1] = client->args[i];
         argv[argc] = NULL;
@@ -272,11 +312,26 @@ static Error mcp_transport_stdio_init(MCPClient* client) {
     set_nonblocking(stdout_pipe[0]);
 
     MCPStdioTransport* transport = calloc(1, sizeof(MCPStdioTransport));
+    if (!transport) {
+        close(stdin_pipe[1]);
+        close(stdout_pipe[0]);
+        kill(pid, SIGTERM);
+        waitpid(pid, NULL, 0);
+        return error_new(ERR_MEMORY, "Failed to allocate stdio transport");
+    }
     transport->pid = pid;
     transport->stdin_fd = stdin_pipe[1];
     transport->stdout_fd = stdout_pipe[0];
     transport->running = true;
     transport->read_buffer = malloc(READ_BUFFER_SIZE);
+    if (!transport->read_buffer) {
+        close(transport->stdin_fd);
+        close(transport->stdout_fd);
+        kill(pid, SIGTERM);
+        waitpid(pid, NULL, 0);
+        free(transport);
+        return error_new(ERR_MEMORY, "Failed to allocate stdio buffer");
+    }
     transport->read_buffer[0] = '\0';
     transport->buffer_size = READ_BUFFER_SIZE;
     transport->buffer_len = 0;
