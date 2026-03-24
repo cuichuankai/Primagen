@@ -5,6 +5,7 @@ This plugin adds Feishu (Lark) bot message send/receive support to Primagen.
 ## Capabilities
 
 - Sends outbound messages to Feishu chats
+- Supports image/audio/video attachment upload and delivery
 - Receives inbound messages through Feishu WebSocket stream
 - Automatically obtains and refreshes tenant access token
 - Supports plain text mode and optional card mode (`use_card`)
@@ -41,6 +42,31 @@ Configure the plugin in `.primagen/config.json` under `plugins`:
 
 - Outbound channel name must be `feishu`.
 - `chat_id` should be a Feishu receive/chat identifier that the bot can send to.
+
+## Attachment Format
+
+`send_message` supports optional `attachments`:
+
+```json
+{
+  "content": "可选文本说明",
+  "attachments": [
+    {
+      "type": "image",
+      "path": "/absolute/path/to/picture.png"
+    },
+    {
+      "type": "audio",
+      "path": "/absolute/path/to/audio.opus",
+      "duration": 3000
+    },
+    {
+      "type": "video",
+      "path": "/absolute/path/to/video.mp4"
+    }
+  ]
+}
+```
 
 ## Build and Install
 
@@ -91,4 +117,3 @@ The plugin is loaded automatically during startup.
 ## Reference
 
 - Feishu Open Platform: <https://open.feishu.cn/>
-

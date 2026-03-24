@@ -25,6 +25,60 @@ static char* get_json_string(cJSON* root, const char* key) {
     return NULL;
 }
 
+static Error parse_send_message_attachments(cJSON* json, OutboundMessage* msg) {
+    cJSON* attachments = cJSON_GetObjectItem(json, "attachments");
+    if (!attachments) {
+        return error_new(ERR_NONE, "");
+    }
+    if (!cJSON_IsArray(attachments)) {
+        return error_new(ERR_INVALID_PARAM, "'attachments' must be an array");
+    }
+
+    cJSON* item = NULL;
+    cJSON_ArrayForEach(item, attachments) {
+        if (cJSON_IsString(item) && item->valuestring) {
+            string_array_add(&msg->attachments, item->valuestring);
+            continue;
+        }
+        if (!cJSON_IsObject(item)) {
+            return error_new(ERR_INVALID_PARAM, "Each attachment must be string or object");
+        }
+
+        char* type = get_json_string(item, "type");
+        char* path = get_json_string(item, "path");
+        if (!type || !path) {
+            return error_new(ERR_INVALID_PARAM, "Attachment object requires 'type' and 'path'");
+        }
+
+        cJSON* normalized = cJSON_CreateObject();
+        if (!normalized) {
+            return error_new(ERR_MEMORY, "Memory allocation failed");
+        }
+        cJSON_AddStringToObject(normalized, "type", type);
+        cJSON_AddStringToObject(normalized, "path", path);
+
+        cJSON* duration = cJSON_GetObjectItem(item, "duration");
+        if (cJSON_IsNumber(duration) && duration->valueint > 0) {
+            cJSON_AddNumberToObject(normalized, "duration", duration->valueint);
+        }
+        char* cover_path = get_json_string(item, "cover_path");
+        if (cover_path) {
+            cJSON_AddStringToObject(normalized, "cover_path", cover_path);
+        }
+
+        char* normalized_str = cJSON_PrintUnformatted(normalized);
+        cJSON_Delete(normalized);
+        if (!normalized_str) {
+            return error_new(ERR_MEMORY, "Memory allocation failed");
+        }
+
+        string_array_add(&msg->attachments, normalized_str);
+        free(normalized_str);
+    }
+
+    return error_new(ERR_NONE, "");
+}
+
 static bool is_placeholder_value(const char* s) {
     if (!s || s[0] == '\0') return true;
     if (strcmp(s, "current") == 0 || strcmp(s, "chat") == 0 ||
@@ -545,6 +599,18 @@ Error tool_send_message(void* user_data, const char* args_json, String* result) 
     }
     
     OutboundMessage* msg = outbound_message_new(channel, chat_id, content);
+    if (!msg) {
+        cJSON_Delete(json);
+        return error_new(ERR_MEMORY, "Failed to allocate outbound message");
+    }
+
+    Error parse_error = parse_send_message_attachments(json, msg);
+    if (parse_error.code != ERR_NONE) {
+        outbound_message_free(msg);
+        cJSON_Delete(json);
+        return parse_error;
+    }
+
     message_bus_send_outbound(ctx->bus, msg);
     
     *result = string_new("Message queued for delivery");

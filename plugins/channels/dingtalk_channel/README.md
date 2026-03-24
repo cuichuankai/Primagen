@@ -5,6 +5,7 @@ This plugin adds DingTalk message send/receive support to Primagen.
 ## Capabilities
 
 - Sends outbound messages to DingTalk
+- Supports image/audio/video attachment upload and delivery
 - Receives inbound messages through DingTalk WebSocket streaming
 - Automatically refreshes and reuses `access_token`
 - Supports session-webhook reply mode for better threaded responses
@@ -41,6 +42,31 @@ Configure the plugin in `.primagen/config.json` under `plugins`:
 - `chat_id` can be:
   - `webhook_url|conversation_id` (preferred for replies)
   - `conversation_id` (legacy fallback)
+
+## Attachment Format
+
+`send_message` supports optional `attachments`:
+
+```json
+{
+  "content": "可选文本说明",
+  "attachments": [
+    {
+      "type": "image",
+      "path": "/absolute/path/to/picture.png"
+    },
+    {
+      "type": "audio",
+      "path": "/absolute/path/to/audio.mp3",
+      "duration": 2000
+    },
+    {
+      "type": "video",
+      "path": "/absolute/path/to/video.mp4"
+    }
+  ]
+}
+```
 
 ## Build and Install
 
@@ -91,4 +117,3 @@ The plugin is loaded automatically during startup.
 ## Reference
 
 - DingTalk Open Platform: <https://developers.dingtalk.com/>
-

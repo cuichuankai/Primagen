@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <stdint.h>
 
 // =============================================================================
 // Channel Data
@@ -39,19 +40,36 @@ struct MemoryStruct {
     bool done;
 };
 
+static bool memory_append_chunk(struct MemoryStruct* ms, const char* data, size_t len) {
+    if (!ms) return false;
+    if (len > 0 && !data) return false;
+    if (len > SIZE_MAX - ms->size - 1) return false;
+    size_t new_size = ms->size + len;
+    char* new_mem = realloc(ms->memory, new_size + 1);
+    if (!new_mem) return false;
+    ms->memory = new_mem;
+    if (len > 0) {
+        memcpy(ms->memory + ms->size, data, len);
+    }
+    ms->size = new_size;
+    ms->memory[ms->size] = '\0';
+    return true;
+}
+
 // =============================================================================
 // HTTP Callback for Mongoose
 // =============================================================================
 
 static void fn(struct mg_connection *c, int ev, void *ev_data) {
     struct MemoryStruct *ms = (struct MemoryStruct *) c->fn_data;
+    if (!ms) return;
     if (ev == MG_EV_HTTP_MSG) {
         struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-        size_t new_size = ms->size + hm->body.len;
-        ms->memory = realloc(ms->memory, new_size + 1);
-        memcpy(ms->memory + ms->size, hm->body.buf, hm->body.len);
-        ms->size = new_size;
-        ms->memory[ms->size] = '\0';
+        if (!memory_append_chunk(ms, hm->body.buf, hm->body.len)) {
+            ms->done = true;
+            c->is_closing = 1;
+            return;
+        }
         c->is_closing = 1;
         ms->done = true;
     } else if (ev == MG_EV_ERROR) {

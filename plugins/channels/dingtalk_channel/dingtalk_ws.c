@@ -969,7 +969,12 @@ static void url_callback_fn(struct mg_connection* c, int ev, void* ev_data) {
                  (int)hm->method.len, hm->method.buf,
                  (int)hm->uri.len, hm->uri.buf);
         log_info("[DingTalk] HTTP body: %.*s", (int)hm->body.len, hm->body.buf);
-        char* new_mem = realloc(chunk->memory, chunk->size + hm->body.len + 1);
+        if (hm->body.len > SIZE_MAX - chunk->size - 1) {
+            chunk->done = true;
+            return;
+        }
+        size_t new_size = chunk->size + hm->body.len + 1;
+        char* new_mem = realloc(chunk->memory, new_size);
         if (new_mem) {
             chunk->memory = new_mem;
             memcpy(chunk->memory + chunk->size, hm->body.buf, hm->body.len);

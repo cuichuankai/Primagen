@@ -182,8 +182,8 @@ static void* subagent_task_runner(void* arg) {
     tool_registry_register(task_data->tool_reg, "exec", "Execute shell command",
         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}",
         tool_exec, &tool_ctx);
-    tool_registry_register(task_data->tool_reg, "send_message", "Send message to user",
-        "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"}},\"required\":[\"content\"]}",
+    tool_registry_register(task_data->tool_reg, "send_message", "Send message to user. Optional attachments support image/audio/video uploads.",
+        "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"},\"attachments\":{\"type\":\"array\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"image\",\"audio\",\"video\"]},\"path\":{\"type\":\"string\"},\"duration\":{\"type\":\"integer\",\"minimum\":1},\"cover_path\":{\"type\":\"string\"}},\"required\":[\"type\",\"path\"]}]}}},\"required\":[\"content\"]}",
         tool_send_message, &tool_ctx);
     tool_registry_register(task_data->tool_reg, "spawn_subagent", "Spawn subagent",
         "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"task\"]}",

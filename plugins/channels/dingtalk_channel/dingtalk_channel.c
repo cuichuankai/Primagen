@@ -1,22 +1,25 @@
 /*
  * DingTalk Channel Plugin
  *
- * A plugin that provides DingTalk channel support for Primagen.
- * Uses DingTalk API for sending and receiving messages.
+ * Provides DingTalk channel support for Primagen.
+ * Uses DingTalk APIs for token refresh, WebSocket receive, and message send.
  *
  * Configuration (.primagen/config.json):
- *   "channels": {
- *     "dingtalk": {
- *       "enabled": true,
+ *   "plugins": [{
+ *     "plugin_id": "dingtalk_channel",
+ *     "enabled": true,
+ *     "config": {
  *       "clientId": "your_robot_client_id",
- *       "clientSecret": "your_robot_client_secret",
- *       "allowFrom": ["user1", "user2"]
+ *       "clientSecret": "your_robot_client_secret"
  *     }
- *   }
+ *   }]
  *
- * Receiving Messages (WebSocket Mode):
- *   The channel automatically connects to DingTalk WebSocket server
- *   for real-time message reception.
+ * Runtime behavior:
+ *   - Receives messages via DingTalk WebSocket.
+ *   - Replies through session webhook when available.
+ *   - Sends attachments through media/upload + chat/send.
+ *   - If image attachment upload fails and "<file>.url" exists,
+ *     falls back to markdown image link delivery.
  *
  * Build: make
  * Install: make install
@@ -34,8 +37,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <stdint.h>
+#include <sys/stat.h>
 
 // =============================================================================
 // Channel Data
@@ -69,19 +75,36 @@ struct MemoryStruct {
     bool done;
 };
 
+static bool memory_append_chunk(struct MemoryStruct* ms, const char* data, size_t len) {
+    if (!ms) return false;
+    if (len > 0 && !data) return false;
+    if (len > SIZE_MAX - ms->size - 1) return false;
+    size_t new_size = ms->size + len;
+    char* new_mem = realloc(ms->memory, new_size + 1);
+    if (!new_mem) return false;
+    ms->memory = new_mem;
+    if (len > 0) {
+        memcpy(ms->memory + ms->size, data, len);
+    }
+    ms->size = new_size;
+    ms->memory[ms->size] = '\0';
+    return true;
+}
+
 // =============================================================================
 // HTTP Callback for Mongoose
 // =============================================================================
 
 static void fn(struct mg_connection *c, int ev, void *ev_data) {
     struct MemoryStruct *ms = (struct MemoryStruct *) c->fn_data;
+    if (!ms) return;
     if (ev == MG_EV_HTTP_MSG) {
         struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-        size_t new_size = ms->size + hm->body.len;
-        ms->memory = realloc(ms->memory, new_size + 1);
-        memcpy(ms->memory + ms->size, hm->body.buf, hm->body.len);
-        ms->size = new_size;
-        ms->memory[ms->size] = '\0';
+        if (!memory_append_chunk(ms, hm->body.buf, hm->body.len)) {
+            ms->done = true;
+            c->is_closing = 1;
+            return;
+        }
         c->is_closing = 1;
         ms->done = true;
     } else if (ev == MG_EV_ERROR) {
@@ -94,17 +117,16 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 // data as it arrives via MG_EV_READ and mark done on MG_EV_CLOSE
 static void webhook_fn(struct mg_connection *c, int ev, void *ev_data) {
     struct MemoryStruct *ms = (struct MemoryStruct *) c->fn_data;
+    if (!ms) return;
 
     if (ev == MG_EV_HTTP_MSG) {
         // Normal case: response has Content-Length or is chunked
         struct mg_http_message *hm = (struct mg_http_message *) ev_data;
         if (hm->body.len > 0) {
-            size_t new_size = ms->size + hm->body.len;
-            ms->memory = realloc(ms->memory, new_size + 1);
-            if (ms->memory) {
-                memcpy(ms->memory + ms->size, hm->body.buf, hm->body.len);
-                ms->size = new_size;
-                ms->memory[ms->size] = '\0';
+            if (!memory_append_chunk(ms, hm->body.buf, hm->body.len)) {
+                ms->done = true;
+                c->is_closing = 1;
+                return;
             }
             c->is_closing = 1;
             ms->done = true;
@@ -123,12 +145,10 @@ static void webhook_fn(struct mg_connection *c, int ev, void *ev_data) {
             // The new data is at the end of c->recv buffer
             if (c->recv.len >= (size_t) bytes_read) {
                 const char *new_data = (char *) c->recv.buf + (c->recv.len - bytes_read);
-                size_t new_size = ms->size + bytes_read;
-                ms->memory = realloc(ms->memory, new_size + 1);
-                if (ms->memory) {
-                    memcpy(ms->memory + ms->size, new_data, bytes_read);
-                    ms->size = new_size;
-                    ms->memory[ms->size] = '\0';
+                if (!memory_append_chunk(ms, new_data, (size_t)bytes_read)) {
+                    ms->done = true;
+                    c->is_closing = 1;
+                    return;
                 }
                 log_debug("[DingTalk] Webhook data received via MG_EV_READ (%ld bytes)", bytes_read);
             }
@@ -234,6 +254,316 @@ static void refresh_token(DingTalkChannelData* data) {
 
 static bool is_token_valid(DingTalkChannelData* data) {
     return data->access_token != NULL && time(NULL) < data->token_expiry - 300;
+}
+
+typedef struct {
+    char type[16];
+    char path[1024];
+    int duration;
+} DingTalkAttachment;
+
+static bool append_text_chunk(struct MemoryStruct* ms, const char* text) {
+    return memory_append_chunk(ms, text, strlen(text));
+}
+
+static const char* dingtalk_file_basename(const char* path) {
+    const char* slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static bool read_file_bytes(const char* path, unsigned char** out_bytes, size_t* out_len) {
+    struct stat st;
+    if (stat(path, &st) != 0 || st.st_size <= 0) return false;
+    FILE* fp = fopen(path, "rb");
+    if (!fp) return false;
+    unsigned char* bytes = malloc((size_t)st.st_size);
+    if (!bytes) {
+        fclose(fp);
+        return false;
+    }
+    size_t n = fread(bytes, 1, (size_t)st.st_size, fp);
+    fclose(fp);
+    if (n != (size_t)st.st_size) {
+        free(bytes);
+        return false;
+    }
+    *out_bytes = bytes;
+    *out_len = n;
+    return true;
+}
+
+static bool read_first_line(const char* path, char** out_line) {
+    if (!path || !out_line) return false;
+    FILE* fp = fopen(path, "rb");
+    if (!fp) return false;
+    char buf[4096];
+    if (!fgets(buf, sizeof(buf), fp)) {
+        fclose(fp);
+        return false;
+    }
+    fclose(fp);
+    size_t len = strcspn(buf, "\r\n");
+    buf[len] = '\0';
+    if (len == 0) return false;
+    *out_line = strdup(buf);
+    return *out_line != NULL;
+}
+
+static bool append_markdown_line(char** dest, const char* line) {
+    if (!dest || !line || line[0] == '\0') return false;
+    if (!*dest) {
+        *dest = strdup(line);
+        return *dest != NULL;
+    }
+    size_t old_len = strlen(*dest);
+    size_t line_len = strlen(line);
+    if (old_len > SIZE_MAX - line_len - 3) return false;
+    char* next = realloc(*dest, old_len + line_len + 3);
+    if (!next) return false;
+    next[old_len] = '\n';
+    next[old_len + 1] = '\n';
+    memcpy(next + old_len + 2, line, line_len + 1);
+    *dest = next;
+    return true;
+}
+
+static const char* infer_attachment_type(const char* path) {
+    const char* dot = strrchr(path, '.');
+    if (!dot || *(dot + 1) == '\0') return NULL;
+    const char* ext = dot + 1;
+    if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0 ||
+        strcasecmp(ext, "png") == 0 || strcasecmp(ext, "gif") == 0 ||
+        strcasecmp(ext, "webp") == 0 || strcasecmp(ext, "bmp") == 0) return "image";
+    if (strcasecmp(ext, "mp3") == 0 || strcasecmp(ext, "wav") == 0 ||
+        strcasecmp(ext, "opus") == 0 || strcasecmp(ext, "amr") == 0 ||
+        strcasecmp(ext, "aac") == 0 || strcasecmp(ext, "m4a") == 0 ||
+        strcasecmp(ext, "ogg") == 0) return "audio";
+    if (strcasecmp(ext, "mp4") == 0 || strcasecmp(ext, "mov") == 0 ||
+        strcasecmp(ext, "mkv") == 0 || strcasecmp(ext, "avi") == 0 ||
+        strcasecmp(ext, "webm") == 0) return "video";
+    return NULL;
+}
+
+static bool parse_attachment_spec(const char* raw, DingTalkAttachment* out) {
+    if (!raw || !out) return false;
+    memset(out, 0, sizeof(*out));
+
+    if (raw[0] == '{') {
+        cJSON* json = cJSON_Parse(raw);
+        if (!json) return false;
+        cJSON* type = cJSON_GetObjectItem(json, "type");
+        cJSON* path = cJSON_GetObjectItem(json, "path");
+        cJSON* duration = cJSON_GetObjectItem(json, "duration");
+        if (!cJSON_IsString(type) || !type->valuestring || !cJSON_IsString(path) || !path->valuestring) {
+            cJSON_Delete(json);
+            return false;
+        }
+        snprintf(out->type, sizeof(out->type), "%s", type->valuestring);
+        snprintf(out->path, sizeof(out->path), "%s", path->valuestring);
+        if (cJSON_IsNumber(duration) && duration->valueint > 0) {
+            out->duration = duration->valueint;
+        }
+        cJSON_Delete(json);
+        return true;
+    }
+
+    const char* inferred = infer_attachment_type(raw);
+    if (!inferred) return false;
+    snprintf(out->type, sizeof(out->type), "%s", inferred);
+    snprintf(out->path, sizeof(out->path), "%s", raw);
+    return true;
+}
+
+static bool build_upload_body(const char* boundary, const char* file_path, struct MemoryStruct* body) {
+    unsigned char* file_bytes = NULL;
+    size_t file_len = 0;
+    if (!read_file_bytes(file_path, &file_bytes, &file_len)) return false;
+
+    char line[2048];
+    if (snprintf(line, sizeof(line), "--%s\r\n", boundary) < 0 || !append_text_chunk(body, line)) goto fail;
+    if (snprintf(line, sizeof(line),
+                 "Content-Disposition: form-data; name=\"media\"; filename=\"%s\"\r\n"
+                 "Content-Type: application/octet-stream\r\n\r\n",
+                 dingtalk_file_basename(file_path)) < 0 || !append_text_chunk(body, line)) goto fail;
+    if (!memory_append_chunk(body, (const char*)file_bytes, file_len)) goto fail;
+    if (!append_text_chunk(body, "\r\n")) goto fail;
+    if (snprintf(line, sizeof(line), "--%s--\r\n", boundary) < 0 || !append_text_chunk(body, line)) goto fail;
+
+    free(file_bytes);
+    return true;
+fail:
+    free(file_bytes);
+    return false;
+}
+
+static bool dingtalk_upload_attachment(DingTalkChannelData* data, const DingTalkAttachment* attachment, char** out_media_id) {
+    const char* media_type = "image";
+    if (strcmp(attachment->type, "audio") == 0) media_type = "voice";
+    if (strcmp(attachment->type, "video") == 0) media_type = "video";
+
+    char url[1024];
+    snprintf(url, sizeof(url), "https://oapi.dingtalk.com/media/upload?access_token=%s&type=%s",
+             data->access_token, media_type);
+
+    const char* boundary = "----PrimagenDingTalkBoundary";
+    struct MemoryStruct body = {0};
+    body.memory = malloc(1);
+    body.memory[0] = '\0';
+    if (!build_upload_body(boundary, attachment->path, &body)) {
+        free(body.memory);
+        log_error("[DingTalk] Failed to build upload body: %s", attachment->path);
+        return false;
+    }
+
+    struct mg_mgr mgr;
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.memory[0] = '\0';
+    mg_mgr_init(&mgr);
+    mgr.dns4.url = "udp://8.8.8.8:53";
+    mgr.dns6.url = "udp://[2001:4860:4860::8888]:53";
+    mgr.dnstimeout = 10000;
+
+    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
+    if (!c) {
+        mg_mgr_free(&mgr);
+        free(body.memory);
+        free(chunk.memory);
+        return false;
+    }
+
+    struct mg_str host = mg_url_host(url);
+    struct mg_tls_opts opts = {0};
+    opts.ca = mg_str("");
+    opts.name = host;
+    opts.skip_verification = true;
+    if (mg_url_is_ssl(url)) mg_tls_init(c, &opts);
+
+    mg_printf(c,
+        "POST %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "Content-Type: multipart/form-data; boundary=%s\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n",
+        mg_url_uri(url),
+        (int)host.len, host.buf,
+        boundary,
+        (int)body.size
+    );
+    mg_send(c, body.memory, body.size);
+    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+
+    bool ok = false;
+    if (chunk.size > 0) {
+        cJSON* resp = cJSON_Parse(chunk.memory);
+        if (resp) {
+            cJSON* errcode = cJSON_GetObjectItem(resp, "errcode");
+            if ((!errcode || errcode->valueint == 0)) {
+                cJSON* media_id = cJSON_GetObjectItem(resp, "media_id");
+                if (cJSON_IsString(media_id) && media_id->valuestring) {
+                    *out_media_id = strdup(media_id->valuestring);
+                    ok = *out_media_id != NULL;
+                }
+            }
+            cJSON_Delete(resp);
+        }
+    }
+
+    mg_mgr_free(&mgr);
+    free(body.memory);
+    free(chunk.memory);
+    return ok;
+}
+
+static bool dingtalk_send_attachment_message(DingTalkChannelData* data, const char* conversation_id,
+                                             const DingTalkAttachment* attachment) {
+    char* media_id = NULL;
+    if (!dingtalk_upload_attachment(data, attachment, &media_id)) return false;
+
+    char url[1024];
+    snprintf(url, sizeof(url), "https://oapi.dingtalk.com/chat/send?access_token=%s", data->access_token);
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "chatid", conversation_id);
+    cJSON* msg = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "msg", msg);
+
+    if (strcmp(attachment->type, "image") == 0) {
+        cJSON_AddStringToObject(msg, "msgtype", "image");
+        cJSON* image = cJSON_CreateObject();
+        cJSON_AddStringToObject(image, "media_id", media_id);
+        cJSON_AddItemToObject(msg, "image", image);
+    } else if (strcmp(attachment->type, "audio") == 0) {
+        cJSON_AddStringToObject(msg, "msgtype", "voice");
+        cJSON* voice = cJSON_CreateObject();
+        cJSON_AddStringToObject(voice, "media_id", media_id);
+        if (attachment->duration > 0) {
+            cJSON_AddNumberToObject(voice, "duration", attachment->duration);
+        }
+        cJSON_AddItemToObject(msg, "voice", voice);
+    } else {
+        cJSON_AddStringToObject(msg, "msgtype", "video");
+        cJSON* video = cJSON_CreateObject();
+        cJSON_AddStringToObject(video, "media_id", media_id);
+        cJSON_AddItemToObject(msg, "video", video);
+    }
+
+    char* body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    free(media_id);
+    if (!body) return false;
+
+    struct mg_mgr mgr;
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.memory[0] = '\0';
+    mg_mgr_init(&mgr);
+    mgr.dns4.url = "udp://8.8.8.8:53";
+    mgr.dns6.url = "udp://[2001:4860:4860::8888]:53";
+    mgr.dnstimeout = 10000;
+
+    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
+    if (!c) {
+        mg_mgr_free(&mgr);
+        free(chunk.memory);
+        free(body);
+        return false;
+    }
+    struct mg_str host = mg_url_host(url);
+    struct mg_tls_opts opts = {0};
+    opts.ca = mg_str("");
+    opts.name = host;
+    opts.skip_verification = true;
+    if (mg_url_is_ssl(url)) mg_tls_init(c, &opts);
+
+    mg_printf(c,
+        "POST %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
+        "%s",
+        mg_url_uri(url),
+        (int)host.len, host.buf,
+        (int)strlen(body),
+        body
+    );
+    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+
+    bool ok = false;
+    if (chunk.size > 0) {
+        cJSON* resp = cJSON_Parse(chunk.memory);
+        if (resp) {
+            cJSON* errcode = cJSON_GetObjectItem(resp, "errcode");
+            ok = !errcode || errcode->valueint == 0;
+            cJSON_Delete(resp);
+        }
+    }
+
+    mg_mgr_free(&mgr);
+    free(chunk.memory);
+    free(body);
+    return ok;
 }
 
 // =============================================================================
@@ -457,7 +787,46 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
 
     if (!data->access_token) {
         log_error("[DingTalk] Cannot send: no access token");
+        free(webhook_buf);
         return;
+    }
+
+    bool has_text = msg->content.data && msg->content.data[0] != '\0';
+    char* attachment_fallback_markdown = NULL;
+    if (msg->attachments.count > 0) {
+        for (size_t i = 0; i < msg->attachments.count; i++) {
+            DingTalkAttachment attachment;
+            if (!parse_attachment_spec(msg->attachments.items[i].data, &attachment)) {
+                log_error("[DingTalk] Invalid attachment spec: %s", msg->attachments.items[i].data);
+                continue;
+            }
+            if (!dingtalk_send_attachment_message(data, conversation_id, &attachment)) {
+                log_error("[DingTalk] Attachment delivery failed: %s", attachment.path);
+                if (strcmp(attachment.type, "image") == 0) {
+                    char sidecar_path[2048];
+                    if (snprintf(sidecar_path, sizeof(sidecar_path), "%s.url", attachment.path) > 0) {
+                        char* image_url = NULL;
+                        if (read_first_line(sidecar_path, &image_url)) {
+                            if (strncmp(image_url, "http://", 7) == 0 || strncmp(image_url, "https://", 8) == 0) {
+                                char markdown_line[4096];
+                                if (snprintf(markdown_line, sizeof(markdown_line), "![image](%s)", image_url) > 0) {
+                                    if (append_markdown_line(&attachment_fallback_markdown, markdown_line)) {
+                                        has_text = true;
+                                        log_warn("[DingTalk] Attachment fallback prepared via image url sidecar");
+                                    }
+                                }
+                            }
+                            free(image_url);
+                        }
+                    }
+                }
+            }
+        }
+        if (!has_text) {
+            free(attachment_fallback_markdown);
+            free(webhook_buf);
+            return;
+        }
     }
 
     struct mg_mgr mgr;
@@ -479,6 +848,24 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
 
         // Trim leading/trailing whitespace from content
         const char* content = msg->content.data;
+        char* merged_content = NULL;
+        if (attachment_fallback_markdown) {
+            size_t text_len = has_text && content ? strlen(content) : 0;
+            size_t fallback_len = strlen(attachment_fallback_markdown);
+            size_t total_len = text_len > 0 ? (text_len + 2 + fallback_len) : fallback_len;
+            merged_content = malloc(total_len + 1);
+            if (merged_content) {
+                if (text_len > 0) {
+                    memcpy(merged_content, content, text_len);
+                    merged_content[text_len] = '\n';
+                    merged_content[text_len + 1] = '\n';
+                    memcpy(merged_content + text_len + 2, attachment_fallback_markdown, fallback_len + 1);
+                } else {
+                    memcpy(merged_content, attachment_fallback_markdown, fallback_len + 1);
+                }
+                content = merged_content;
+            }
+        }
         while (*content == ' ' || *content == '\n' || *content == '\r') content++;
         log_info("[DingTalk] Reply content: %s", content);
 
@@ -498,8 +885,10 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
             log_error("[DingTalk] Webhook send failed: connection error");
             free(json_str);
             cJSON_Delete(json);
+            free(merged_content);
             mg_mgr_free(&mgr);
             free(chunk.memory);
+            free(attachment_fallback_markdown);
             free(webhook_buf);
             return;
         }
@@ -584,8 +973,10 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
 
         cJSON_Delete(json);
         free(json_str);
+        free(merged_content);
         mg_mgr_free(&mgr);
         free(chunk.memory);
+        free(attachment_fallback_markdown);
         free(webhook_buf);
 
     } else {
@@ -622,6 +1013,7 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
             cJSON_Delete(json);
             mg_mgr_free(&mgr);
             free(chunk.memory);
+            free(attachment_fallback_markdown);
             free(webhook_buf);
             return;
         }
@@ -676,6 +1068,7 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
         free(json_str);
         mg_mgr_free(&mgr);
         free(chunk.memory);
+        free(attachment_fallback_markdown);
         free(webhook_buf);
     }
 }
