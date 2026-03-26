@@ -196,14 +196,14 @@ Config* config_create() {
     cfg->heartbeat.interval_s = 300;
 
     // Allocate plugins on heap (not stack!) so they persist after function returns
-    cfg->plugins.items = malloc(3 * sizeof(PluginConfig));
+    cfg->plugins.items = malloc(4 * sizeof(PluginConfig));
     if (!cfg->plugins.items) {
         cfg->plugins.count = 0;
         cfg->plugins.capacity = 0;
         return cfg;
     }
-    cfg->plugins.count = 3;
-    cfg->plugins.capacity = 3;
+    cfg->plugins.count = 4;
+    cfg->plugins.capacity = 4;
 
     cfg->plugins.items[0].plugin_id = strdup("feishu_channel");
     cfg->plugins.items[0].enabled = false;
@@ -227,6 +227,11 @@ Config* config_create() {
     cJSON_AddBoolToObject(cfg->plugins.items[2].config, "search_enabled", true);
     cJSON_AddStringToObject(cfg->plugins.items[2].config, "search_api_key", "");
     cJSON_AddStringToObject(cfg->plugins.items[2].config, "proxy", "");
+
+    cfg->plugins.items[3].plugin_id = strdup("webui_channel");
+    cfg->plugins.items[3].enabled = true;
+    cfg->plugins.items[3].config = cJSON_CreateObject();
+    cJSON_AddNumberToObject(cfg->plugins.items[3].config, "port", 16714);
 
     // Default log config
     cfg->log.level = strdup("INFO");
