@@ -30,6 +30,9 @@ typedef struct {
     bool running;
     char* token;
     char* channel_id;
+    char* dns4;
+    char* dns6;
+    int dns_timeout_ms;
 } DiscordChannelData;
 
 struct MemoryStruct {
@@ -52,6 +55,13 @@ static bool memory_append_chunk(struct MemoryStruct* ms, const char* data, size_
     ms->size = new_size;
     ms->memory[ms->size] = '\0';
     return true;
+}
+
+static void apply_dns_config(struct mg_mgr* mgr, const DiscordChannelData* data) {
+    if (!mgr || !data) return;
+    if (data->dns4 && data->dns4[0]) mgr->dns4.url = data->dns4;
+    if (data->dns6 && data->dns6[0]) mgr->dns6.url = data->dns6;
+    if (data->dns_timeout_ms > 0) mgr->dnstimeout = data->dns_timeout_ms;
 }
 
 // =============================================================================
@@ -85,6 +95,9 @@ static bool discord_init(Channel* self, Config* config, MessageBus* bus) {
     data->running = false;
     data->token = NULL;
     data->channel_id = NULL;
+    data->dns4 = NULL;
+    data->dns6 = NULL;
+    data->dns_timeout_ms = 0;
     self->user_data = data;
 
     // Get plugin configuration
@@ -95,6 +108,13 @@ static bool discord_init(Channel* self, Config* config, MessageBus* bus) {
 
         data->token = token && cJSON_IsString(token) ? strdup(token->valuestring) : strdup("");
         data->channel_id = channel_id && cJSON_IsString(channel_id) ? strdup(channel_id->valuestring) : strdup("");
+    }
+
+    DNSConfig* dns_cfg = config_get_dns_config(config);
+    if (dns_cfg) {
+        if (dns_cfg->dns4 && dns_cfg->dns4[0]) data->dns4 = strdup(dns_cfg->dns4);
+        if (dns_cfg->dns6 && dns_cfg->dns6[0]) data->dns6 = strdup(dns_cfg->dns6);
+        if (dns_cfg->dns_timeout_ms > 0) data->dns_timeout_ms = dns_cfg->dns_timeout_ms;
     }
 
     log_info("[DiscordChannel] Initialized");
@@ -128,6 +148,7 @@ static void discord_send(Channel* self, OutboundMessage* msg) {
     chunk.memory[0] = '\0';
 
     mg_mgr_init(&mgr);
+    apply_dns_config(&mgr, data);
 
     char url[512];
     snprintf(url, sizeof(url), "https://discord.com/api/v10/channels/%s/messages", msg->chat_id.data);
@@ -178,7 +199,14 @@ static void discord_send(Channel* self, OutboundMessage* msg) {
 }
 
 static void discord_destroy(Channel* self) {
-    if (self->user_data) free(self->user_data);
+    if (self->user_data) {
+        DiscordChannelData* data = (DiscordChannelData*)self->user_data;
+        free(data->token);
+        free(data->channel_id);
+        free(data->dns4);
+        free(data->dns6);
+        free(data);
+    }
     log_info("[DiscordChannel] Destroyed");
     free(self);
 }

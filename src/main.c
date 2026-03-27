@@ -168,6 +168,13 @@ int main(int argc, char* argv[]) {
 
     /* Load Config (needed for most commands) */
     Config* cfg = config_create();
+    if (!cfg) {
+        fprintf(stderr, "Failed to create config\n");
+        free(config_path);
+        free(workspace_path);
+        free(initial_message);
+        return 1;
+    }
     /* Only load if not 'onboard' command (which creates it) */
     bool config_loaded = false;
     if (!command || strcmp(command, "onboard") != 0) {

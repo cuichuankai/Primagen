@@ -25,6 +25,7 @@ DingTalkWS* dingtalk_ws_create(void);
 
 // Destroy WebSocket client
 void dingtalk_ws_destroy(DingTalkWS* ws);
+void dingtalk_ws_set_dns(DingTalkWS* ws, const char* dns4, const char* dns6, int dns_timeout_ms);
 
 // Connect to WebSocket server (url format: wss://...?ticket=xxx)
 // Requires access_token and client_secret for authentication headers
@@ -38,6 +39,7 @@ void dingtalk_ws_run(DingTalkWS* ws, DingTalkWSMessageCallback callback, void* u
 void dingtalk_ws_stop(DingTalkWS* ws);
 
 // Get WebSocket connection URL from DingTalk API
-char* dingtalk_get_ws_url(const char* client_id, const char* client_secret, const char* access_token);
+char* dingtalk_get_ws_url(const char* client_id, const char* client_secret, const char* access_token,
+                          const char* dns4, const char* dns6, int dns_timeout_ms);
 
 #endif // DINGTALK_WS_H

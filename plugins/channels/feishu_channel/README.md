@@ -20,9 +20,11 @@ Configure the plugin in `.primagen/config.json` under `plugins`:
     {
       "plugin_id": "feishu_channel",
       "enabled": true,
-      "app_id": "cli_xxx",
-      "app_secret": "xxx",
-      "use_card": false
+      "config": {
+        "app_id": "cli_xxx",
+        "app_secret": "xxx",
+        "use_card": false
+      }
     }
   ]
 }
@@ -30,13 +32,13 @@ Configure the plugin in `.primagen/config.json` under `plugins`:
 
 ### Fields
 
-| Field        | Type    | Required | Description                        |
-| ------------ | ------- | -------- | ---------------------------------- |
-| `plugin_id`  | string  | yes      | Must be `feishu_channel`           |
-| `enabled`    | boolean | yes      | Enables plugin registration        |
-| `app_id`     | string  | yes      | Feishu app ID                      |
-| `app_secret` | string  | yes      | Feishu app secret                  |
-| `use_card`   | boolean | no       | Use card API instead of plain text |
+| Field               | Type    | Required | Description                        |
+| ------------------- | ------- | -------- | ---------------------------------- |
+| `plugin_id`         | string  | yes      | Must be `feishu_channel`           |
+| `enabled`           | boolean | yes      | Enables plugin registration        |
+| `config.app_id`     | string  | yes      | Feishu app ID                      |
+| `config.app_secret` | string  | yes      | Feishu app secret                  |
+| `config.use_card`   | boolean | no       | Use card API instead of plain text |
 
 ## Message Routing
 

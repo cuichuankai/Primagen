@@ -85,11 +85,17 @@ static void setup_tls_if_needed(struct mg_connection* c, const char* url) {
     mg_tls_init(c, &opts);
 }
 
+static void apply_global_dns_if_configured(PluginManager* manager, struct mg_mgr* mgr) {
+    if (!manager || !manager->config || !mgr) return;
+    DNSConfig* dns = config_get_dns_config(manager->config);
+    if (!dns) return;
+    if (dns->dns4 && dns->dns4[0]) mgr->dns4.url = dns->dns4;
+    if (dns->dns6 && dns->dns6[0]) mgr->dns6.url = dns->dns6;
+    if (dns->dns_timeout_ms > 0) mgr->dnstimeout = dns->dns_timeout_ms;
+}
+
 static bool get_search_enabled(PluginManager* manager) {
     bool enabled = true;
-    if (manager && manager->config) {
-        enabled = manager->config->tools.web.search.enabled;
-    }
     const cJSON* cfg = get_plugin_cfg(manager);
     if (cfg) {
         cJSON* item = cJSON_GetObjectItem((cJSON*) cfg, "search_enabled");
@@ -105,10 +111,6 @@ static const char* get_search_api_key(PluginManager* manager) {
         if (cJSON_IsString(item) && item->valuestring && item->valuestring[0] != '\0') {
             return item->valuestring;
         }
-    }
-    if (manager && manager->config && manager->config->tools.web.search.api_key &&
-        manager->config->tools.web.search.api_key[0] != '\0') {
-        return manager->config->tools.web.search.api_key;
     }
     const char* env_key = getenv("PRIMAGEN_TOOLS_WEB_SEARCH_API_KEY");
     if (env_key && env_key[0] != '\0') return env_key;
@@ -166,6 +168,7 @@ static Error web_search_impl(void* user_data, const char* args_json, String* res
 
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
+    apply_global_dns_if_configured(manager, &mgr);
     struct mg_connection* c = mg_http_connect(&mgr, url, http_collect, &chunk);
     if (!c) {
         mg_mgr_free(&mgr);
@@ -249,7 +252,8 @@ static Error web_search_impl(void* user_data, const char* args_json, String* res
 }
 
 static Error web_fetch_impl(void* user_data, const char* args_json, String* result) {
-    (void) user_data;
+    WebToolContext* ctx = (WebToolContext*) user_data;
+    PluginManager* manager = ctx ? ctx->manager : NULL;
     cJSON* json = cJSON_Parse(args_json);
     if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
 
@@ -269,6 +273,7 @@ static Error web_fetch_impl(void* user_data, const char* args_json, String* resu
 
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
+    apply_global_dns_if_configured(manager, &mgr);
     struct mg_connection* c = mg_http_connect(&mgr, url, http_collect, &chunk);
     if (!c) {
         mg_mgr_free(&mgr);

@@ -840,6 +840,13 @@ void dingtalk_ws_destroy(DingTalkWS* ws) {
     free(ws);
 }
 
+void dingtalk_ws_set_dns(DingTalkWS* ws, const char* dns4, const char* dns6, int dns_timeout_ms) {
+    if (!ws) return;
+    if (dns4 && dns4[0]) ws->mgr.dns4.url = dns4;
+    if (dns6 && dns6[0]) ws->mgr.dns6.url = dns6;
+    if (dns_timeout_ms > 0) ws->mgr.dnstimeout = dns_timeout_ms;
+}
+
 bool dingtalk_ws_connect(DingTalkWS* ws, const char* url, const char* access_token,
                          const char* client_secret) {
     (void)access_token;  // Access token not needed for WS connection (ticket in URL is used)
@@ -993,7 +1000,8 @@ static void url_callback_fn(struct mg_connection* c, int ev, void* ev_data) {
     }
 }
 
-char* dingtalk_get_ws_url(const char* client_id, const char* client_secret, const char* access_token) {
+char* dingtalk_get_ws_url(const char* client_id, const char* client_secret, const char* access_token,
+                          const char* dns4, const char* dns6, int dns_timeout_ms) {
     struct mg_mgr mgr;
     URLChunk chunk = {0};
     chunk.memory = malloc(1);
@@ -1001,11 +1009,9 @@ char* dingtalk_get_ws_url(const char* client_id, const char* client_secret, cons
 
     mg_mgr_init(&mgr);
 
-    // Configure DNS explicitly to avoid DNS timeout issues
-    // Use Google DNS servers with longer timeout
-    mgr.dns4.url = "udp://8.8.8.8:53";
-    mgr.dns6.url = "udp://[2001:4860:4860::8888]:53";
-    mgr.dnstimeout = 10000;  // 10 seconds timeout
+    if (dns4 && dns4[0]) mgr.dns4.url = dns4;
+    if (dns6 && dns6[0]) mgr.dns6.url = dns6;
+    if (dns_timeout_ms > 0) mgr.dnstimeout = dns_timeout_ms;
 
     // DingTalk WebSocket connection API
     const char* url = "https://api.dingtalk.com/v1.0/gateway/connections/open";

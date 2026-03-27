@@ -32,6 +32,9 @@ typedef struct {
     bool running;
     long last_update_id;
     char* token;
+    char* dns4;
+    char* dns6;
+    int dns_timeout_ms;
 } TelegramChannelData;
 
 struct MemoryStruct {
@@ -54,6 +57,13 @@ static bool memory_append_chunk(struct MemoryStruct* ms, const char* data, size_
     ms->size = new_size;
     ms->memory[ms->size] = '\0';
     return true;
+}
+
+static void apply_dns_config(struct mg_mgr* mgr, const TelegramChannelData* data) {
+    if (!mgr || !data) return;
+    if (data->dns4 && data->dns4[0]) mgr->dns4.url = data->dns4;
+    if (data->dns6 && data->dns6[0]) mgr->dns6.url = data->dns6;
+    if (data->dns_timeout_ms > 0) mgr->dnstimeout = data->dns_timeout_ms;
 }
 
 // =============================================================================
@@ -94,6 +104,7 @@ static void* telegram_poller(void* arg) {
         chunk.memory[0] = '\0';
 
         mg_mgr_init(&mgr);
+        apply_dns_config(&mgr, data);
 
         char url[512];
         snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/getUpdates?offset=%ld&timeout=30",
@@ -165,6 +176,9 @@ static bool telegram_init(Channel* self, Config* cfg, MessageBus* bus) {
     data->running = false;
     data->last_update_id = 0;
     data->token = NULL;
+    data->dns4 = NULL;
+    data->dns6 = NULL;
+    data->dns_timeout_ms = 0;
     self->user_data = data;
 
     // Get plugin configuration
@@ -178,6 +192,13 @@ static bool telegram_init(Channel* self, Config* cfg, MessageBus* bus) {
     if (!data->token || strlen(data->token) == 0) {
         log_info("[TelegramChannel] No token configured, skipping initialization");
         return false;
+    }
+
+    DNSConfig* dns_cfg = config_get_dns_config(cfg);
+    if (dns_cfg) {
+        if (dns_cfg->dns4 && dns_cfg->dns4[0]) data->dns4 = strdup(dns_cfg->dns4);
+        if (dns_cfg->dns6 && dns_cfg->dns6[0]) data->dns6 = strdup(dns_cfg->dns6);
+        if (dns_cfg->dns_timeout_ms > 0) data->dns_timeout_ms = dns_cfg->dns_timeout_ms;
     }
 
     log_info("[TelegramChannel] Initialized with token");
@@ -213,6 +234,7 @@ static void telegram_send(Channel* self, OutboundMessage* msg) {
     chunk.memory[0] = '\0';
 
     mg_mgr_init(&mgr);
+    apply_dns_config(&mgr, data);
 
     char url[512];
     snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/sendMessage", data->token);
@@ -264,6 +286,8 @@ static void telegram_destroy(Channel* self) {
     TelegramChannelData* data = (TelegramChannelData*)self->user_data;
     if (data) {
         free(data->token);
+        free(data->dns4);
+        free(data->dns6);
         free(data);
     }
     log_info("[TelegramChannel] Destroyed");

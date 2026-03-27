@@ -186,10 +186,11 @@ Config* config_create() {
     cfg->tools.exec.timeout = 300;
     cfg->tools.exec.restrict_to_workspace = true;
     cfg->tools.exec.path_append = strdup("");
-    cfg->tools.web.search.enabled = true;
-    cfg->tools.web.search.api_key = strdup("");
-    cfg->tools.web.proxy = strdup("");
     cfg->tools.restrict_to_workspace = true;
+
+    cfg->dns.dns4 = NULL;
+    cfg->dns.dns6 = NULL;
+    cfg->dns.dns_timeout_ms = 0;
 
     // Default heartbeat config
     cfg->heartbeat.enabled = true;
@@ -200,38 +201,38 @@ Config* config_create() {
     if (!cfg->plugins.items) {
         cfg->plugins.count = 0;
         cfg->plugins.capacity = 0;
-        return cfg;
+    } else {
+        cfg->plugins.count = 4;
+        cfg->plugins.capacity = 4;
+
+        cfg->plugins.items[0].plugin_id = strdup("feishu_channel");
+        cfg->plugins.items[0].enabled = false;
+        cfg->plugins.items[0].config = cJSON_CreateObject();
+        cJSON_AddStringToObject(cfg->plugins.items[0].config, "app_id", "");
+        cJSON_AddStringToObject(cfg->plugins.items[0].config, "app_secret", "");
+        cJSON_AddBoolToObject(cfg->plugins.items[0].config, "use_card", false);
+        cJSON_AddNullToObject(cfg->plugins.items[0].config, "allow_from");
+
+        cfg->plugins.items[1].plugin_id = strdup("dingtalk_channel");
+        cfg->plugins.items[1].enabled = false;
+        cfg->plugins.items[1].config = cJSON_CreateObject();
+        cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientId", "");
+        cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientSecret", "");
+        cJSON_AddBoolToObject(cfg->plugins.items[1].config, "use_card", false);
+        cJSON_AddNullToObject(cfg->plugins.items[1].config, "allow_from");
+
+        cfg->plugins.items[2].plugin_id = strdup("web_tools");
+        cfg->plugins.items[2].enabled = false;
+        cfg->plugins.items[2].config = cJSON_CreateObject();
+        cJSON_AddBoolToObject(cfg->plugins.items[2].config, "search_enabled", true);
+        cJSON_AddStringToObject(cfg->plugins.items[2].config, "search_api_key", "");
+        cJSON_AddStringToObject(cfg->plugins.items[2].config, "proxy", "");
+
+        cfg->plugins.items[3].plugin_id = strdup("webui_channel");
+        cfg->plugins.items[3].enabled = false;
+        cfg->plugins.items[3].config = cJSON_CreateObject();
+        cJSON_AddNumberToObject(cfg->plugins.items[3].config, "port", 16714);
     }
-    cfg->plugins.count = 4;
-    cfg->plugins.capacity = 4;
-
-    cfg->plugins.items[0].plugin_id = strdup("feishu_channel");
-    cfg->plugins.items[0].enabled = false;
-    cfg->plugins.items[0].config = cJSON_CreateObject();
-    cJSON_AddStringToObject(cfg->plugins.items[0].config, "app_id", "");
-    cJSON_AddStringToObject(cfg->plugins.items[0].config, "app_secret", "");
-    cJSON_AddBoolToObject(cfg->plugins.items[0].config, "use_card", false);
-    cJSON_AddNullToObject(cfg->plugins.items[0].config, "allow_from");
-
-    cfg->plugins.items[1].plugin_id = strdup("dingtalk_channel");
-    cfg->plugins.items[1].enabled = false;
-    cfg->plugins.items[1].config = cJSON_CreateObject();
-    cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientId", "");
-    cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientSecret", "");
-    cJSON_AddBoolToObject(cfg->plugins.items[1].config, "use_card", false);
-    cJSON_AddNullToObject(cfg->plugins.items[1].config, "allow_from");
-
-    cfg->plugins.items[2].plugin_id = strdup("web_tools");
-    cfg->plugins.items[2].enabled = true;
-    cfg->plugins.items[2].config = cJSON_CreateObject();
-    cJSON_AddBoolToObject(cfg->plugins.items[2].config, "search_enabled", true);
-    cJSON_AddStringToObject(cfg->plugins.items[2].config, "search_api_key", "");
-    cJSON_AddStringToObject(cfg->plugins.items[2].config, "proxy", "");
-
-    cfg->plugins.items[3].plugin_id = strdup("webui_channel");
-    cfg->plugins.items[3].enabled = true;
-    cfg->plugins.items[3].config = cJSON_CreateObject();
-    cJSON_AddNumberToObject(cfg->plugins.items[3].config, "port", 16714);
 
     // Default log config
     cfg->log.level = strdup("INFO");
@@ -254,8 +255,8 @@ void config_destroy(Config* cfg) {
     free(cfg->agent.api_base);
     free(cfg->agent.reasoning_effort);
     free(cfg->tools.exec.path_append);
-    free(cfg->tools.web.search.api_key);
-    free(cfg->tools.web.proxy);
+    free(cfg->dns.dns4);
+    free(cfg->dns.dns6);
     
     free(cfg->log.level);
 
@@ -285,6 +286,10 @@ AgentConfig* config_get_agent_config(Config* cfg) {
 
 ToolConfig* config_get_tool_config(Config* cfg) {
     return cfg ? &cfg->tools : NULL;
+}
+
+DNSConfig* config_get_dns_config(Config* cfg) {
+    return cfg ? &cfg->dns : NULL;
 }
 
 HeartbeatConfig* config_get_heartbeat_config(Config* cfg) {
@@ -371,20 +376,29 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
             }
         }
         
-        cJSON* web = cJSON_GetObjectItem(tools, "web");
-        if (web) {
-            cJSON* search = cJSON_GetObjectItem(web, "search");
-            if (search) {
-                if ((item = cJSON_GetObjectItem(search, "enabled"))) cfg->tools.web.search.enabled = get_json_bool(item, true);
-                if ((item = cJSON_GetObjectItem(search, "apiKey"))) {
-                    free(cfg->tools.web.search.api_key);
-                    cfg->tools.web.search.api_key = get_json_string(item, "");
-                }
+    }
+
+    // Global DNS Config
+    cJSON* dns = cJSON_GetObjectItem(json, "dns");
+    if (dns) {
+        cJSON* item;
+        if ((item = cJSON_GetObjectItem(dns, "dns4"))) {
+            free(cfg->dns.dns4);
+            cfg->dns.dns4 = NULL;
+            if (cJSON_IsString(item) && item->valuestring && item->valuestring[0]) {
+                cfg->dns.dns4 = strdup(item->valuestring);
             }
-            if ((item = cJSON_GetObjectItem(web, "proxy"))) {
-                free(cfg->tools.web.proxy);
-                cfg->tools.web.proxy = get_json_string(item, "");
+        }
+        if ((item = cJSON_GetObjectItem(dns, "dns6"))) {
+            free(cfg->dns.dns6);
+            cfg->dns.dns6 = NULL;
+            if (cJSON_IsString(item) && item->valuestring && item->valuestring[0]) {
+                cfg->dns.dns6 = strdup(item->valuestring);
             }
+        }
+        if ((item = cJSON_GetObjectItem(dns, "dnsTimeoutMs"))) {
+            int timeout = get_json_int(item, 0);
+            cfg->dns.dns_timeout_ms = timeout > 0 ? timeout : 0;
         }
     }
     
@@ -580,18 +594,17 @@ void config_load_from_env(Config* cfg) {
     const char* env_path_append = get_env_string("PRIMAGEN_TOOLS_EXEC_PATH_APPEND", NULL);
     if (env_path_append) { free(cfg->tools.exec.path_append); cfg->tools.exec.path_append = strdup(env_path_append); }
 
+    PluginConfig* web_tools = config_get_plugin_config(cfg, "web_tools");
     const char* env_web_proxy = get_env_string("PRIMAGEN_TOOLS_WEB_PROXY", NULL);
-    if (env_web_proxy) { free(cfg->tools.web.proxy); cfg->tools.web.proxy = strdup(env_web_proxy); }
+    if (env_web_proxy && web_tools && web_tools->config) {
+        cJSON_DeleteItemFromObject(web_tools->config, "proxy");
+        cJSON_AddStringToObject(web_tools->config, "proxy", env_web_proxy);
+    }
 
     const char* env_search_api_key = get_env_string("PRIMAGEN_TOOLS_WEB_SEARCH_API_KEY", NULL);
-    if (env_search_api_key) {
-        free(cfg->tools.web.search.api_key);
-        cfg->tools.web.search.api_key = strdup(env_search_api_key);
-        PluginConfig* web_tools = config_get_plugin_config(cfg, "web_tools");
-        if (web_tools && web_tools->config) {
-            cJSON_DeleteItemFromObject(web_tools->config, "search_api_key");
-            cJSON_AddStringToObject(web_tools->config, "search_api_key", env_search_api_key);
-        }
+    if (env_search_api_key && web_tools && web_tools->config) {
+        cJSON_DeleteItemFromObject(web_tools->config, "search_api_key");
+        cJSON_AddStringToObject(web_tools->config, "search_api_key", env_search_api_key);
     }
 
     // Heartbeat config - PRIMAGEN_HEARTBEAT_*
@@ -635,15 +648,23 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
     cJSON_AddStringToObject(exec, "pathAppend", cfg->tools.exec.path_append);
     cJSON_AddItemToObject(tools, "exec", exec);
     
-    cJSON* web = cJSON_CreateObject();
-    cJSON* search = cJSON_CreateObject();
-    cJSON_AddBoolToObject(search, "enabled", cfg->tools.web.search.enabled);
-    cJSON_AddStringToObject(search, "apiKey", cfg->tools.web.search.api_key);
-    cJSON_AddItemToObject(web, "search", search);
-    cJSON_AddStringToObject(web, "proxy", cfg->tools.web.proxy);
-    cJSON_AddItemToObject(tools, "web", web);
-    
     cJSON_AddItemToObject(json, "tools", tools);
+
+    if ((cfg->dns.dns4 && cfg->dns.dns4[0]) ||
+        (cfg->dns.dns6 && cfg->dns.dns6[0]) ||
+        cfg->dns.dns_timeout_ms > 0) {
+        cJSON* dns = cJSON_CreateObject();
+        if (cfg->dns.dns4 && cfg->dns.dns4[0]) {
+            cJSON_AddStringToObject(dns, "dns4", cfg->dns.dns4);
+        }
+        if (cfg->dns.dns6 && cfg->dns.dns6[0]) {
+            cJSON_AddStringToObject(dns, "dns6", cfg->dns.dns6);
+        }
+        if (cfg->dns.dns_timeout_ms > 0) {
+            cJSON_AddNumberToObject(dns, "dnsTimeoutMs", cfg->dns.dns_timeout_ms);
+        }
+        cJSON_AddItemToObject(json, "dns", dns);
+    }
     
     // Heartbeat
     cJSON* heartbeat = cJSON_CreateObject();

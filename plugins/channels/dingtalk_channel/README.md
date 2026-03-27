@@ -20,8 +20,10 @@ Configure the plugin in `.primagen/config.json` under `plugins`:
     {
       "plugin_id": "dingtalk_channel",
       "enabled": true,
-      "clientId": "your_client_id",
-      "clientSecret": "your_client_secret"
+      "config": {
+        "clientId": "your_client_id",
+        "clientSecret": "your_client_secret"
+      }
     }
   ]
 }
@@ -29,12 +31,12 @@ Configure the plugin in `.primagen/config.json` under `plugins`:
 
 ### Fields
 
-| Field          | Type    | Required | Description                        |
-| -------------- | ------- | -------- | ---------------------------------- |
-| `plugin_id`    | string  | yes      | Must be `dingtalk_channel`         |
-| `enabled`      | boolean | yes      | Enables registration and startup   |
-| `clientId`     | string  | yes      | DingTalk application client ID     |
-| `clientSecret` | string  | yes      | DingTalk application client secret |
+| Field                 | Type    | Required | Description                        |
+| --------------------- | ------- | -------- | ---------------------------------- |
+| `plugin_id`           | string  | yes      | Must be `dingtalk_channel`         |
+| `enabled`             | boolean | yes      | Enables registration and startup   |
+| `config.clientId`     | string  | yes      | DingTalk application client ID     |
+| `config.clientSecret` | string  | yes      | DingTalk application client secret |
 
 ## Message Routing
 

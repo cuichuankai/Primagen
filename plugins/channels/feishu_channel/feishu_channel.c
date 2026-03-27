@@ -37,6 +37,7 @@ typedef void (*FeishuWSMessageCallback)(const char* chat_id, const char* content
 
 FeishuWS* feishu_ws_create(void);
 void feishu_ws_destroy(FeishuWS* ws);
+void feishu_ws_set_dns(FeishuWS* ws, const char* dns4, const char* dns6, int dns_timeout_ms);
 bool feishu_ws_connect(FeishuWS* ws, const char* url);
 void feishu_ws_run(FeishuWS* ws, FeishuWSMessageCallback callback, void* user_data);
 void feishu_ws_stop(FeishuWS* ws);
@@ -55,6 +56,9 @@ typedef struct {
     char* app_id;
     char* app_secret;
     bool use_card;
+    char* dns4;
+    char* dns6;
+    int dns_timeout_ms;
 } FeishuChannelData;
 
 struct MemoryStruct {
@@ -77,6 +81,13 @@ static bool memory_append_chunk(struct MemoryStruct* ms, const char* data, size_
     ms->size = new_size;
     ms->memory[ms->size] = '\0';
     return true;
+}
+
+static void apply_dns_config(struct mg_mgr* mgr, const FeishuChannelData* data) {
+    if (!mgr || !data) return;
+    if (data->dns4 && data->dns4[0]) mgr->dns4.url = data->dns4;
+    if (data->dns6 && data->dns6[0]) mgr->dns6.url = data->dns6;
+    if (data->dns_timeout_ms > 0) mgr->dnstimeout = data->dns_timeout_ms;
 }
 
 // =============================================================================
@@ -107,6 +118,7 @@ static void refresh_token(FeishuChannelData* data) {
     chunk.memory[0] = '\0';
 
     mg_mgr_init(&mgr);
+    apply_dns_config(&mgr, data);
 
     cJSON* payload = cJSON_CreateObject();
     cJSON_AddStringToObject(payload, "app_id", data->app_id);
@@ -189,6 +201,7 @@ static char* get_ws_url(FeishuChannelData* data) {
     chunk.memory[0] = '\0';
 
     mg_mgr_init(&mgr);
+    apply_dns_config(&mgr, data);
 
     cJSON* payload = cJSON_CreateObject();
     cJSON_AddStringToObject(payload, "AppID", data->app_id);
@@ -274,6 +287,7 @@ static char* create_streaming_card(FeishuChannelData* data, const char* content)
     chunk.memory[0] = '\0';
 
     mg_mgr_init(&mgr);
+    apply_dns_config(&mgr, data);
 
     // Construct Card JSON
     cJSON* cardData = cJSON_CreateObject();
@@ -522,6 +536,7 @@ static bool feishu_post_json_with_retry(FeishuChannelData* data, const char* url
         chunk.memory = malloc(1);
         chunk.memory[0] = '\0';
         mg_mgr_init(&mgr);
+        apply_dns_config(&mgr, data);
 
         struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
         if (!c) {
@@ -633,6 +648,7 @@ static bool feishu_upload_media(FeishuChannelData* data, const FeishuAttachment*
     chunk.memory = malloc(1);
     chunk.memory[0] = '\0';
     mg_mgr_init(&mgr);
+    apply_dns_config(&mgr, data);
 
     struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
     if (!c) {
@@ -779,6 +795,7 @@ static void* feishu_receive_loop(void* arg) {
         if (url) {
             log_info("[Feishu] Connecting to WebSocket...");
             data->ws = feishu_ws_create();
+            feishu_ws_set_dns(data->ws, data->dns4, data->dns6, data->dns_timeout_ms);
             if (feishu_ws_connect(data->ws, url)) {
                 log_info("[Feishu] WebSocket connected.");
                 feishu_ws_run(data->ws, on_feishu_message, data);
@@ -809,6 +826,9 @@ static bool feishu_init(Channel* self, Config* cfg, MessageBus* bus) {
     data->running = false;
     data->access_token = NULL;
     data->ws = NULL;
+    data->dns4 = NULL;
+    data->dns6 = NULL;
+    data->dns_timeout_ms = 0;
 
     // Get plugin configuration
     PluginConfig* plugin_cfg = config_get_plugin_config(cfg, "feishu_channel");
@@ -824,6 +844,13 @@ static bool feishu_init(Channel* self, Config* cfg, MessageBus* bus) {
         data->app_id = strdup("");
         data->app_secret = strdup("");
         data->use_card = false;
+    }
+
+    DNSConfig* dns_cfg = config_get_dns_config(cfg);
+    if (dns_cfg) {
+        if (dns_cfg->dns4 && dns_cfg->dns4[0]) data->dns4 = strdup(dns_cfg->dns4);
+        if (dns_cfg->dns6 && dns_cfg->dns6[0]) data->dns6 = strdup(dns_cfg->dns6);
+        if (dns_cfg->dns_timeout_ms > 0) data->dns_timeout_ms = dns_cfg->dns_timeout_ms;
     }
 
     self->user_data = data;
@@ -957,6 +984,8 @@ static void feishu_destroy(Channel* self) {
         if (data->access_token) free(data->access_token);
         if (data->app_id) free(data->app_id);
         if (data->app_secret) free(data->app_secret);
+        if (data->dns4) free(data->dns4);
+        if (data->dns6) free(data->dns6);
         if (data->ws) feishu_ws_destroy(data->ws);
         free(data);
     }

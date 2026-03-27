@@ -41,15 +41,15 @@ typedef struct {
 } ExecToolConfig;
 
 typedef struct {
-    WebSearchConfig search;
-    char* proxy;
-} WebToolConfig;
-
-typedef struct {
     ExecToolConfig exec;
-    WebToolConfig web;
     bool restrict_to_workspace;
 } ToolConfig;
+
+typedef struct {
+    char* dns4;
+    char* dns6;
+    int dns_timeout_ms;
+} DNSConfig;
 
 typedef struct {
     char* server_id;
@@ -83,6 +83,7 @@ typedef struct {
 typedef struct Config {
     AgentConfig agent;
     ToolConfig tools;
+    DNSConfig dns;
     HeartbeatConfig heartbeat;
     MCPConfig mcp;
     LogConfig log;
@@ -94,6 +95,7 @@ void config_destroy(Config* cfg);
 
 AgentConfig* config_get_agent_config(Config* cfg);
 ToolConfig* config_get_tool_config(Config* cfg);
+DNSConfig* config_get_dns_config(Config* cfg);
 HeartbeatConfig* config_get_heartbeat_config(Config* cfg);
 MCPConfig* config_get_mcp_config(Config* cfg);
 

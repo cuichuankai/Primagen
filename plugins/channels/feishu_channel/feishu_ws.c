@@ -574,6 +574,13 @@ void feishu_ws_destroy(FeishuWS *ws) {
   free(ws);
 }
 
+void feishu_ws_set_dns(FeishuWS* ws, const char* dns4, const char* dns6, int dns_timeout_ms) {
+  if (!ws) return;
+  if (dns4 && dns4[0]) ws->mgr.dns4.url = dns4;
+  if (dns6 && dns6[0]) ws->mgr.dns6.url = dns6;
+  if (dns_timeout_ms > 0) ws->mgr.dnstimeout = dns_timeout_ms;
+}
+
 bool feishu_ws_connect(FeishuWS *ws, const char *url) {
   const char *sid;
   if (!ws || !url) return false;

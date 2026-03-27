@@ -37,3 +37,6 @@ mcp-servers/
 # Logs
 *.log
 logs/
+
+# Local worktrees
+.worktrees/
