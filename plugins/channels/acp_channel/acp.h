@@ -1,12 +1,12 @@
 #ifndef ACP_H
 #define ACP_H
 
-#include "../include/common.h"
-#include "../bus/message_bus.h"
-#include "../tools/tool.h"
-#include "../agent/agent_loop.h"
-#include "../session/session.h"
-#include "../include/config.h"
+#include "../../../src/include/common.h"
+#include "../../../src/bus/message_bus.h"
+#include "../../../src/tools/tool.h"
+#include "../../../src/agent/agent_loop.h"
+#include "../../../src/session/session.h"
+#include "../../../src/include/config.h"
 
 struct mg_connection;
 struct mg_http_message;

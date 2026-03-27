@@ -124,6 +124,8 @@ typedef struct PluginManager {
     Config* config;
     MessageBus* bus;
     ToolRegistry* tool_registry;
+    void* agent_loop;
+    void* session_mgr;
     void* channel_array;  // Forward decl - actual type in main.c
     int* channel_count_ptr;
     int channel_capacity;

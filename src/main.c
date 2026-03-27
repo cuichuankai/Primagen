@@ -16,7 +16,6 @@
 #include "include/commands.h"
 #include "mcp/mcp.h"
 #include "plugin/plugin_manager.h"
-#include "acp/acp.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,19 +51,6 @@ void cron_callback(CronJob* job) {
 void* agent_thread(void* arg) {
     AgentLoop* loop = (AgentLoop*)arg;
     agent_loop_run(loop);
-    return NULL;
-}
-
-/* ACP server poll thread entry point */
-void* acp_poll_thread(void* arg) {
-    ACPServer* server = (ACPServer*)arg;
-    while (server && server->running) {
-        if (server->mgr) {
-            mg_mgr_poll(server->mgr, 100);  // Poll for 100ms
-        } else {
-            usleep(100000);  // Sleep 100ms if mgr not initialized
-        }
-    }
     return NULL;
 }
 
@@ -104,7 +90,7 @@ void* outbound_thread(void* arg) {
 }
 
 /* Print command line usage */
-int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_message, int acp_port);
+int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_message);
 
 /* Main entry point - parses command line arguments and dispatches to appropriate handler */
 int main(int argc, char* argv[]) {
@@ -128,16 +114,14 @@ int main(int argc, char* argv[]) {
         {"config", required_argument, 0, 'c'},
         {"workspace", required_argument, 0, 'w'},
         {"message", required_argument, 0, 'm'},
-        {"acp-port", required_argument, 0, 'a'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
     int long_index = 0;
-    int acp_port = 0;  // 0 means ACP disabled by default
 
-    while ((opt = getopt_long(argc, argv, "c:w:m:ha:", long_options, &long_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:w:m:h", long_options, &long_index)) != -1) {
         switch (opt) {
             case 'c':
                 free(config_path);
@@ -150,9 +134,6 @@ int main(int argc, char* argv[]) {
             case 'm':
                 free(initial_message);
                 initial_message = strdup(optarg);
-                break;
-            case 'a':
-                acp_port = atoi(optarg);
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -196,7 +177,7 @@ int main(int argc, char* argv[]) {
 
     if (!command || strcmp(command, "agent") == 0) {
         if (!config_loaded) printf("Warning: Could not load config, using defaults.\n");
-        ret = run_agent_loop(cfg, workspace_path, initial_message, acp_port);
+        ret = run_agent_loop(cfg, workspace_path, initial_message);
     } else if (strcmp(command, "onboard") == 0) {
         ret = cmd_onboard(config_path, workspace_path);
     } else if (strcmp(command, "gateway") == 0) {
@@ -224,19 +205,16 @@ int main(int argc, char* argv[]) {
 }
 
 /* Extracted logic for running the agent loop */
-int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_message, int acp_port) {
+int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_message) {
     int rc = 0;
     MCPManager* mcp_mgr = NULL;
     ToolContext* tool_ctx = NULL;
     AgentLoop* loop = NULL;
-    ACPServer* acp_server = NULL;
-    pthread_t agent_tid = 0, outbound_tid = 0, acp_tid = 0;
+    pthread_t agent_tid = 0, outbound_tid = 0;
     bool agent_thread_started = false;
     bool outbound_thread_started = false;
-    bool acp_thread_started = false;
     printf("      Primagen(Primitive Genesis) - AI Agent Framework\n");
     printf("===================================================================\n");
-
     mg_log_set(MG_LL_INFO); /* Set mongoose log level if needed */
 
     char full_log_path[512];
@@ -306,13 +284,11 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         plugin_mgr->config = cfg;
         plugin_mgr->bus = bus;
         plugin_mgr->tool_registry = tool_reg;
+        plugin_mgr->agent_loop = NULL;
+        plugin_mgr->session_mgr = NULL;
         plugin_mgr->channel_array = channels;
         plugin_mgr->channel_count_ptr = &channel_count;
         plugin_mgr->channel_capacity = MAX_CHANNELS;
-
-        // Load external plugins from .so files
-        log_debug("[Plugin] Loading external plugins...");
-        plugin_manager_load_external(plugin_mgr);
     } else {
         log_error("[System] Failed to create PluginManager");
     }
@@ -384,16 +360,6 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     agent_loop_register_builtin_channels(plugin_mgr, cfg);
     log_debug("[System] Registered builtin channels");
 
-    /* Start Channels */
-    log_debug("[System] Active Channels (%d):", channel_count);
-    if (channel_count == 0) {
-        log_error("[System] No channels registered! Check channel initialization.");
-    }
-    for (int i = 0; i < channel_count; i++) {
-        if (channels[i]->start) channels[i]->start(channels[i]);
-        log_debug("  - %s", channels[i]->name);
-    }
-
     /* Create Agent Loop */
     log_debug("[System] Creating AgentLoop...");
     loop = agent_loop_new(session_mgr, ctx_builder, tool_reg, bus, cfg, plugin_mgr, workspace_path);
@@ -404,22 +370,24 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     }
     agent_loop_set_llm_provider(loop, llm_provider_call);
 
+    if (plugin_mgr) {
+        plugin_mgr->agent_loop = loop;
+        plugin_mgr->session_mgr = session_mgr;
+        log_debug("[Plugin] Loading external plugins...");
+        plugin_manager_load_external(plugin_mgr);
+    }
+
     /* Register built-in commands with PluginManager */
     agent_loop_register_builtin_commands(loop);
 
-    /* Initialize ACP Server if port specified */
-    if (acp_port > 0) {
-        log_debug("[System] Creating ACPServer on port %d...", acp_port);
-        acp_server = acp_server_new(bus, tool_reg, loop, session_mgr, cfg);
-        if (acp_server) {
-            if (acp_server_start(acp_server, acp_port, NULL) != 0) {
-                log_error("[System] Failed to start ACP server");
-                acp_server_free(acp_server);
-                acp_server = NULL;
-            } else {
-                log_info("[System] ACP server started on port %d", acp_port);
-            }
-        }
+    /* Start Channels */
+    log_debug("[System] Active Channels (%d):", channel_count);
+    if (channel_count == 0) {
+        log_error("[System] No channels registered! Check channel initialization.");
+    }
+    for (int i = 0; i < channel_count; i++) {
+        if (channels[i]->start) channels[i]->start(channels[i]);
+        log_debug("  - %s", channels[i]->name);
     }
 
     /* Start Threads */
@@ -439,16 +407,6 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         goto cleanup;
     }
     outbound_thread_started = true;
-
-    /* Start ACP poll thread if ACP server is running */
-    if (acp_server && acp_server->running) {
-        log_debug("[System] Starting ACP poll thread...");
-        if (pthread_create(&acp_tid, NULL, acp_poll_thread, acp_server) != 0) {
-            fprintf(stderr, "Failed to create ACP poll thread\n");
-        } else {
-            acp_thread_started = true;
-        }
-    }
 
     /* Inject initial message if provided */
     if (initial_message) {
@@ -482,15 +440,6 @@ cleanup:
     for (int i = 0; i < channel_count; i++) {
         channels[i]->stop(channels[i]);
         channels[i]->destroy(channels[i]);
-    }
-
-    /* Stop and cleanup ACP server */
-    if (acp_server) {
-        acp_server_stop(acp_server);
-        if (acp_thread_started) {
-            pthread_join(acp_tid, NULL);
-        }
-        acp_server_free(acp_server);
     }
 
     cron_service_stop(cron_service);

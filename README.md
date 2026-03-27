@@ -89,6 +89,59 @@ All external plugins are loaded recursively from:
 .primagen/plugins/
 ```
 
+## Plugin System Overview
+
+Primagen uses dynamic plugins (`.so`) to extend runtime capability without recompiling the main binary.
+
+- **Plugin types**: `channels`, `tools`, `commands`
+- **Load path**: `.primagen/plugins/<type>/`
+- **Enable switch**: `plugins[].enabled` in `.primagen/config.json`
+- **Per-plugin config**: `plugins[].config` object
+
+Minimal plugin configuration shape:
+
+```json
+{
+  "plugins": [
+    {
+      "plugin_id": "example_plugin",
+      "enabled": true,
+      "config": {}
+    }
+  ]
+}
+```
+
+## Key Channel Plugins
+
+### Feishu (`feishu_channel`)
+
+- Path: `plugins/channels/feishu_channel`
+- Purpose: Feishu/Lark bot inbound + outbound messaging
+- Key config: `config.app_id`, `config.app_secret`, optional `config.use_card`
+- Outbound channel name: `feishu`
+
+### DingTalk (`dingtalk_channel`)
+
+- Path: `plugins/channels/dingtalk_channel`
+- Purpose: DingTalk inbound + outbound messaging
+- Key config: `config.clientId`, `config.clientSecret`
+- Outbound channel name: `dingtalk`
+
+### WebUI (`webui_channel`)
+
+- Path: `plugins/channels/webui_channel`
+- Purpose: Local web control panel and chat UI
+- Key config: `config.port` (default `16714`)
+- Access URL: `http://127.0.0.1:<port>/`
+
+### ACP (`acp_channel`)
+
+- Path: `plugins/channels/acp_channel`
+- Purpose: OpenAI-compatible HTTP API endpoints for tools/chat
+- Key config: `config.port` (default `8080`), `config.host` (default `127.0.0.1`)
+- Typical endpoints: `/v1/health`, `/v1/tools/list`, `/v1/tools/call`, `/v1/chat/completions`
+
 ## Build
 
 ```bash
@@ -200,15 +253,34 @@ Other commands:
     {
       "plugin_id": "feishu_channel",
       "enabled": true,
-      "app_id": "cli_xxx",
-      "app_secret": "xxx",
-      "use_card": false
+      "config": {
+        "app_id": "cli_xxx",
+        "app_secret": "xxx",
+        "use_card": false
+      }
     },
     {
       "plugin_id": "dingtalk_channel",
       "enabled": true,
-      "clientId": "dingxxxx",
-      "clientSecret": "xxxx"
+      "config": {
+        "clientId": "dingxxxx",
+        "clientSecret": "xxxx"
+      }
+    },
+    {
+      "plugin_id": "webui_channel",
+      "enabled": true,
+      "config": {
+        "port": 16714
+      }
+    },
+    {
+      "plugin_id": "acp_channel",
+      "enabled": true,
+      "config": {
+        "host": "127.0.0.1",
+        "port": 8080
+      }
     }
   ]
 }
@@ -219,7 +291,7 @@ Other commands:
 Start with ACP:
 
 ```bash
-./build/primagen agent --acp-port 8080
+./build/primagen agent
 ```
 
 Endpoints:
@@ -234,3 +306,5 @@ Endpoints:
 - `plugins/README.md` for plugin development and build workflow
 - `plugins/channels/feishu_channel/README.md` for Feishu plugin setup
 - `plugins/channels/dingtalk_channel/README.md` for DingTalk plugin setup
+- `plugins/channels/webui_channel/README.md` for WebUI plugin setup
+- `plugins/channels/acp_channel/README.md` for ACP plugin setup

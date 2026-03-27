@@ -964,6 +964,11 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
 
         if (err.code != ERR_NONE) {
             log_error("[AgentLoop] LLM call error: %s", err.message);
+            char full_msg[512];
+            snprintf(full_msg, sizeof(full_msg), "Sorry, I encountered an error: %s", err.message);
+            Message* assistant_msg = message_new(ROLE_ASSISTANT, full_msg);
+            session_add_message(session, assistant_msg);
+            session_manager_save(loop->session_mgr, session);
             send_error_response(loop, inbound->channel.data, inbound->chat_id.data, err.message);
             string_free(&response);
             error_occurred = true;
@@ -973,8 +978,12 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
         char* clean_content = strip_think_tags(response.data);
 
         if (tool_calls_count == 0) {
-            if (!error_occurred && clean_content && strlen(clean_content) > 0) {
-                OutboundMessage* outbound = outbound_message_new(inbound->channel.data, inbound->chat_id.data, clean_content);
+            const char* assistant_content = (clean_content && strlen(clean_content) > 0) ? clean_content : response.data;
+            if (!error_occurred && assistant_content && strlen(assistant_content) > 0) {
+                Message* assistant_msg = message_new(ROLE_ASSISTANT, assistant_content);
+                session_add_message(session, assistant_msg);
+                session_manager_save(loop->session_mgr, session);
+                OutboundMessage* outbound = outbound_message_new(inbound->channel.data, inbound->chat_id.data, assistant_content);
                 message_bus_send_outbound(loop->bus, outbound);
             }
             if (clean_content) free(clean_content);

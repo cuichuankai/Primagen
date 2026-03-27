@@ -83,7 +83,6 @@ OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/plugin/plugin_manager.o \
       $(OBJDIR)/channels/console.o \
       $(OBJDIR)/cli/commands.o \
-      $(OBJDIR)/acp/acp_server.o \
       $(OBJDIR)/vendor/cJSON/cJSON.o \
       $(OBJDIR)/vendor/mongoose/mongoose.o \
       $(OBJDIR)/main.o

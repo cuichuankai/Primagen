@@ -1,8 +1,8 @@
 #include "acp.h"
-#include "../include/logger.h"
-#include "../include/config.h"
-#include "../vendor/cJSON/cJSON.h"
-#include "../vendor/mongoose/mongoose.h"
+#include "../../../src/include/logger.h"
+#include "../../../src/include/config.h"
+#include "../../../src/vendor/cJSON/cJSON.h"
+#include "../../../src/vendor/mongoose/mongoose.h"
 #include <pthread.h>
 #include <time.h>
 #include <string.h>

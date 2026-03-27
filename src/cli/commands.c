@@ -235,11 +235,9 @@ void print_usage(const char* program_name) {
     printf("  -c, --config <path>    Path to config file (default: .primagen/config.json)\n");
     printf("  -w, --workspace <path> Path to workspace directory (default: .primagen)\n");
     printf("  -m, --message <msg>    Initial message to send to agent\n");
-    printf("  -a, --acp-port <port>  Start ACP (Agent Communication Protocol) server on port\n");
     printf("  -h, --help             Show this help message\n\n");
     printf("Examples:\n");
     printf("  %s agent -m \"Hello\"\n", program_name);
-    printf("  %s agent --acp-port 8080\n", program_name);
     printf("  %s onboard\n", program_name);
     printf("  %s gateway\n", program_name);
     printf("  %s status\n", program_name);

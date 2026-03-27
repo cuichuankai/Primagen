@@ -197,13 +197,13 @@ Config* config_create() {
     cfg->heartbeat.interval_s = 300;
 
     // Allocate plugins on heap (not stack!) so they persist after function returns
-    cfg->plugins.items = malloc(4 * sizeof(PluginConfig));
+    cfg->plugins.items = malloc(5 * sizeof(PluginConfig));
     if (!cfg->plugins.items) {
         cfg->plugins.count = 0;
         cfg->plugins.capacity = 0;
     } else {
-        cfg->plugins.count = 4;
-        cfg->plugins.capacity = 4;
+        cfg->plugins.count = 5;
+        cfg->plugins.capacity = 5;
 
         cfg->plugins.items[0].plugin_id = strdup("feishu_channel");
         cfg->plugins.items[0].enabled = false;
@@ -222,7 +222,7 @@ Config* config_create() {
         cJSON_AddNullToObject(cfg->plugins.items[1].config, "allow_from");
 
         cfg->plugins.items[2].plugin_id = strdup("web_tools");
-        cfg->plugins.items[2].enabled = false;
+        cfg->plugins.items[2].enabled = true;
         cfg->plugins.items[2].config = cJSON_CreateObject();
         cJSON_AddBoolToObject(cfg->plugins.items[2].config, "search_enabled", true);
         cJSON_AddStringToObject(cfg->plugins.items[2].config, "search_api_key", "");
@@ -232,6 +232,12 @@ Config* config_create() {
         cfg->plugins.items[3].enabled = false;
         cfg->plugins.items[3].config = cJSON_CreateObject();
         cJSON_AddNumberToObject(cfg->plugins.items[3].config, "port", 16714);
+
+        cfg->plugins.items[4].plugin_id = strdup("acp_channel");
+        cfg->plugins.items[4].enabled = false;
+        cfg->plugins.items[4].config = cJSON_CreateObject();
+        cJSON_AddNumberToObject(cfg->plugins.items[4].config, "port", 8080);
+        cJSON_AddStringToObject(cfg->plugins.items[4].config, "host", "127.0.0.1");
     }
 
     // Default log config
