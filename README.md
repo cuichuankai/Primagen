@@ -19,7 +19,7 @@ Yet even the flower of evil can bear the fruit of good, if carefully nurtured an
 > 恶本是天生的种子，但若以理性与良知浇灌，恶之花，亦可结出善之果。
 
 Primagen is a pure C implementation of an extensible AI agent runtime.  
-It combines a message-driven agent loop, dynamic plugin loading, MCP integration, and optional ACP HTTP APIs.
+It combines a message-driven agent loop, dynamic plugin loading, MCP tool plugin integration, and optional ACP HTTP APIs.
 
 ## What Primagen Provides
 
@@ -28,7 +28,7 @@ It combines a message-driven agent loop, dynamic plugin loading, MCP integration
 - Dynamic plugin system for channels, tools, and commands
 - Session persistence (`.primagen/sessions`)
 - Two-layer memory storage (`.primagen/memory`)
-- MCP client integration for external tool servers
+- MCP client integration for external tool servers (via `mcp_tools` plugin)
 - Optional ACP server with OpenAI-compatible endpoints
 
 ## Project Structure
@@ -45,7 +45,6 @@ Primagen/
 │   ├── context/        # Prompt/context assembly
 │   ├── cron/           # Scheduled task service
 │   ├── memory/         # MEMORY.md + HISTORY.md
-│   ├── mcp/            # MCP client and tool bridge
 │   ├── plugin/         # Plugin manager and loaders
 │   ├── providers/      # LLM provider implementation
 │   ├── session/        # Session persistence
@@ -55,7 +54,7 @@ Primagen/
 │   └── main.c          # Entry point
 ├── plugins/
 │   ├── channels/       # Channel plugins (Feishu, DingTalk, Telegram, ...)
-│   ├── tools/          # Tool plugins
+│   ├── tools/          # Tool plugins (web_tools, mcp_tools, ...)
 │   └── commands/       # Command plugins
 ├── tests/              # Unit tests
 └── Makefile
@@ -71,7 +70,7 @@ Inbound Channel
     -> Outbound Channel
 ```
 
-On startup, Primagen initializes config, session/memory, plugins, MCP clients, cron service, and skills, then starts agent and outbound threads.
+On startup, Primagen initializes config, session/memory, plugins, cron service, and skills, then starts agent and outbound threads.
 
 ## Built-in vs Plugin Components
 
@@ -195,49 +194,55 @@ Other commands:
 - Logs: `.primagen/log/`
 - Plugins: `.primagen/plugins/`
 
-## MCP Configuration Example
+## MCP Tools Plugin Configuration Example
 
 ```json
 {
-  "mcp": {
-    "enabled": true,
-    "servers": [
-      {
-        "id": "filesystem",
-        "transport": "stdio",
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/cuick/workdir/AI/Primagen"]
-      },
-      {
-        "id": "remote_tools",
-        "transport": "websocket",
-        "url": "ws://127.0.0.1:9000/mcp"
-      },
-      {
-        "id": "remote_sse_tools",
-        "transport": "sse",
-        "url": "http://127.0.0.1:8000/sse",
-        "request_url": "http://127.0.0.1:8000/messages",
-        "headers": {
-          "Authorization": "Bearer <token>",
-          "X-Api-Key": "<api-key>"
-        }
-      },
-      {
-        "id": "remote_streamable_http_tools",
-        "transport": "streamable_http",
-        "url": "https://example.com/mcp",
-        "request_url": "https://example.com/mcp",
-        "headers": {
-          "Authorization": "Bearer <token>",
-          "X-Api-Key": "<api-key>"
-        }
+  "plugins": [
+    {
+      "plugin_id": "mcp_tools",
+      "enabled": true,
+      "config": {
+        "servers": [
+          {
+            "id": "filesystem",
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/cuick/workdir/AI/Primagen"]
+          },
+          {
+            "id": "remote_tools",
+            "transport": "websocket",
+            "url": "ws://127.0.0.1:9000/mcp"
+          },
+          {
+            "id": "remote_sse_tools",
+            "transport": "sse",
+            "url": "http://127.0.0.1:8000/sse",
+            "request_url": "http://127.0.0.1:8000/messages",
+            "headers": {
+              "Authorization": "Bearer <token>",
+              "X-Api-Key": "<api-key>"
+            }
+          },
+          {
+            "id": "remote_streamable_http_tools",
+            "transport": "streamable_http",
+            "url": "https://example.com/mcp",
+            "request_url": "https://example.com/mcp",
+            "headers": {
+              "Authorization": "Bearer <token>",
+              "X-Api-Key": "<api-key>"
+            }
+          }
+        ]
       }
-    ]
-  }
+    }
+  ]
 }
 ```
 
+- `mcp_tools` reads MCP server definitions from `plugins[].config.servers`.
 - For `stdio`, Primagen starts the MCP server process with `command + args`.
 - For `websocket`, Primagen connects directly to `url` and exchanges MCP JSON-RPC messages over WebSocket text frames.
 - For `sse`, Primagen reads server events from `url` and sends JSON-RPC requests to `request_url` (defaults to `url` when omitted).
@@ -281,6 +286,19 @@ Other commands:
         "host": "127.0.0.1",
         "port": 8080
       }
+    },
+    {
+      "plugin_id": "mcp_tools",
+      "enabled": true,
+      "config": {
+        "servers": [
+          {
+            "id": "remote_streamable_http_tools",
+            "transport": "streamable_http",
+            "url": "https://example.com/mcp"
+          }
+        ]
+      }
     }
   ]
 }
@@ -308,3 +326,4 @@ Endpoints:
 - `plugins/channels/dingtalk_channel/README.md` for DingTalk plugin setup
 - `plugins/channels/webui_channel/README.md` for WebUI plugin setup
 - `plugins/channels/acp_channel/README.md` for ACP plugin setup
+- `plugins/tools/mcp_tools/README.md` for MCP tool plugin setup

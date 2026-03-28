@@ -1,8 +1,8 @@
 #include "mcp.h"
 #include "transport_internal.h"
-#include "../include/logger.h"
-#include "../vendor/mongoose/mongoose.h"
-#include "../vendor/cJSON/cJSON.h"
+#include "../../../src/include/logger.h"
+#include "../../../src/vendor/mongoose/mongoose.h"
+#include "../../../src/vendor/cJSON/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>

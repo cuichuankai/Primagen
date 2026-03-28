@@ -62,20 +62,6 @@ static bool get_json_bool(cJSON* item, bool default_val) {
     return default_val;
 }
 
-static void load_string_array(cJSON* array_item, StringArray* target) {
-    if (!cJSON_IsArray(array_item)) return;
-
-    string_array_free(target);
-    *target = string_array_new();
-
-    cJSON* item = NULL;
-    cJSON_ArrayForEach(item, array_item) {
-        if (cJSON_IsString(item)) {
-            string_array_add(target, item->valuestring);
-        }
-    }
-}
-
 // PluginConfig helper functions
 PluginConfig* config_add_plugin_config(Config* cfg, const char* plugin_id) {
     if (!cfg || !plugin_id) return NULL;
@@ -130,44 +116,6 @@ void config_plugin_config_free(PluginConfig* item) {
     item->config = NULL;
 }
 
-// EnvVarArray helper functions
-static EnvVarArray env_var_array_new() {
-    EnvVarArray arr;
-    arr.items = NULL;
-    arr.count = 0;
-    arr.capacity = 0;
-    return arr;
-}
-
-static void env_var_array_add(EnvVarArray* arr, const char* key, const char* value) {
-    if (!arr) return;
-    if (arr->count >= arr->capacity) {
-        size_t new_capacity = arr->capacity == 0 ? 4 : arr->capacity * 2;
-        EnvVar* new_items = realloc(arr->items, new_capacity * sizeof(EnvVar));
-        if (new_items) {
-            arr->items = new_items;
-            arr->capacity = new_capacity;
-        } else {
-            return;
-        }
-    }
-    arr->items[arr->count].key = strdup(key);
-    arr->items[arr->count].value = strdup(value);
-    arr->count++;
-}
-
-static void env_var_array_free(EnvVarArray* arr) {
-    if (!arr) return;
-    for (size_t i = 0; i < arr->count; i++) {
-        free(arr->items[i].key);
-        free(arr->items[i].value);
-    }
-    free(arr->items);
-    arr->items = NULL;
-    arr->count = 0;
-    arr->capacity = 0;
-}
-
 Config* config_create() {
     Config* cfg = malloc(sizeof(Config));
     if (!cfg) return NULL;
@@ -197,13 +145,13 @@ Config* config_create() {
     cfg->heartbeat.interval_s = 300;
 
     // Allocate plugins on heap (not stack!) so they persist after function returns
-    cfg->plugins.items = malloc(5 * sizeof(PluginConfig));
+    cfg->plugins.items = malloc(6 * sizeof(PluginConfig));
     if (!cfg->plugins.items) {
         cfg->plugins.count = 0;
         cfg->plugins.capacity = 0;
     } else {
-        cfg->plugins.count = 5;
-        cfg->plugins.capacity = 5;
+        cfg->plugins.count = 6;
+        cfg->plugins.capacity = 6;
 
         cfg->plugins.items[0].plugin_id = strdup("feishu_channel");
         cfg->plugins.items[0].enabled = false;
@@ -238,17 +186,16 @@ Config* config_create() {
         cfg->plugins.items[4].config = cJSON_CreateObject();
         cJSON_AddNumberToObject(cfg->plugins.items[4].config, "port", 8080);
         cJSON_AddStringToObject(cfg->plugins.items[4].config, "host", "127.0.0.1");
+
+        cfg->plugins.items[5].plugin_id = strdup("mcp_tools");
+        cfg->plugins.items[5].enabled = false;
+        cfg->plugins.items[5].config = cJSON_CreateObject();
+        cJSON_AddItemToObject(cfg->plugins.items[5].config, "servers", cJSON_CreateArray());
     }
 
     // Default log config
     cfg->log.level = strdup("INFO");
     cfg->log.console_output = false;
-
-    // Default MCP config
-    cfg->mcp.enabled = false;
-    cfg->mcp.servers = NULL;
-    cfg->mcp.server_count = 0;
-    cfg->mcp.server_capacity = 0;
 
     return cfg;
 }
@@ -265,17 +212,6 @@ void config_destroy(Config* cfg) {
     free(cfg->dns.dns6);
     
     free(cfg->log.level);
-
-    // Free MCP config
-    for (size_t i = 0; i < cfg->mcp.server_count; i++) {
-        free(cfg->mcp.servers[i].server_id);
-        free(cfg->mcp.servers[i].transport_type);
-        free(cfg->mcp.servers[i].command);
-        string_array_free(&cfg->mcp.servers[i].args);
-        env_var_array_free(&cfg->mcp.servers[i].env);
-        env_var_array_free(&cfg->mcp.servers[i].headers);
-    }
-    free(cfg->mcp.servers);
 
     // Free plugins config
     for (size_t i = 0; i < cfg->plugins.count; i++) {
@@ -300,10 +236,6 @@ DNSConfig* config_get_dns_config(Config* cfg) {
 
 HeartbeatConfig* config_get_heartbeat_config(Config* cfg) {
     return cfg ? &cfg->heartbeat : NULL;
-}
-
-MCPConfig* config_get_mcp_config(Config* cfg) {
-    return cfg ? &cfg->mcp : NULL;
 }
 
 bool config_load_from_file(Config* cfg, const char* filepath) {
@@ -425,96 +357,6 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
             cfg->log.level = get_json_string(item, "INFO");
         }
         if ((item = cJSON_GetObjectItem(log, "consoleOutput"))) cfg->log.console_output = get_json_bool(item, true);
-    }
-
-    // MCP Config
-    cJSON* mcp = cJSON_GetObjectItem(json, "mcp");
-    if (mcp) {
-        cJSON* item;
-        if ((item = cJSON_GetObjectItem(mcp, "enabled"))) {
-            cfg->mcp.enabled = get_json_bool(item, false);
-        }
-
-        cJSON* servers = cJSON_GetObjectItem(mcp, "servers");
-        if (cJSON_IsArray(servers)) {
-            cJSON* server_item;
-            cJSON_ArrayForEach(server_item, servers) {
-                // Grow array if needed
-                if (cfg->mcp.server_count >= cfg->mcp.server_capacity) {
-                    size_t new_capacity = cfg->mcp.server_capacity == 0 ? 4 : cfg->mcp.server_capacity * 2;
-                    MCPServerConfig* new_servers = realloc(cfg->mcp.servers, new_capacity * sizeof(MCPServerConfig));
-                    if (new_servers) {
-                        cfg->mcp.servers = new_servers;
-                        cfg->mcp.server_capacity = new_capacity;
-                    } else {
-                        break;
-                    }
-                }
-
-                // Initialize new server
-                MCPServerConfig* server = &cfg->mcp.servers[cfg->mcp.server_count];
-                memset(server, 0, sizeof(MCPServerConfig));
-                server->args = string_array_new();
-                server->env = env_var_array_new();
-                server->headers = env_var_array_new();
-
-                cJSON* s_item;
-                if ((s_item = cJSON_GetObjectItem(server_item, "id"))) {
-                    server->server_id = get_json_string(s_item, "");
-                }
-                if ((s_item = cJSON_GetObjectItem(server_item, "transport"))) {
-                    server->transport_type = get_json_string(s_item, "stdio");
-                }
-                if ((s_item = cJSON_GetObjectItem(server_item, "command"))) {
-                    server->command = get_json_string(s_item, "");
-                }
-                if ((s_item = cJSON_GetObjectItem(server_item, "url")) && cJSON_IsString(s_item)) {
-                    free(server->command);
-                    server->command = get_json_string(s_item, "");
-                }
-                if (server->transport_type &&
-                    (strcmp(server->transport_type, "sse") == 0 ||
-                     strcmp(server->transport_type, "streamable_http") == 0)) {
-                    cJSON* request_url_item = cJSON_GetObjectItem(server_item, "request_url");
-                    if (cJSON_IsString(request_url_item) && request_url_item->valuestring) {
-                        string_array_add(&server->args, request_url_item->valuestring);
-                    }
-                }
-
-                cJSON* args = cJSON_GetObjectItem(server_item, "args");
-                if (cJSON_IsArray(args)) {
-                    cJSON* arg_item;
-                    cJSON_ArrayForEach(arg_item, args) {
-                        if (cJSON_IsString(arg_item)) {
-                            string_array_add(&server->args, arg_item->valuestring);
-                        }
-                    }
-                }
-
-                // Parse environment variables
-                cJSON* env = cJSON_GetObjectItem(server_item, "env");
-                if (cJSON_IsObject(env)) {
-                    cJSON* env_item;
-                    cJSON_ArrayForEach(env_item, env) {
-                        if (cJSON_IsString(env_item)) {
-                            env_var_array_add(&server->env, env_item->string, env_item->valuestring);
-                        }
-                    }
-                }
-
-                cJSON* headers = cJSON_GetObjectItem(server_item, "headers");
-                if (cJSON_IsObject(headers)) {
-                    cJSON* header_item;
-                    cJSON_ArrayForEach(header_item, headers) {
-                        if (cJSON_IsString(header_item)) {
-                            env_var_array_add(&server->headers, header_item->string, header_item->valuestring);
-                        }
-                    }
-                }
-
-                cfg->mcp.server_count++;
-            }
-        }
     }
 
     // Plugins Config
@@ -683,64 +525,6 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
     cJSON_AddStringToObject(log, "level", cfg->log.level);
     cJSON_AddBoolToObject(log, "consoleOutput", cfg->log.console_output);
     cJSON_AddItemToObject(json, "log", log);
-
-    // MCP
-    cJSON* mcp = cJSON_CreateObject();
-    cJSON_AddBoolToObject(mcp, "enabled", cfg->mcp.enabled);
-    cJSON* mcp_servers = cJSON_CreateArray();
-    for (size_t i = 0; i < cfg->mcp.server_count; i++) {
-        MCPServerConfig* srv = &cfg->mcp.servers[i];
-        cJSON* server_obj = cJSON_CreateObject();
-        cJSON_AddStringToObject(server_obj, "id", srv->server_id ? srv->server_id : "");
-        cJSON_AddStringToObject(server_obj, "transport", srv->transport_type ? srv->transport_type : "stdio");
-
-        if (srv->transport_type &&
-            (strcmp(srv->transport_type, "websocket") == 0 ||
-             strcmp(srv->transport_type, "sse") == 0 ||
-             strcmp(srv->transport_type, "streamable_http") == 0)) {
-            cJSON_AddStringToObject(server_obj, "url", srv->command ? srv->command : "");
-        } else {
-            cJSON_AddStringToObject(server_obj, "command", srv->command ? srv->command : "");
-        }
-
-        if (srv->transport_type &&
-            (strcmp(srv->transport_type, "sse") == 0 ||
-             strcmp(srv->transport_type, "streamable_http") == 0) &&
-            srv->args.count > 0 && srv->args.items[0].data) {
-            cJSON_AddStringToObject(server_obj, "request_url", srv->args.items[0].data);
-        }
-
-        cJSON* args = cJSON_CreateArray();
-        size_t args_start = 0;
-        if (srv->transport_type &&
-            (strcmp(srv->transport_type, "sse") == 0 ||
-             strcmp(srv->transport_type, "streamable_http") == 0) &&
-            srv->args.count > 0) {
-            args_start = 1;
-        }
-        for (size_t j = args_start; j < srv->args.count; j++) {
-            cJSON_AddItemToArray(args, cJSON_CreateString(srv->args.items[j].data));
-        }
-        cJSON_AddItemToObject(server_obj, "args", args);
-
-        cJSON* env = cJSON_CreateObject();
-        for (size_t j = 0; j < srv->env.count; j++) {
-            EnvVar* env_item = &srv->env.items[j];
-            cJSON_AddStringToObject(env, env_item->key, env_item->value);
-        }
-        cJSON_AddItemToObject(server_obj, "env", env);
-
-        cJSON* headers = cJSON_CreateObject();
-        for (size_t j = 0; j < srv->headers.count; j++) {
-            EnvVar* header_item = &srv->headers.items[j];
-            cJSON_AddStringToObject(headers, header_item->key, header_item->value);
-        }
-        cJSON_AddItemToObject(server_obj, "headers", headers);
-
-        cJSON_AddItemToArray(mcp_servers, server_obj);
-    }
-    cJSON_AddItemToObject(mcp, "servers", mcp_servers);
-    cJSON_AddItemToObject(json, "mcp", mcp);
 
     // Plugins
     if (cfg->plugins.count > 0) {

@@ -8,7 +8,48 @@
 #include <ctype.h>
 #include <stdint.h>
 
+static uint64_t session_key_hash(const char* key) {
+    const uint64_t fnv_offset = 1469598103934665603ULL;
+    const uint64_t fnv_prime = 1099511628211ULL;
+    uint64_t hash = fnv_offset;
+    for (size_t i = 0; key[i]; i++) {
+        hash ^= (unsigned char) key[i];
+        hash *= fnv_prime;
+    }
+    return hash;
+}
+
+static void session_channel_prefix(const char* key, char* out, size_t out_size) {
+    const char* sep = strchr(key, ':');
+    size_t raw_len = sep ? (size_t)(sep - key) : strlen(key);
+    size_t n = 0;
+    for (size_t i = 0; i < raw_len && n + 1 < out_size && n < 12; i++) {
+        unsigned char c = (unsigned char) key[i];
+        if (isalnum(c) || c == '_' || c == '-') {
+            out[n++] = (char)tolower(c);
+        } else {
+            out[n++] = '_';
+        }
+    }
+    if (n == 0) {
+        const char* fallback = "session";
+        while (*fallback && n + 1 < out_size && n < 12) {
+            out[n++] = *fallback++;
+        }
+    }
+    out[n] = '\0';
+}
+
 static void build_session_file_path(SessionManager* mgr, const char* key, char* filepath, size_t filepath_size) {
+    uint64_t hash = session_key_hash(key);
+    char channel[16];
+    session_channel_prefix(key, channel, sizeof(channel));
+    char compact_name[32];
+    snprintf(compact_name, sizeof(compact_name), "%s_%016llx", channel, (unsigned long long) hash);
+    snprintf(filepath, filepath_size, "%s/sessions/%s.jsonl", mgr->workspace_path.data, compact_name);
+}
+
+static void build_legacy_session_file_path(SessionManager* mgr, const char* key, char* filepath, size_t filepath_size) {
     char sanitized[512];
     size_t j = 0;
     for (size_t i = 0; key[i] && j + 4 < sizeof(sanitized); i++) {
@@ -179,8 +220,13 @@ Error session_manager_load(SessionManager* mgr, const char* key, Session** sessi
     build_session_file_path(mgr, key, filepath, sizeof(filepath));
     FILE* f = fopen(filepath, "r");
     if (!f) {
-        *session_out = session_manager_create(mgr, key);
-        return error_new(ERR_NONE, "");
+        char legacy_filepath[512];
+        build_legacy_session_file_path(mgr, key, legacy_filepath, sizeof(legacy_filepath));
+        f = fopen(legacy_filepath, "r");
+        if (!f) {
+            *session_out = session_manager_create(mgr, key);
+            return error_new(ERR_NONE, "");
+        }
     }
 
     Session* session = session_manager_create(mgr, key);

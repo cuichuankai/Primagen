@@ -51,22 +51,6 @@ typedef struct {
     int dns_timeout_ms;
 } DNSConfig;
 
-typedef struct {
-    char* server_id;
-    char* transport_type;  // "stdio", "sse", "websocket"
-    char* command;
-    StringArray args;
-    EnvVarArray env;       // Environment variables for this server
-    EnvVarArray headers;   // Custom HTTP headers for sse/streamable_http
-} MCPServerConfig;
-
-typedef struct {
-    MCPServerConfig* servers;
-    size_t server_count;
-    size_t server_capacity;
-    bool enabled;
-} MCPConfig;
-
 // Plugin configuration structures
 typedef struct {
     char* plugin_id;      // Plugin unique identifier
@@ -85,7 +69,6 @@ typedef struct Config {
     ToolConfig tools;
     DNSConfig dns;
     HeartbeatConfig heartbeat;
-    MCPConfig mcp;
     LogConfig log;
     PluginsConfig plugins;  // New: plugin configuration
 } Config;
@@ -97,7 +80,6 @@ AgentConfig* config_get_agent_config(Config* cfg);
 ToolConfig* config_get_tool_config(Config* cfg);
 DNSConfig* config_get_dns_config(Config* cfg);
 HeartbeatConfig* config_get_heartbeat_config(Config* cfg);
-MCPConfig* config_get_mcp_config(Config* cfg);
 
 bool config_load_from_file(Config* cfg, const char* filepath);
 bool config_save_to_file(Config* cfg, const char* filepath);

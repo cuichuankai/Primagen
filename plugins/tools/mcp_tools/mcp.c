@@ -1,7 +1,7 @@
 #include "mcp.h"
 #include "transport_internal.h"
-#include "../include/logger.h"
-#include "../vendor/cJSON/cJSON.h"
+#include "../../../src/include/logger.h"
+#include "../../../src/vendor/cJSON/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -498,33 +498,123 @@ MCPClient* mcp_manager_get_client(MCPManager* mgr, const char* server_id) {
     return NULL;
 }
 
-Error mcp_manager_setup_from_config(MCPManager* mgr, MCPConfig* cfg, ToolRegistry* tool_reg) {
-    if (!mgr || !cfg || !tool_reg) {
+static void mcp_env_array_add(EnvVarArray* arr, const char* key, const char* value) {
+    if (!arr || !key || !value) return;
+    if (arr->count >= arr->capacity) {
+        size_t new_capacity = arr->capacity == 0 ? 4 : arr->capacity * 2;
+        EnvVar* new_items = realloc(arr->items, new_capacity * sizeof(EnvVar));
+        if (!new_items) return;
+        arr->items = new_items;
+        arr->capacity = new_capacity;
+    }
+    arr->items[arr->count].key = strdup(key);
+    arr->items[arr->count].value = strdup(value);
+    arr->count++;
+}
+
+static void mcp_env_array_free(EnvVarArray* arr) {
+    if (!arr) return;
+    for (size_t i = 0; i < arr->count; i++) {
+        free(arr->items[i].key);
+        free(arr->items[i].value);
+    }
+    free(arr->items);
+    arr->items = NULL;
+    arr->count = 0;
+    arr->capacity = 0;
+}
+
+static void mcp_parse_env_map(cJSON* env_obj, EnvVarArray* target) {
+    if (!cJSON_IsObject(env_obj) || !target) return;
+    cJSON* item = NULL;
+    cJSON_ArrayForEach(item, env_obj) {
+        if (cJSON_IsString(item) && item->valuestring && item->string) {
+            mcp_env_array_add(target, item->string, item->valuestring);
+        }
+    }
+}
+
+Error mcp_manager_setup_from_plugin_config(MCPManager* mgr, cJSON* plugin_cfg,
+                                           PluginManager* plugin_mgr, LoadedPlugin* plugin) {
+    if (!mgr || !plugin_cfg || !plugin_mgr) {
         return error_new(ERR_INVALID_PARAM, "Invalid MCP manager setup args");
     }
 
-    for (size_t i = 0; i < cfg->server_count; i++) {
-        MCPServerConfig* srv = &cfg->servers[i];
-        log_debug("[MCP] Adding server: %s (transport: %s)", srv->server_id, srv->transport_type);
+    cJSON* servers = cJSON_GetObjectItem(plugin_cfg, "servers");
+    if (!cJSON_IsArray(servers)) {
+        return error_new(ERR_INVALID_PARAM, "mcp_tools config.servers must be an array");
+    }
 
-        char** args = NULL;
-        if (srv->args.count > 0) {
-            args = malloc(srv->args.count * sizeof(char*));
-            if (!args) {
-                return error_new(ERR_MEMORY, "Failed to allocate MCP args");
-            }
-            for (size_t j = 0; j < srv->args.count; j++) {
-                args[j] = srv->args.items[j].data;
+    cJSON* server_item = NULL;
+    cJSON_ArrayForEach(server_item, servers) {
+        cJSON* id_item = cJSON_GetObjectItem(server_item, "id");
+        if (!cJSON_IsString(id_item) || !id_item->valuestring || !id_item->valuestring[0]) {
+            log_error("[MCP] Skip server without valid id");
+            continue;
+        }
+
+        cJSON* transport_item = cJSON_GetObjectItem(server_item, "transport");
+        const char* transport = (cJSON_IsString(transport_item) && transport_item->valuestring[0])
+            ? transport_item->valuestring : "stdio";
+
+        const bool is_http_transport =
+            strcmp(transport, "websocket") == 0 ||
+            strcmp(transport, "sse") == 0 ||
+            strcmp(transport, "streamable_http") == 0;
+
+        const cJSON* command_item = cJSON_GetObjectItem(server_item, is_http_transport ? "url" : "command");
+        const char* command = (cJSON_IsString(command_item) && command_item->valuestring)
+            ? command_item->valuestring : "";
+
+        StringArray args = string_array_new();
+        EnvVarArray env = {0};
+        EnvVarArray headers = {0};
+
+        if (strcmp(transport, "sse") == 0 || strcmp(transport, "streamable_http") == 0) {
+            cJSON* request_url_item = cJSON_GetObjectItem(server_item, "request_url");
+            if (cJSON_IsString(request_url_item) && request_url_item->valuestring && request_url_item->valuestring[0]) {
+                string_array_add(&args, request_url_item->valuestring);
             }
         }
 
-        int add_idx = mcp_manager_add_client(mgr, srv->server_id, srv->transport_type,
-                                             srv->command, args, srv->args.count,
-                                             srv->env.items, srv->env.count,
-                                             srv->headers.items, srv->headers.count);
-        if (args) free(args);
+        cJSON* args_item = cJSON_GetObjectItem(server_item, "args");
+        if (cJSON_IsArray(args_item)) {
+            cJSON* arg_item = NULL;
+            cJSON_ArrayForEach(arg_item, args_item) {
+                if (cJSON_IsString(arg_item) && arg_item->valuestring) {
+                    string_array_add(&args, arg_item->valuestring);
+                }
+            }
+        }
+
+        mcp_parse_env_map(cJSON_GetObjectItem(server_item, "env"), &env);
+        mcp_parse_env_map(cJSON_GetObjectItem(server_item, "headers"), &headers);
+
+        char** args_view = NULL;
+        if (args.count > 0) {
+            args_view = malloc(args.count * sizeof(char*));
+            if (!args_view) {
+                string_array_free(&args);
+                mcp_env_array_free(&env);
+                mcp_env_array_free(&headers);
+                return error_new(ERR_MEMORY, "Failed to allocate MCP args");
+            }
+            for (size_t j = 0; j < args.count; j++) {
+                args_view[j] = args.items[j].data;
+            }
+        }
+
+        log_debug("[MCP] Adding server: %s (transport: %s)", id_item->valuestring, transport);
+        int add_idx = mcp_manager_add_client(mgr, id_item->valuestring, transport,
+                                             command, args_view, args.count,
+                                             env.items, env.count,
+                                             headers.items, headers.count);
+        free(args_view);
+        string_array_free(&args);
+        mcp_env_array_free(&env);
+        mcp_env_array_free(&headers);
         if (add_idx < 0) {
-            log_error("[MCP] Failed to add server: %s", srv->server_id);
+            log_error("[MCP] Failed to add server: %s", id_item->valuestring);
         }
     }
 
@@ -539,7 +629,7 @@ Error mcp_manager_setup_from_config(MCPManager* mgr, MCPConfig* cfg, ToolRegistr
             err = mcp_client_list_tools(client, &tools, &tools_count);
             if (err.code == ERR_NONE && tools_count > 0) {
                 log_debug("[MCP] %s provides %zu tools", client->server_id, tools_count);
-                mcp_register_tools(tool_reg, client);
+                mcp_register_tools(plugin_mgr, plugin, client);
                 for (size_t j = 0; j < tools_count; j++) {
                     log_debug("  - Tool: %s", tools[j].name);
                 }
@@ -553,7 +643,7 @@ Error mcp_manager_setup_from_config(MCPManager* mgr, MCPConfig* cfg, ToolRegistr
                 log_debug("[MCP] %s provides no tools", client->server_id);
             }
 
-            mcp_register_resources_prompts(tool_reg, client);
+            mcp_register_resources_prompts(plugin_mgr, plugin, client);
         } else {
             log_error("[MCP] Failed to connect to %s: %s", client->server_id, err.message);
         }

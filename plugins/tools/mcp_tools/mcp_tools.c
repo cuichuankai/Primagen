@@ -4,10 +4,11 @@
  */
 
 #include "mcp.h"
-#include "../tools/tool.h"
-#include "../include/logger.h"
-#include "../include/common.h"
-#include "../vendor/cJSON/cJSON.h"
+#include "../../../src/plugin/plugin_manager.h"
+#include "../../../src/tools/tool.h"
+#include "../../../src/include/logger.h"
+#include "../../../src/include/common.h"
+#include "../../../src/vendor/cJSON/cJSON.h"
 #include <string.h>
 
 // MCP tool context
@@ -237,8 +238,8 @@ static void mcp_prompt_free(void* user_data) {
 }
 
 // Register all MCP tools from a client to ToolRegistry
-void mcp_register_tools(ToolRegistry* reg, MCPClient* client) {
-    if (!reg || !client || !client->tools || client->tools_count == 0) {
+void mcp_register_tools(PluginManager* manager, LoadedPlugin* plugin, MCPClient* client) {
+    if (!manager || !client || !client->tools || client->tools_count == 0) {
         log_debug("[MCP] No tools to register");
         return;
     }
@@ -262,12 +263,10 @@ void mcp_register_tools(ToolRegistry* reg, MCPClient* client) {
         snprintf(full_name, sizeof(full_name), "mcp_%s", tool->name);
 
         // Register tool
-        Error err = tool_registry_register(reg, full_name, tool->description,
-                                           tool->input_schema.data,
-                                           mcp_tool_execute, ctx);
-
-        if (err.code != ERR_NONE) {
-            log_error("[MCP] Failed to register tool %s: %s", full_name, err.message);
+        int ret = plugin_register_tool(manager, plugin, full_name, tool->description,
+                                       tool->input_schema.data, mcp_tool_execute, ctx);
+        if (ret != 0) {
+            log_error("[MCP] Failed to register tool %s", full_name);
             mcp_tool_free(ctx);
         } else {
             log_debug("[MCP] Registered tool: %s", full_name);
@@ -276,8 +275,8 @@ void mcp_register_tools(ToolRegistry* reg, MCPClient* client) {
 }
 
 // Register MCP resources and prompts tools
-void mcp_register_resources_prompts(ToolRegistry* reg, MCPClient* client) {
-    if (!reg || !client) {
+void mcp_register_resources_prompts(PluginManager* manager, LoadedPlugin* plugin, MCPClient* client) {
+    if (!manager || !client) {
         log_debug("[MCP] Invalid arguments for registering resources/prompts");
         return;
     }
@@ -293,26 +292,24 @@ void mcp_register_resources_prompts(ToolRegistry* reg, MCPClient* client) {
     res_ctx->client = client;
 
     // Register mcp_list_resources
-    Error err = tool_registry_register(reg, "mcp_list_resources",
-        "List available resources from MCP servers",
-        "{}",
-        mcp_list_resources_execute, res_ctx);
-
-    if (err.code != ERR_NONE) {
-        log_error("[MCP] Failed to register mcp_list_resources: %s", err.message);
+    int ret = plugin_register_tool(manager, plugin, "mcp_list_resources",
+                                   "List available resources from MCP servers",
+                                   "{}",
+                                   mcp_list_resources_execute, res_ctx);
+    if (ret != 0) {
+        log_error("[MCP] Failed to register mcp_list_resources");
         mcp_resource_free(res_ctx);
     } else {
         log_debug("[MCP] Registered tool: mcp_list_resources");
     }
 
     // Register mcp_read_resource
-    err = tool_registry_register(reg, "mcp_read_resource",
-        "Read content from an MCP resource by URI",
-        "{\"type\":\"object\",\"properties\":{\"uri\":{\"type\":\"string\",\"description\":\"Resource URI\"}},\"required\":[\"uri\"]}",
-        mcp_read_resource_execute, res_ctx);
-
-    if (err.code != ERR_NONE) {
-        log_error("[MCP] Failed to register mcp_read_resource: %s", err.message);
+    ret = plugin_register_tool(manager, plugin, "mcp_read_resource",
+                               "Read content from an MCP resource by URI",
+                               "{\"type\":\"object\",\"properties\":{\"uri\":{\"type\":\"string\",\"description\":\"Resource URI\"}},\"required\":[\"uri\"]}",
+                               mcp_read_resource_execute, res_ctx);
+    if (ret != 0) {
+        log_error("[MCP] Failed to register mcp_read_resource");
     } else {
         log_debug("[MCP] Registered tool: mcp_read_resource");
     }
@@ -326,13 +323,12 @@ void mcp_register_resources_prompts(ToolRegistry* reg, MCPClient* client) {
     prompt_ctx->client = client;
 
     // Register mcp_list_prompts
-    err = tool_registry_register(reg, "mcp_list_prompts",
-        "List available prompts from MCP servers",
-        "{}",
-        mcp_list_prompts_execute, prompt_ctx);
-
-    if (err.code != ERR_NONE) {
-        log_error("[MCP] Failed to register mcp_list_prompts: %s", err.message);
+    ret = plugin_register_tool(manager, plugin, "mcp_list_prompts",
+                               "List available prompts from MCP servers",
+                               "{}",
+                               mcp_list_prompts_execute, prompt_ctx);
+    if (ret != 0) {
+        log_error("[MCP] Failed to register mcp_list_prompts");
         mcp_prompt_free(prompt_ctx);
     } else {
         log_debug("[MCP] Registered tool: mcp_list_prompts");

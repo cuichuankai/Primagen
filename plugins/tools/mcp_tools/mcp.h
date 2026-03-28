@@ -1,9 +1,10 @@
 #ifndef MCP_H
 #define MCP_H
 
-#include "../include/common.h"
-#include "../include/config.h"
-#include "../tools/tool.h"
+#include "../../../src/include/common.h"
+#include "../../../src/include/plugin.h"
+#include "../../../src/tools/tool.h"
+#include "../../../src/vendor/cJSON/cJSON.h"
 
 // MCP protocol constants
 #define MCP_VERSION "2024-11-05"
@@ -106,7 +107,8 @@ int mcp_manager_add_client(MCPManager* mgr, const char* server_id, const char* t
                            EnvVar* headers, size_t headers_count);
 void mcp_manager_remove_client(MCPManager* mgr, const char* server_id);
 MCPClient* mcp_manager_get_client(MCPManager* mgr, const char* server_id);
-Error mcp_manager_setup_from_config(MCPManager* mgr, MCPConfig* cfg, ToolRegistry* tool_reg);
+Error mcp_manager_setup_from_plugin_config(MCPManager* mgr, cJSON* plugin_cfg,
+                                           PluginManager* plugin_mgr, LoadedPlugin* plugin);
 
 // Connection management
 Error mcp_client_connect(MCPClient* client);
@@ -136,7 +138,7 @@ const char* mcp_method_to_string(MCPMethod method);
 MCPMethod mcp_method_from_string(const char* str);
 
 // Tool registration (bridge to ToolRegistry)
-void mcp_register_tools(ToolRegistry* reg, MCPClient* client);
-void mcp_register_resources_prompts(ToolRegistry* reg, MCPClient* client);
+void mcp_register_tools(PluginManager* manager, LoadedPlugin* plugin, MCPClient* client);
+void mcp_register_resources_prompts(PluginManager* manager, LoadedPlugin* plugin, MCPClient* client);
 
 #endif // MCP_H

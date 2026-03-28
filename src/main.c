@@ -14,7 +14,6 @@
 #include "include/skills.h"
 #include "include/channel.h"
 #include "include/commands.h"
-#include "mcp/mcp.h"
 #include "plugin/plugin_manager.h"
 #include <pthread.h>
 #include <stdio.h>
@@ -207,7 +206,6 @@ int main(int argc, char* argv[]) {
 /* Extracted logic for running the agent loop */
 int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_message) {
     int rc = 0;
-    MCPManager* mcp_mgr = NULL;
     ToolContext* tool_ctx = NULL;
     AgentLoop* loop = NULL;
     pthread_t agent_tid = 0, outbound_tid = 0;
@@ -291,23 +289,6 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         plugin_mgr->channel_capacity = MAX_CHANNELS;
     } else {
         log_error("[System] Failed to create PluginManager");
-    }
-
-    /* Initialize MCP Manager */
-    if (cfg->mcp.enabled) {
-        log_debug("[System] Creating MCPManager...");
-        mcp_mgr = mcp_manager_create(workspace_path);
-        if (!mcp_mgr) {
-            log_error("[MCP] Failed to create manager");
-        } else {
-            Error mcp_setup_err = mcp_manager_setup_from_config(mcp_mgr, &cfg->mcp, tool_reg);
-            if (mcp_setup_err.code != ERR_NONE) {
-                log_error("[MCP] Manager setup failed: %s", mcp_setup_err.message);
-            }
-            log_debug("[System] MCP Manager initialized with %zu servers", mcp_mgr->clients_count);
-        }
-    } else {
-        log_info("[System] MCP disabled");
     }
 
     /* Initialize Subagent Manager */
@@ -453,10 +434,6 @@ cleanup:
     if (plugin_mgr) {
         plugin_manager_free(plugin_mgr);
     }
-    if (mcp_mgr) {
-        mcp_manager_free(mcp_mgr);
-    }
-
     if (loop && !agent_thread_started) {
         agent_loop_free(loop);
     }
