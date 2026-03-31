@@ -38,6 +38,10 @@ typedef struct {
     void* user_data;
 } LLMStreamOptions;
 
+struct mg_mgr;
+
+void llm_provider_configure_mgr_dns(struct mg_mgr* mgr, const Config* config);
+
 // LLM provider interface
 Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, String* response, ToolCall** tool_calls, size_t* tool_calls_count);
 

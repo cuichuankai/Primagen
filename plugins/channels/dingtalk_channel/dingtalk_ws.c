@@ -521,7 +521,11 @@ static void dingtalk_ws_send_frame(struct mg_connection* c, WSFrame* f) {
     free(b.data);
 }
 
-static void dingtalk_ws_send_ping(struct mg_connection* c, DingTalkWS* ws) {
+bool dingtalk_ws_can_send_ping(const struct mg_connection* c) {
+    return c && c->is_websocket && !c->is_closing;
+}
+
+static void dingtalk_ws_send_ping(struct mg_connection* c) {
     WSFrame f;
     memset(&f, 0, sizeof(f));
     f.method = 0;
@@ -804,10 +808,12 @@ static void ws_handler(struct mg_connection* c, int ev, void* ev_data) {
     } else if (ev == MG_EV_CLOSE) {
         log_info("[DingTalk] MG_EV_CLOSE - WebSocket connection closed");
         log_info("[DingTalk] Close state: c->is_closing=%d, ws->running=%d", c->is_closing, ws->running);
+        ws->c = NULL;
         ws->running = false;
     } else if (ev == MG_EV_ERROR) {
         log_error("[DingTalk] MG_EV_ERROR - %s", (char*)ev_data);
         log_error("[DingTalk] Error state: c->is_draining=%d, c->is_resp=%d", c->is_draining, c->is_resp);
+        ws->c = NULL;
         ws->running = false;
     } else if (ev == MG_EV_POLL) {
         // Skip poll event logs to reduce noise
@@ -840,8 +846,10 @@ void dingtalk_ws_destroy(DingTalkWS* ws) {
     free(ws);
 }
 
-void dingtalk_ws_set_dns(DingTalkWS* ws, const char* dns4, const char* dns6, int dns_timeout_ms) {
+void dingtalk_ws_set_dns(DingTalkWS* ws, const char* dns4, const char* dns6, int dns_timeout_ms, bool use_system_resolver) {
     if (!ws) return;
+    ws->mgr.use_system_resolver = use_system_resolver;
+    if (use_system_resolver) return;
     if (dns4 && dns4[0]) ws->mgr.dns4.url = dns4;
     if (dns6 && dns6[0]) ws->mgr.dns6.url = dns6;
     if (dns_timeout_ms > 0) ws->mgr.dnstimeout = dns_timeout_ms;
@@ -890,10 +898,10 @@ void dingtalk_ws_run(DingTalkWS* ws, DingTalkWSMessageCallback callback, void* u
 
     while (ws->running && ws->mgr.conns) {
         mg_mgr_poll(&ws->mgr, 100);
+        if (!ws->running) break;
 
-        // Send periodic ping
-        if (ws->c && now_ms() >= ws->next_ping_ms) {
-            dingtalk_ws_send_ping(ws->c, ws);
+        if (dingtalk_ws_can_send_ping(ws->c) && now_ms() >= ws->next_ping_ms) {
+            dingtalk_ws_send_ping(ws->c);
             ws->next_ping_ms = now_ms() + ws->ping_interval_ms;
         }
     }
@@ -1001,17 +1009,20 @@ static void url_callback_fn(struct mg_connection* c, int ev, void* ev_data) {
 }
 
 char* dingtalk_get_ws_url(const char* client_id, const char* client_secret, const char* access_token,
-                          const char* dns4, const char* dns6, int dns_timeout_ms) {
+                          const char* dns4, const char* dns6, int dns_timeout_ms, bool use_system_resolver) {
     struct mg_mgr mgr;
     URLChunk chunk = {0};
     chunk.memory = malloc(1);
     chunk.memory[0] = '\0';
 
     mg_mgr_init(&mgr);
+    mgr.use_system_resolver = use_system_resolver;
 
-    if (dns4 && dns4[0]) mgr.dns4.url = dns4;
-    if (dns6 && dns6[0]) mgr.dns6.url = dns6;
-    if (dns_timeout_ms > 0) mgr.dnstimeout = dns_timeout_ms;
+    if (!use_system_resolver) {
+        if (dns4 && dns4[0]) mgr.dns4.url = dns4;
+        if (dns6 && dns6[0]) mgr.dns6.url = dns6;
+        if (dns_timeout_ms > 0) mgr.dnstimeout = dns_timeout_ms;
+    }
 
     // DingTalk WebSocket connection API
     const char* url = "https://api.dingtalk.com/v1.0/gateway/connections/open";

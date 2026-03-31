@@ -67,6 +67,7 @@ typedef struct {
     char* dns4;
     char* dns6;
     int dns_timeout_ms;
+    bool use_system_resolver;
     // Session webhook cache (for replying to conversations)
     SessionWebhook* session_cache;
     size_t session_cache_size;
@@ -96,6 +97,8 @@ static bool memory_append_chunk(struct MemoryStruct* ms, const char* data, size_
 
 static void apply_dns_config(struct mg_mgr* mgr, const DingTalkChannelData* data) {
     if (!mgr || !data) return;
+    mgr->use_system_resolver = data->use_system_resolver;
+    if (data->use_system_resolver) return;
     if (data->dns4 && data->dns4[0]) mgr->dns4.url = data->dns4;
     if (data->dns6 && data->dns6[0]) mgr->dns6.url = data->dns6;
     if (data->dns_timeout_ms > 0) mgr->dnstimeout = data->dns_timeout_ms;
@@ -632,12 +635,13 @@ static void* dingtalk_receive_loop(void* arg) {
                                            data->access_token,
                                            data->dns4,
                                            data->dns6,
-                                           data->dns_timeout_ms);
+                                           data->dns_timeout_ms,
+                                           data->use_system_resolver);
 
         if (ws_url) {
             log_info("[DingTalk] Connecting to WebSocket...");
             data->ws = dingtalk_ws_create();
-            dingtalk_ws_set_dns(data->ws, data->dns4, data->dns6, data->dns_timeout_ms);
+            dingtalk_ws_set_dns(data->ws, data->dns4, data->dns6, data->dns_timeout_ms, data->use_system_resolver);
 
             if (dingtalk_ws_connect(data->ws, ws_url, data->access_token,
                                     data->client_secret)) {
@@ -701,6 +705,7 @@ static bool dingtalk_init(Channel* self, Config* config, MessageBus* bus) {
     data->dns4 = NULL;
     data->dns6 = NULL;
     data->dns_timeout_ms = 0;
+    data->use_system_resolver = false;
 
     // Get plugin configuration
     PluginConfig* plugin_cfg = config_get_plugin_config(config, "dingtalk_channel");
@@ -720,6 +725,7 @@ static bool dingtalk_init(Channel* self, Config* config, MessageBus* bus) {
         if (dns_cfg->dns4 && dns_cfg->dns4[0]) data->dns4 = strdup(dns_cfg->dns4);
         if (dns_cfg->dns6 && dns_cfg->dns6[0]) data->dns6 = strdup(dns_cfg->dns6);
         if (dns_cfg->dns_timeout_ms > 0) data->dns_timeout_ms = dns_cfg->dns_timeout_ms;
+        data->use_system_resolver = dns_cfg->use_system_resolver;
     }
 
     self->user_data = data;

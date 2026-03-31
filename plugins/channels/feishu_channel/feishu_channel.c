@@ -37,7 +37,7 @@ typedef void (*FeishuWSMessageCallback)(const char* chat_id, const char* content
 
 FeishuWS* feishu_ws_create(void);
 void feishu_ws_destroy(FeishuWS* ws);
-void feishu_ws_set_dns(FeishuWS* ws, const char* dns4, const char* dns6, int dns_timeout_ms);
+void feishu_ws_set_dns(FeishuWS* ws, const char* dns4, const char* dns6, int dns_timeout_ms, bool use_system_resolver);
 bool feishu_ws_connect(FeishuWS* ws, const char* url);
 void feishu_ws_run(FeishuWS* ws, FeishuWSMessageCallback callback, void* user_data);
 void feishu_ws_stop(FeishuWS* ws);
@@ -59,6 +59,7 @@ typedef struct {
     char* dns4;
     char* dns6;
     int dns_timeout_ms;
+    bool use_system_resolver;
 } FeishuChannelData;
 
 struct MemoryStruct {
@@ -85,6 +86,8 @@ static bool memory_append_chunk(struct MemoryStruct* ms, const char* data, size_
 
 static void apply_dns_config(struct mg_mgr* mgr, const FeishuChannelData* data) {
     if (!mgr || !data) return;
+    mgr->use_system_resolver = data->use_system_resolver;
+    if (data->use_system_resolver) return;
     if (data->dns4 && data->dns4[0]) mgr->dns4.url = data->dns4;
     if (data->dns6 && data->dns6[0]) mgr->dns6.url = data->dns6;
     if (data->dns_timeout_ms > 0) mgr->dnstimeout = data->dns_timeout_ms;
@@ -619,105 +622,119 @@ static bool feishu_upload_media(FeishuChannelData* data, const FeishuAttachment*
         upload_file_type = strcmp(attachment->type, "audio") == 0 ? "opus" : "mp4";
     }
 
-    if (!data->access_token) refresh_token(data);
-    if (!data->access_token) return false;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (!data->access_token) refresh_token(data);
+        if (!data->access_token) return false;
 
-    const char* boundary = "----PrimagenFeishuBoundary";
-    struct MemoryStruct body = {0};
-    body.memory = malloc(1);
-    body.memory[0] = '\0';
+        const char* boundary = "----PrimagenFeishuBoundary";
+        struct MemoryStruct body = {0};
+        body.memory = malloc(1);
+        body.memory[0] = '\0';
 
-    bool built = false;
-    if (is_image) {
-        built = build_feishu_upload_body(boundary, "image", attachment->path,
-                                         "image_type", "message",
-                                         NULL, NULL, &body);
-    } else {
-        built = build_feishu_upload_body(boundary, "file", attachment->path,
-                                         "file_type", upload_file_type,
-                                         "file_name", file_basename(attachment->path), &body);
-    }
-    if (!built) {
-        free(body.memory);
-        log_error("[Feishu] Failed to build upload body: %s", attachment->path);
-        return false;
-    }
+        bool built = false;
+        if (is_image) {
+            built = build_feishu_upload_body(boundary, "image", attachment->path,
+                                             "image_type", "message",
+                                             NULL, NULL, &body);
+        } else {
+            built = build_feishu_upload_body(boundary, "file", attachment->path,
+                                             "file_type", upload_file_type,
+                                             "file_name", file_basename(attachment->path), &body);
+        }
+        if (!built) {
+            free(body.memory);
+            log_error("[Feishu] Failed to build upload body: %s", attachment->path);
+            return false;
+        }
 
-    struct mg_mgr mgr;
-    struct MemoryStruct chunk = {0};
-    chunk.memory = malloc(1);
-    chunk.memory[0] = '\0';
-    mg_mgr_init(&mgr);
-    apply_dns_config(&mgr, data);
+        struct mg_mgr mgr;
+        struct MemoryStruct chunk = {0};
+        chunk.memory = malloc(1);
+        chunk.memory[0] = '\0';
+        mg_mgr_init(&mgr);
+        apply_dns_config(&mgr, data);
 
-    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
-    if (!c) {
+        struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
+        if (!c) {
+            mg_mgr_free(&mgr);
+            free(body.memory);
+            free(chunk.memory);
+            log_error("[Feishu] Failed to connect for media upload");
+            return false;
+        }
+
+        struct mg_str host = mg_url_host(url);
+        struct mg_tls_opts opts = {0};
+        opts.ca = mg_str("");
+        opts.name = host;
+        opts.skip_verification = true;
+        if (mg_url_is_ssl(url)) mg_tls_init(c, &opts);
+
+        mg_printf(c,
+            "POST %s HTTP/1.0\r\n"
+            "Host: %.*s\r\n"
+            "Authorization: Bearer %s\r\n"
+            "Content-Type: multipart/form-data; boundary=%s\r\n"
+            "Content-Length: %d\r\n"
+            "\r\n",
+            mg_url_uri(url),
+            (int)host.len, host.buf,
+            data->access_token,
+            boundary,
+            (int)body.size
+        );
+        mg_send(c, body.memory, body.size);
+
+        while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+
+        bool retry = false;
+        bool ok = false;
+        if (chunk.size > 0) {
+            cJSON* resp = cJSON_Parse(chunk.memory);
+            if (resp) {
+                cJSON* code = cJSON_GetObjectItem(resp, "code");
+                if (code && code->valueint == 0) {
+                    cJSON* data_obj = cJSON_GetObjectItem(resp, "data");
+                    if (data_obj) {
+                        if (is_image) {
+                            cJSON* image_key = cJSON_GetObjectItem(data_obj, "image_key");
+                            if (cJSON_IsString(image_key) && image_key->valuestring) {
+                                *out_image_key = strdup(image_key->valuestring);
+                                ok = *out_image_key != NULL;
+                            }
+                        } else {
+                            cJSON* file_key = cJSON_GetObjectItem(data_obj, "file_key");
+                            if (cJSON_IsString(file_key) && file_key->valuestring) {
+                                *out_file_key = strdup(file_key->valuestring);
+                                ok = *out_file_key != NULL;
+                            }
+                        }
+                    }
+                } else {
+                    cJSON* msg = cJSON_GetObjectItem(resp, "msg");
+                    log_error("[Feishu] Upload failed: %d - %s",
+                              code ? code->valueint : -1, msg ? msg->valuestring : "Unknown");
+                    if ((code->valueint == 99991668 || code->valueint == 99991663) && attempt == 0) {
+                        if (data->access_token) {
+                            free(data->access_token);
+                            data->access_token = NULL;
+                        }
+                        refresh_token(data);
+                        retry = true;
+                        log_warn("[Feishu] Access token refreshed, retry upload once");
+                    }
+                }
+                cJSON_Delete(resp);
+            }
+        }
+
         mg_mgr_free(&mgr);
         free(body.memory);
         free(chunk.memory);
-        log_error("[Feishu] Failed to connect for media upload");
-        return false;
+        if (ok) return true;
+        if (!retry) break;
     }
-
-    struct mg_str host = mg_url_host(url);
-    struct mg_tls_opts opts = {0};
-    opts.ca = mg_str("");
-    opts.name = host;
-    opts.skip_verification = true;
-    if (mg_url_is_ssl(url)) mg_tls_init(c, &opts);
-
-    mg_printf(c,
-        "POST %s HTTP/1.0\r\n"
-        "Host: %.*s\r\n"
-        "Authorization: Bearer %s\r\n"
-        "Content-Type: multipart/form-data; boundary=%s\r\n"
-        "Content-Length: %d\r\n"
-        "\r\n",
-        mg_url_uri(url),
-        (int)host.len, host.buf,
-        data->access_token,
-        boundary,
-        (int)body.size
-    );
-    mg_send(c, body.memory, body.size);
-
-    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
-
-    bool ok = false;
-    if (chunk.size > 0) {
-        cJSON* resp = cJSON_Parse(chunk.memory);
-        if (resp) {
-            cJSON* code = cJSON_GetObjectItem(resp, "code");
-            if (code && code->valueint == 0) {
-                cJSON* data_obj = cJSON_GetObjectItem(resp, "data");
-                if (data_obj) {
-                    if (is_image) {
-                        cJSON* image_key = cJSON_GetObjectItem(data_obj, "image_key");
-                        if (cJSON_IsString(image_key) && image_key->valuestring) {
-                            *out_image_key = strdup(image_key->valuestring);
-                            ok = *out_image_key != NULL;
-                        }
-                    } else {
-                        cJSON* file_key = cJSON_GetObjectItem(data_obj, "file_key");
-                        if (cJSON_IsString(file_key) && file_key->valuestring) {
-                            *out_file_key = strdup(file_key->valuestring);
-                            ok = *out_file_key != NULL;
-                        }
-                    }
-                }
-            } else {
-                cJSON* msg = cJSON_GetObjectItem(resp, "msg");
-                log_error("[Feishu] Upload failed: %d - %s",
-                          code ? code->valueint : -1, msg ? msg->valuestring : "Unknown");
-            }
-            cJSON_Delete(resp);
-        }
-    }
-
-    mg_mgr_free(&mgr);
-    free(body.memory);
-    free(chunk.memory);
-    return ok;
+    return false;
 }
 
 static bool feishu_send_attachment(FeishuChannelData* data, const char* receive_id_type, const char* receive_id,
@@ -795,7 +812,7 @@ static void* feishu_receive_loop(void* arg) {
         if (url) {
             log_info("[Feishu] Connecting to WebSocket...");
             data->ws = feishu_ws_create();
-            feishu_ws_set_dns(data->ws, data->dns4, data->dns6, data->dns_timeout_ms);
+            feishu_ws_set_dns(data->ws, data->dns4, data->dns6, data->dns_timeout_ms, data->use_system_resolver);
             if (feishu_ws_connect(data->ws, url)) {
                 log_info("[Feishu] WebSocket connected.");
                 feishu_ws_run(data->ws, on_feishu_message, data);
@@ -829,6 +846,7 @@ static bool feishu_init(Channel* self, Config* cfg, MessageBus* bus) {
     data->dns4 = NULL;
     data->dns6 = NULL;
     data->dns_timeout_ms = 0;
+    data->use_system_resolver = false;
 
     // Get plugin configuration
     PluginConfig* plugin_cfg = config_get_plugin_config(cfg, "feishu_channel");
@@ -851,6 +869,7 @@ static bool feishu_init(Channel* self, Config* cfg, MessageBus* bus) {
         if (dns_cfg->dns4 && dns_cfg->dns4[0]) data->dns4 = strdup(dns_cfg->dns4);
         if (dns_cfg->dns6 && dns_cfg->dns6[0]) data->dns6 = strdup(dns_cfg->dns6);
         if (dns_cfg->dns_timeout_ms > 0) data->dns_timeout_ms = dns_cfg->dns_timeout_ms;
+        data->use_system_resolver = dns_cfg->use_system_resolver;
     }
 
     self->user_data = data;

@@ -32,6 +32,7 @@ typedef struct {
     char* dns4;
     char* dns6;
     int dns_timeout_ms;
+    bool use_system_resolver;
 } SlackChannelData;
 
 struct MemoryStruct {
@@ -58,6 +59,8 @@ static bool memory_append_chunk(struct MemoryStruct* ms, const char* data, size_
 
 static void apply_dns_config(struct mg_mgr* mgr, const SlackChannelData* data) {
     if (!mgr || !data) return;
+    mgr->use_system_resolver = data->use_system_resolver;
+    if (data->use_system_resolver) return;
     if (data->dns4 && data->dns4[0]) mgr->dns4.url = data->dns4;
     if (data->dns6 && data->dns6[0]) mgr->dns6.url = data->dns6;
     if (data->dns_timeout_ms > 0) mgr->dnstimeout = data->dns_timeout_ms;
@@ -96,6 +99,7 @@ static bool slack_init(Channel* self, Config* config, MessageBus* bus) {
     data->dns4 = NULL;
     data->dns6 = NULL;
     data->dns_timeout_ms = 0;
+    data->use_system_resolver = false;
     self->user_data = data;
 
     // Get plugin configuration
@@ -111,6 +115,7 @@ static bool slack_init(Channel* self, Config* config, MessageBus* bus) {
         if (dns_cfg->dns4 && dns_cfg->dns4[0]) data->dns4 = strdup(dns_cfg->dns4);
         if (dns_cfg->dns6 && dns_cfg->dns6[0]) data->dns6 = strdup(dns_cfg->dns6);
         if (dns_cfg->dns_timeout_ms > 0) data->dns_timeout_ms = dns_cfg->dns_timeout_ms;
+        data->use_system_resolver = dns_cfg->use_system_resolver;
     }
 
     log_info("[SlackChannel] Initialized");

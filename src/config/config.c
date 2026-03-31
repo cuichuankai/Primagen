@@ -139,6 +139,7 @@ Config* config_create() {
     cfg->dns.dns4 = NULL;
     cfg->dns.dns6 = NULL;
     cfg->dns.dns_timeout_ms = 0;
+    cfg->dns.use_system_resolver = false;
 
     // Default heartbeat config
     cfg->heartbeat.enabled = true;
@@ -338,6 +339,9 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
             int timeout = get_json_int(item, 0);
             cfg->dns.dns_timeout_ms = timeout > 0 ? timeout : 0;
         }
+        if ((item = cJSON_GetObjectItem(dns, "useSystemResolver"))) {
+            cfg->dns.use_system_resolver = get_json_bool(item, false);
+        }
     }
     
     // Heartbeat Config
@@ -442,6 +446,9 @@ void config_load_from_env(Config* cfg) {
     const char* env_path_append = get_env_string("PRIMAGEN_TOOLS_EXEC_PATH_APPEND", NULL);
     if (env_path_append) { free(cfg->tools.exec.path_append); cfg->tools.exec.path_append = strdup(env_path_append); }
 
+    const char* env_dns_use_system = get_env_string("PRIMAGEN_DNS_USE_SYSTEM_RESOLVER", NULL);
+    if (env_dns_use_system) { cfg->dns.use_system_resolver = get_env_bool("PRIMAGEN_DNS_USE_SYSTEM_RESOLVER", cfg->dns.use_system_resolver); }
+
     PluginConfig* web_tools = config_get_plugin_config(cfg, "web_tools");
     const char* env_web_proxy = get_env_string("PRIMAGEN_TOOLS_WEB_PROXY", NULL);
     if (env_web_proxy && web_tools && web_tools->config) {
@@ -500,7 +507,8 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
 
     if ((cfg->dns.dns4 && cfg->dns.dns4[0]) ||
         (cfg->dns.dns6 && cfg->dns.dns6[0]) ||
-        cfg->dns.dns_timeout_ms > 0) {
+        cfg->dns.dns_timeout_ms > 0 ||
+        cfg->dns.use_system_resolver) {
         cJSON* dns = cJSON_CreateObject();
         if (cfg->dns.dns4 && cfg->dns.dns4[0]) {
             cJSON_AddStringToObject(dns, "dns4", cfg->dns.dns4);
@@ -510,6 +518,9 @@ bool config_save_to_file(Config* cfg, const char* filepath) {
         }
         if (cfg->dns.dns_timeout_ms > 0) {
             cJSON_AddNumberToObject(dns, "dnsTimeoutMs", cfg->dns.dns_timeout_ms);
+        }
+        if (cfg->dns.use_system_resolver) {
+            cJSON_AddBoolToObject(dns, "useSystemResolver", true);
         }
         cJSON_AddItemToObject(json, "dns", dns);
     }

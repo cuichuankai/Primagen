@@ -49,6 +49,7 @@ typedef struct {
     char* dns4;
     char* dns6;
     int dns_timeout_ms;
+    bool use_system_resolver;
 } DNSConfig;
 
 // Plugin configuration structures

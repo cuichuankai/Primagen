@@ -88,6 +88,15 @@ static bool should_skip_tls_verification(void) {
     return strcmp(val, "1") == 0 || strcmp(val, "true") == 0 || strcmp(val, "yes") == 0;
 }
 
+void llm_provider_configure_mgr_dns(struct mg_mgr* mgr, const Config* config) {
+    if (!mgr || !config) return;
+    mgr->use_system_resolver = config->dns.use_system_resolver ? true : false;
+    if (mgr->use_system_resolver) return;
+    if (config->dns.dns4 && config->dns.dns4[0]) mgr->dns4.url = config->dns.dns4;
+    if (config->dns.dns6 && config->dns.dns6[0]) mgr->dns6.url = config->dns.dns6;
+    if (config->dns.dns_timeout_ms > 0) mgr->dnstimeout = config->dns.dns_timeout_ms;
+}
+
 Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, String* response, ToolCall** tool_calls, size_t* tool_calls_count) {
     struct mg_mgr mgr;
     struct MemoryStruct chunk = {0};
@@ -95,6 +104,7 @@ Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistr
     chunk.memory[0] = '\0';
     
     mg_mgr_init(&mgr);
+    llm_provider_configure_mgr_dns(&mgr, config);
     
     const char* api_key = get_api_key(config);
     if (strlen(api_key) == 0) {
@@ -393,6 +403,7 @@ Error llm_provider_call_extended(const char* system_prompt, Session* session, To
     chunk.memory[0] = '\0';
 
     mg_mgr_init(&mgr);
+    llm_provider_configure_mgr_dns(&mgr, config);
 
     const char* api_key = get_api_key(config);
     if (strlen(api_key) == 0) {
@@ -854,6 +865,7 @@ Error llm_provider_call_streaming(const char* system_prompt, Session* session, T
 
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
+    llm_provider_configure_mgr_dns(&mgr, config);
 
     const char* api_key = get_api_key(config);
     if (strlen(api_key) == 0) {

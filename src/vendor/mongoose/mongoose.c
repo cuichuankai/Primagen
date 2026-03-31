@@ -18,6 +18,9 @@
 // SPDX-License-Identifier: GPL-2.0-only or commercial
 
 #include "mongoose.h"
+#if MG_ARCH == MG_ARCH_UNIX && !MG_ENABLE_FREERTOS_TCP
+#include <netdb.h>
+#endif
 
 #ifdef MG_ENABLE_LINES
 #line 1 "src/base64.c"
@@ -400,6 +403,46 @@ void mg_resolve(struct mg_connection *c, const char *url) {
   if (mg_aton(host, &c->rem)) {
     // host is an IP address, do not fire name resolution
     mg_connect_resolved(c);
+  } else if (c->mgr->use_system_resolver) {
+#if MG_ARCH == MG_ARCH_UNIX && !MG_ENABLE_FREERTOS_TCP
+    struct addrinfo hints, *res = NULL;
+    char hbuf[256];
+    int rc;
+    if (host.len >= sizeof(hbuf)) {
+      mg_error(c, "hostname too long");
+      return;
+    }
+    memcpy(hbuf, host.buf, host.len);
+    hbuf[host.len] = '\0';
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = c->is_udp ? SOCK_DGRAM : SOCK_STREAM;
+    rc = getaddrinfo(hbuf, NULL, &hints, &res);
+    if (rc != 0 || res == NULL) {
+      mg_error(c, "system resolver failed");
+      if (res) freeaddrinfo(res);
+      return;
+    }
+    if (res->ai_family == AF_INET6) {
+      struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *) res->ai_addr;
+      c->rem.is_ip6 = true;
+      memcpy(c->rem.addr.ip6, sa6->sin6_addr.s6_addr, 16);
+      c->rem.scope_id = (uint8_t) sa6->sin6_scope_id;
+    } else if (res->ai_family == AF_INET) {
+      struct sockaddr_in *sa4 = (struct sockaddr_in *) res->ai_addr;
+      c->rem.is_ip6 = false;
+      memcpy(c->rem.addr.ip, &sa4->sin_addr, 4);
+      c->rem.scope_id = 0;
+    } else {
+      freeaddrinfo(res);
+      mg_error(c, "unsupported address family");
+      return;
+    }
+    freeaddrinfo(res);
+    mg_connect_resolved(c);
+#else
+    mg_error(c, "system resolver is not supported on this platform");
+#endif
   } else {
     // host is not an IP, send DNS resolution request
     struct mg_dns *dns = c->mgr->use_dns6 ? &c->mgr->dns6 : &c->mgr->dns4;
@@ -4818,6 +4861,7 @@ void mg_mgr_init(struct mg_mgr *mgr) {
 #endif
   mgr->pipe = MG_INVALID_SOCKET;
   mgr->dnstimeout = 3000;
+  mgr->use_system_resolver = false;
   mgr->dns4.url = "udp://8.8.8.8:53";
   mgr->dns6.url = "udp://[2001:4860:4860::8888]:53";
   mg_tls_ctx_init(mgr);

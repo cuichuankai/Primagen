@@ -89,6 +89,8 @@ static void apply_global_dns_if_configured(PluginManager* manager, struct mg_mgr
     if (!manager || !manager->config || !mgr) return;
     DNSConfig* dns = config_get_dns_config(manager->config);
     if (!dns) return;
+    mgr->use_system_resolver = dns->use_system_resolver;
+    if (dns->use_system_resolver) return;
     if (dns->dns4 && dns->dns4[0]) mgr->dns4.url = dns->dns4;
     if (dns->dns6 && dns->dns6[0]) mgr->dns6.url = dns->dns6;
     if (dns->dns_timeout_ms > 0) mgr->dnstimeout = dns->dns_timeout_ms;
