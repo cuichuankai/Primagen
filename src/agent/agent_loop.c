@@ -69,9 +69,10 @@ static void maybe_auto_consolidate_memory(AgentLoop* loop, Session* session, con
     if (delta < memory_window) return;
 
     time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
     char ts[32];
-    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", tm_info);
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", &tm_info);
 
     char latest_excerpt[256] = {0};
     if (latest_user_content && latest_user_content[0] != '\0') {

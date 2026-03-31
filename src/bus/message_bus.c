@@ -18,7 +18,13 @@ static bool message_queue_init(MessageQueue* q, int message_kind) {
     q->message_kind = message_kind;
     q->closed = false;
     pthread_mutex_init(&q->mutex, NULL);
-    pthread_cond_init(&q->cond, NULL);
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+#if !defined(__APPLE__) && defined(CLOCK_MONOTONIC)
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+#endif
+    pthread_cond_init(&q->cond, &attr);
+    pthread_condattr_destroy(&attr);
     return true;
 }
 
@@ -123,17 +129,24 @@ static void* message_queue_receive_timed(MessageQueue* q, int timeout_ms) {
     if (timeout_ms <= 0) return NULL;
 
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += timeout_ms / 1000;
-    ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
-    if (ts.tv_nsec >= 1000000000L) {
-        ts.tv_sec += 1;
-        ts.tv_nsec -= 1000000000L;
-    }
-
+    
     pthread_mutex_lock(&q->mutex);
     while (q->front == q->rear && !q->closed) {
-        int rc = pthread_cond_timedwait(&q->cond, &q->mutex, &ts);
+        int rc;
+#if defined(__APPLE__)
+        ts.tv_sec = timeout_ms / 1000;
+        ts.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
+        rc = pthread_cond_timedwait_relative_np(&q->cond, &q->mutex, &ts);
+#else
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ts.tv_sec += timeout_ms / 1000;
+        ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000L;
+        }
+        rc = pthread_cond_timedwait(&q->cond, &q->mutex, &ts);
+#endif
         if (rc == ETIMEDOUT) {
             pthread_mutex_unlock(&q->mutex);
             return NULL;

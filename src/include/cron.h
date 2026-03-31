@@ -18,7 +18,7 @@ struct CronJob {
     char* schedule;  // cron expression
 };
 
-typedef void (*CronCallback)(CronJob* job);
+typedef void (*CronCallback)(CronJob* job, void* user_data);
 
 CronService* cron_service_create(const char* store_path);
 void cron_service_destroy(CronService* service);
@@ -26,7 +26,7 @@ void cron_service_destroy(CronService* service);
 bool cron_service_start(CronService* service);
 void cron_service_stop(CronService* service);
 
-void cron_service_set_callback(CronService* service, CronCallback callback);
+void cron_service_set_callback(CronService* service, CronCallback callback, void* user_data);
 
 // Job management
 char* cron_service_add_job(CronService* service, const CronJob* job);

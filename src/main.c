@@ -23,18 +23,27 @@
 #include <getopt.h>
 #include "vendor/mongoose/mongoose.h"
 #include <sys/stat.h>
+#include <signal.h>
 
-/* Global bus reference for cron callback */
-static MessageBus* global_bus = NULL;
+/* Global loop reference for signal handler */
+static AgentLoop* g_loop = NULL;
+
+static void handle_signal(int sig) {
+    if (g_loop) {
+        log_info("[System] Received signal %d, stopping agent loop...", sig);
+        agent_loop_stop(g_loop);
+    }
+}
 
 /* Channel list */
-#define MAX_CHANNELS 10
+#define MAX_CHANNELS 64
 static Channel* channels[MAX_CHANNELS];
 static int channel_count = 0;
 
 /* Cron job callback - injects message into bus for delivery */
-void cron_callback(CronJob* job) {
-    if (!global_bus) return;
+void cron_callback(CronJob* job, void* user_data) {
+    MessageBus* bus = (MessageBus*)user_data;
+    if (!bus) return;
 
     log_info("[Cron] Triggering job: %s", job->name);
 
@@ -43,7 +52,7 @@ void cron_callback(CronJob* job) {
         job->to ? job->to : "local_user",
         job->payload_message ? job->payload_message : "Cron trigger"
     );
-    message_bus_send_inbound(global_bus, msg);
+    message_bus_send_inbound(bus, msg);
 }
 
 /* Agent thread entry point */
@@ -228,7 +237,6 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     /* Initialize Components */
     log_debug("[System] Creating MessageBus...");
     MessageBus* bus = message_bus_new();
-    global_bus = bus;
 
     log_debug("[System] Creating SessionManager...");
     SessionManager* session_mgr = session_manager_new(workspace_path);
@@ -305,7 +313,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     char cron_path[512];
     snprintf(cron_path, sizeof(cron_path), "%s/cron_store.json", workspace_path);
     CronService* cron_service = cron_service_create(cron_path);
-    cron_service_set_callback(cron_service, cron_callback);
+    cron_service_set_callback(cron_service, cron_callback, bus);
     cron_service_start(cron_service);
 
     /* Initialize Skills Loader */
@@ -357,6 +365,11 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         log_debug("[Plugin] Loading external plugins...");
         plugin_manager_load_external(plugin_mgr);
     }
+
+    /* Set global loop for signal handler and register signals */
+    g_loop = loop;
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* Register built-in commands with PluginManager */
     agent_loop_register_builtin_commands(loop);

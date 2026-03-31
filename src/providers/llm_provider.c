@@ -11,6 +11,7 @@
 struct MemoryStruct {
     char *memory;
     size_t size;
+    size_t capacity;
     bool done;
     char last_error[256];
     int http_status;
@@ -50,12 +51,18 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     ms->http_status = status;
     log_debug("[LLM] MG_EV_HTTP_MSG status=%d body_len=%zu", status, hm->body.len);
     size_t new_size = ms->size + hm->body.len;
-    ms->memory = realloc(ms->memory, new_size + 1);
-    if (!ms->memory) {
-      snprintf(ms->last_error, sizeof(ms->last_error), "OOM in HTTP message buffer");
-      ms->done = true;
-      c->is_closing = 1;
-      return;
+    if (new_size + 1 > ms->capacity) {
+        size_t new_cap = ms->capacity * 2;
+        while (new_size + 1 > new_cap) new_cap *= 2;
+        char *new_mem = realloc(ms->memory, new_cap);
+        if (!new_mem) {
+            snprintf(ms->last_error, sizeof(ms->last_error), "OOM in HTTP message buffer");
+            ms->done = true;
+            c->is_closing = 1;
+            return;
+        }
+        ms->memory = new_mem;
+        ms->capacity = new_cap;
     }
     memcpy(ms->memory + ms->size, hm->body.buf, hm->body.len);
     ms->size = new_size;
@@ -100,7 +107,8 @@ void llm_provider_configure_mgr_dns(struct mg_mgr* mgr, const Config* config) {
 Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, String* response, ToolCall** tool_calls, size_t* tool_calls_count) {
     struct mg_mgr mgr;
     struct MemoryStruct chunk = {0};
-    chunk.memory = malloc(1);
+    chunk.capacity = 4096;
+    chunk.memory = malloc(chunk.capacity);
     chunk.memory[0] = '\0';
     
     mg_mgr_init(&mgr);
@@ -399,7 +407,8 @@ Error llm_provider_call_extended(const char* system_prompt, Session* session, To
 
     struct mg_mgr mgr;
     struct MemoryStruct chunk = {0};
-    chunk.memory = malloc(1);
+    chunk.capacity = 4096;
+    chunk.memory = malloc(chunk.capacity);
     chunk.memory[0] = '\0';
 
     mg_mgr_init(&mgr);

@@ -71,7 +71,9 @@ static void scan_directory_recursive(const char* dir_path, const char* extension
         snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
 
         struct stat st;
-        if (stat(full_path, &st) != 0) continue;
+        if (lstat(full_path, &st) != 0) continue;
+
+        if (S_ISLNK(st.st_mode)) continue; // Skip symlinks to prevent infinite loops
 
         if (S_ISDIR(st.st_mode)) {
             // Recursively scan subdirectories
@@ -120,20 +122,6 @@ static const PluginConfig* plugin_config_from_so_name(const Config* cfg, const c
     }
 
     return NULL;
-}
-
-bool is_plugin_compatible(const char* path) {
-    // Check if file exists and is readable
-    if (access(path, R_OK) != 0) return false;
-
-    // Try to open with dlopen to check compatibility
-    void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    if (!handle) {
-        log_debug("[Plugin] File %s is not a loadable plugin: %s", path, dlerror());
-        return false;
-    }
-    dlclose(handle);
-    return true;
 }
 
 LoadedPlugin* load_plugin_from_file(PluginManager* manager, const char* path) {

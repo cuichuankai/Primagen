@@ -23,8 +23,8 @@ typedef struct {
 // Internal functions (not exposed to plugins)
 StringList* scan_directory(const char* dir_path, const char* extension);
 void string_list_free(StringList* list);
+
 LoadedPlugin* load_plugin_from_file(PluginManager* manager, const char* path);
-bool is_plugin_compatible(const char* path);
 
 // =============================================================================
 // Plugin Registration (called by plugins during init)

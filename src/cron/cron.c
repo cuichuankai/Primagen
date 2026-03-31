@@ -18,6 +18,7 @@ typedef struct JobNode {
 struct CronService {
     char* store_path;
     CronCallback callback;
+    void* callback_user_data;
     bool running;
     pthread_t worker_thread;
     pthread_mutex_t mutex;
@@ -386,8 +387,9 @@ static void* cron_worker(void* arg) {
         while (current) {
             if (current->job.next_run <= now) {
                 if (service->callback) {
+                    void* user_data = service->callback_user_data;
                     pthread_mutex_unlock(&service->mutex);
-                    service->callback(&current->job);
+                    service->callback(&current->job, user_data);
                     pthread_mutex_lock(&service->mutex);
                 }
 
@@ -504,9 +506,10 @@ void cron_service_stop(CronService* service) {
     pthread_join(worker, NULL);
 }
 
-void cron_service_set_callback(CronService* service, CronCallback callback) {
+void cron_service_set_callback(CronService* service, CronCallback callback, void* user_data) {
     if (!service) return;
     service->callback = callback;
+    service->callback_user_data = user_data;
 }
 
 char* cron_service_add_job(CronService* service, const CronJob* job) {
