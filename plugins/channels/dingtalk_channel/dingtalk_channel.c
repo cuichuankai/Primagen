@@ -411,6 +411,8 @@ static bool dingtalk_upload_attachment(DingTalkChannelData* data, const DingTalk
     if (strcmp(attachment->type, "audio") == 0) media_type = "voice";
     if (strcmp(attachment->type, "video") == 0) media_type = "video";
 
+    log_debug("[DingTalk] Uploading attachment: path=%s, type=%s", attachment->path, media_type);
+
     char url[1024];
     snprintf(url, sizeof(url), "https://oapi.dingtalk.com/media/upload?access_token=%s&type=%s",
              data->access_token, media_type);
@@ -425,6 +427,8 @@ static bool dingtalk_upload_attachment(DingTalkChannelData* data, const DingTalk
         return false;
     }
 
+    log_debug("[DingTalk] Upload body built, size=%zu", body.size);
+
     struct mg_mgr mgr;
     struct MemoryStruct chunk = {0};
     chunk.memory = malloc(1);
@@ -434,6 +438,7 @@ static bool dingtalk_upload_attachment(DingTalkChannelData* data, const DingTalk
 
     struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
     if (!c) {
+        log_error("[DingTalk] Failed to connect to upload URL");
         mg_mgr_free(&mgr);
         free(body.memory);
         free(chunk.memory);
@@ -463,18 +468,27 @@ static bool dingtalk_upload_attachment(DingTalkChannelData* data, const DingTalk
 
     bool ok = false;
     if (chunk.size > 0) {
+        log_debug("[DingTalk] Upload response: %s", chunk.memory);
         cJSON* resp = cJSON_Parse(chunk.memory);
         if (resp) {
             cJSON* errcode = cJSON_GetObjectItem(resp, "errcode");
+            cJSON* errmsg = cJSON_GetObjectItem(resp, "errmsg");
+            if (errcode && errcode->valueint != 0) {
+                log_error("[DingTalk] Upload failed: errcode=%d, errmsg=%s", 
+                          errcode->valueint, errmsg ? errmsg->valuestring : "unknown");
+            }
             if ((!errcode || errcode->valueint == 0)) {
                 cJSON* media_id = cJSON_GetObjectItem(resp, "media_id");
                 if (cJSON_IsString(media_id) && media_id->valuestring) {
                     *out_media_id = strdup(media_id->valuestring);
                     ok = *out_media_id != NULL;
+                    log_debug("[DingTalk] Upload success: media_id=%s", *out_media_id);
                 }
             }
             cJSON_Delete(resp);
         }
+    } else {
+        log_error("[DingTalk] Upload failed: no response received");
     }
 
     mg_mgr_free(&mgr);
@@ -500,6 +514,7 @@ static bool dingtalk_send_attachment_message(DingTalkChannelData* data, const ch
         cJSON_AddStringToObject(msg, "msgtype", "image");
         cJSON* image = cJSON_CreateObject();
         cJSON_AddStringToObject(image, "media_id", media_id);
+        cJSON_AddStringToObject(image, "picURL", media_id);
         cJSON_AddItemToObject(msg, "image", image);
     } else if (strcmp(attachment->type, "audio") == 0) {
         cJSON_AddStringToObject(msg, "msgtype", "voice");
@@ -816,38 +831,62 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
 
     bool has_text = msg->content.data && msg->content.data[0] != '\0';
     char* attachment_fallback_markdown = NULL;
+    char** uploaded_media_ids = NULL;
+    size_t uploaded_media_ids_count = 0;
+    
     if (msg->attachments.count > 0) {
+        uploaded_media_ids = malloc(msg->attachments.count * sizeof(char*));
         for (size_t i = 0; i < msg->attachments.count; i++) {
             DingTalkAttachment attachment;
             if (!parse_attachment_spec(msg->attachments.items[i].data, &attachment)) {
                 log_error("[DingTalk] Invalid attachment spec: %s", msg->attachments.items[i].data);
                 continue;
             }
-            if (!dingtalk_send_attachment_message(data, conversation_id, &attachment)) {
-                log_error("[DingTalk] Attachment delivery failed: %s", attachment.path);
-                if (strcmp(attachment.type, "image") == 0) {
-                    char sidecar_path[2048];
-                    if (snprintf(sidecar_path, sizeof(sidecar_path), "%s.url", attachment.path) > 0) {
-                        char* image_url = NULL;
-                        if (read_first_line(sidecar_path, &image_url)) {
-                            if (strncmp(image_url, "http://", 7) == 0 || strncmp(image_url, "https://", 8) == 0) {
-                                char markdown_line[4096];
-                                if (snprintf(markdown_line, sizeof(markdown_line), "![image](%s)", image_url) > 0) {
-                                    if (append_markdown_line(&attachment_fallback_markdown, markdown_line)) {
-                                        has_text = true;
-                                        log_warn("[DingTalk] Attachment fallback prepared via image url sidecar");
-                                    }
+            
+            // Upload attachment to get media_id
+            char* media_id = NULL;
+            log_debug("[DingTalk] Checking session_webhook: %s", session_webhook ? session_webhook : "(null)");
+            if (session_webhook && strncmp(session_webhook, "http", 4) == 0) {
+                // For session webhook, we can upload and send via webhook
+                log_debug("[DingTalk] Using session webhook path for attachment");
+                if (dingtalk_upload_attachment(data, &attachment, &media_id)) {
+                    log_debug("[DingTalk] Uploaded attachment for session webhook: media_id=%s", media_id);
+                    uploaded_media_ids[uploaded_media_ids_count++] = media_id;
+                } else {
+                    log_error("[DingTalk] Attachment upload failed: %s", attachment.path);
+                }
+            } else {
+                // For group chat, use chat/send API
+                log_debug("[DingTalk] Using group chat path for attachment");
+                if (!dingtalk_send_attachment_message(data, conversation_id, &attachment)) {
+                    log_error("[DingTalk] Attachment delivery failed: %s", attachment.path);
+                }
+            }
+            
+            // Prepare fallback markdown if upload failed or no session webhook
+            if (!media_id && strcmp(attachment.type, "image") == 0) {
+                char sidecar_path[2048];
+                if (snprintf(sidecar_path, sizeof(sidecar_path), "%s.url", attachment.path) > 0) {
+                    char* image_url = NULL;
+                    if (read_first_line(sidecar_path, &image_url)) {
+                        if (strncmp(image_url, "http://", 7) == 0 || strncmp(image_url, "https://", 8) == 0) {
+                            char markdown_line[4096];
+                            if (snprintf(markdown_line, sizeof(markdown_line), "![image](%s)", image_url) > 0) {
+                                if (append_markdown_line(&attachment_fallback_markdown, markdown_line)) {
+                                    has_text = true;
+                                    log_warn("[DingTalk] Attachment fallback prepared via image url sidecar");
                                 }
                             }
-                            free(image_url);
                         }
+                        free(image_url);
                     }
                 }
             }
         }
-        if (!has_text) {
+        if (!has_text && uploaded_media_ids_count == 0) {
             free(attachment_fallback_markdown);
             free(webhook_buf);
+            free(uploaded_media_ids);
             return;
         }
     }
@@ -863,8 +902,78 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
 
     if (session_webhook && strncmp(session_webhook, "http", 4) == 0) {
         // Use session webhook to send message (preferred method for replies)
-        // Try text format first for compatibility
         log_info("[DingTalk] Sending via session webhook to %s", conversation_id);
+
+        // First, send any uploaded images
+        for (size_t i = 0; i < uploaded_media_ids_count; i++) {
+            cJSON* img_json = cJSON_CreateObject();
+            cJSON_AddStringToObject(img_json, "msgtype", "image");
+            cJSON* image = cJSON_CreateObject();
+            cJSON_AddStringToObject(image, "media_id", uploaded_media_ids[i]);
+             cJSON_AddStringToObject(image, "picURL", uploaded_media_ids[i]);
+            cJSON_AddItemToObject(img_json, "image", image);
+            char* img_json_str = cJSON_PrintUnformatted(img_json);
+            
+            log_debug("[DingTalk] Sending image message: %s", img_json_str);
+            
+            struct MemoryStruct img_chunk = {0};
+            img_chunk.memory = malloc(1);
+            img_chunk.memory[0] = '\0';
+            
+            struct mg_connection *img_c = mg_http_connect(&mgr, session_webhook, webhook_fn, &img_chunk);
+            if (img_c) {
+                struct mg_str host = mg_url_host(session_webhook);
+                struct mg_tls_opts opts = {0};
+                opts.ca = mg_str("");
+                opts.name = host;
+                opts.skip_verification = true;
+                if (mg_url_is_ssl(session_webhook)) {
+                    mg_tls_init(img_c, &opts);
+                }
+                mg_printf(img_c,
+                    "POST %s HTTP/1.1\r\n"
+                    "Host: %.*s\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Accept: */*\r\n"
+                    "Connection: close\r\n"
+                    "Content-Length: %d\r\n"
+                    "\r\n"
+                    "%s",
+                    mg_url_uri(session_webhook),
+                    (int)host.len, host.buf,
+                    (int)strlen(img_json_str),
+                    img_json_str
+                );
+                while (!img_chunk.done) mg_mgr_poll(&mgr, 1000);
+                log_debug("[DingTalk] Image send response: %s", img_chunk.memory);
+            } else {
+                log_error("[DingTalk] Failed to send image message");
+            }
+            mg_mgr_free(&mgr);
+            free(img_chunk.memory);
+            free(img_json_str);
+            cJSON_Delete(img_json);
+            
+            // Re-initialize mgr for next request
+            mg_mgr_init(&mgr);
+            apply_dns_config(&mgr, data);
+        }
+        
+        // Free uploaded media IDs
+        for (size_t i = 0; i < uploaded_media_ids_count; i++) {
+            free(uploaded_media_ids[i]);
+        }
+        free(uploaded_media_ids);
+        uploaded_media_ids = NULL;
+        
+        // Then send text message if there's content
+        if (!has_text) {
+            free(attachment_fallback_markdown);
+            free(webhook_buf);
+            mg_mgr_free(&mgr);
+            free(chunk.memory);
+            return;
+        }
 
         // Trim leading/trailing whitespace from content
         const char* content = msg->content.data;

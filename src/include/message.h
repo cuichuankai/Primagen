@@ -39,6 +39,29 @@ typedef struct {
     StringArray attachments;
 } OutboundMessage;
 
+// Internal Event types for AgentLoop State Machine
+typedef enum {
+    EVENT_LLM_RESULT,
+    EVENT_TOOL_RESULT
+} InternalEventType;
+
+typedef struct {
+    InternalEventType type;
+    String session_key;
+    
+    // For EVENT_LLM_RESULT
+    Error llm_error;
+    String llm_response;
+    ToolCall* tool_calls;
+    size_t tool_calls_count;
+    
+    // For EVENT_TOOL_RESULT
+    String tool_call_id;
+    String tool_name;
+    String tool_result;
+    Error tool_error;
+} InternalEvent;
+
 // Functions
 Message* message_new(MessageRole role, const char* content);
 void message_free(Message* msg);
@@ -47,5 +70,9 @@ InboundMessage* inbound_message_new(const char* channel, const char* chat_id, co
 void inbound_message_free(InboundMessage* msg);
 OutboundMessage* outbound_message_new(const char* channel, const char* chat_id, const char* content);
 void outbound_message_free(OutboundMessage* msg);
+
+InternalEvent* internal_event_new_llm_result(const char* session_key, Error err, const char* response, ToolCall* calls, size_t count);
+InternalEvent* internal_event_new_tool_result(const char* session_key, const char* tool_call_id, const char* tool_name, const char* result, Error err);
+void internal_event_free(InternalEvent* event);
 
 #endif // MESSAGE_H

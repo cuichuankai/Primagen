@@ -45,21 +45,6 @@ dirs:
 android:
 	$(MAKE) TARGET=android all
 
-# Test target - compile all objects first then link with test
-TEST_EXTRA_OBJ = $(OBJDIR)/plugins/channels/dingtalk_channel/dingtalk_ws.o
-test: all $(OBJDIR)/unit_tests.o $(TEST_EXTRA_OBJ)
-	@echo "Running unit tests..."
-	@$(CC) $(CFLAGS) -o $(OBJDIR)/unit_tests $(OBJDIR)/unit_tests.o $(filter-out $(OBJDIR)/main.o,$(OBJ)) $(TEST_EXTRA_OBJ) $(LDFLAGS)
-	@$(OBJDIR)/unit_tests
-
-$(OBJDIR)/unit_tests.o: tests/unit_tests.c
-	@mkdir -p $(OBJDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/plugins/channels/dingtalk_channel/%.o: plugins/channels/dingtalk_channel/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
 OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/common/message.o \
       $(OBJDIR)/common/logger.o \

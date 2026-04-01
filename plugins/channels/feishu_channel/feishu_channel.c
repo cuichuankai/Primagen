@@ -924,13 +924,16 @@ static void feishu_send(Channel* self, OutboundMessage* msg) {
     snprintf(url, sizeof(url), "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=%s", id_type);
 
     bool has_text = msg->content.data && msg->content.data[0] != '\0';
+    log_debug("[Feishu] attachments.count=%zu", msg->attachments.count);
     if (msg->attachments.count > 0) {
         for (size_t i = 0; i < msg->attachments.count; i++) {
             FeishuAttachment attachment;
+            log_debug("[Feishu] Processing attachment[%zu]: %s", i, msg->attachments.items[i].data);
             if (!parse_attachment_spec(msg->attachments.items[i].data, &attachment)) {
                 log_error("[Feishu] Invalid attachment spec: %s", msg->attachments.items[i].data);
                 continue;
             }
+            log_debug("[Feishu] Parsed attachment: type=%s, path=%s", attachment.type, attachment.path);
             if (!feishu_send_attachment(data, id_type, msg->chat_id.data, &attachment)) {
                 log_error("[Feishu] Attachment delivery failed: %s", attachment.path);
             }

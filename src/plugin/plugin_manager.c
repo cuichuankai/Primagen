@@ -530,7 +530,7 @@ int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
     // Channels are registered directly in main.c's channel array
     log_debug("[Plugin] Channel registration requested: %s from %s", name, plugin ? plugin->name : "builtin");
 
-    if (!manager || !create) return -1;
+    if (!manager || !name || !create) return -1;
 
     // Create the channel
     Channel* channel = create();
@@ -539,7 +539,7 @@ int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
         return -1;
     }
 
-    // Lock to protect access to manager->config, manager->bus, manager->channel_array
+    // Lock to protect access to manager->config, manager->bus, manager->channels
     pthread_mutex_lock(&manager->lock);
 
     // Initialize the channel with config and bus
@@ -555,26 +555,21 @@ int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
         pthread_mutex_lock(&manager->lock);  // Re-lock for channel array access
     }
 
-    // Add to manager's channel array
-    if (manager->channel_array && manager->channel_count_ptr) {
-        Channel** channels = (Channel**)manager->channel_array;
-        int* count = manager->channel_count_ptr;
-        if (manager->channel_capacity > 0 && *count >= manager->channel_capacity) {
-            log_error("[Plugin] Failed to register channel %s: capacity reached (%d)", name, manager->channel_capacity);
-            pthread_mutex_unlock(&manager->lock);
-            channel->destroy(channel);
-            return -1;
-        }
-
-        channels[*count] = channel;
-        (*count)++;
-
-        log_debug("[Plugin] Registered channel: %s (total: %d)", name, *count);
+    // Add to channel array
+    if (manager->channels) {
+        dynamic_array_add(manager->channels, &channel);
+        log_debug("[Plugin] Registered channel: %s", name);
         pthread_mutex_unlock(&manager->lock);
+        
+        // Link ownership to plugin for cleanup if it's an external plugin
+        if (plugin) {
+            // Channel plugins need special handling for unload
+            // They don't go into the tool registry
+        }
+        
         return 0;
     } else {
-        log_error("[Plugin] Channel %s: channel_array=%p, channel_count_ptr=%p",
-                  name, (void*)manager->channel_array, (void*)manager->channel_count_ptr);
+        log_warn("[Plugin] Could not register channel %s: missing channel context", name);
         pthread_mutex_unlock(&manager->lock);
         channel->destroy(channel);
         return -1;

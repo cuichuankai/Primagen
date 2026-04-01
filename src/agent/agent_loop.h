@@ -18,12 +18,28 @@ typedef struct AgentLoop AgentLoop;
 
 // Provider interface
 typedef Error (*LLMProvider)(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, String* response, ToolCall** tool_calls, size_t* tool_calls_count);
+typedef void (*LLMProviderAsync)(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, void (*callback)(Error, const char*, ToolCall*, size_t, void*), void* user_data);
 
 // Active task tracking node
+typedef enum {
+    SESSION_STATE_IDLE,
+    SESSION_STATE_WAITING_LLM,
+    SESSION_STATE_WAITING_TOOL
+} SessionState;
+
+typedef struct {
+    SessionState state;
+    int turn;
+    char channel[64];
+    char chat_id[512];
+    char latest_user_content[1024];
+} SessionContext;
+
 typedef struct ActiveTaskNode {
     char task_id[32];
     char session_key[256];
-    pthread_t thread;
+    SessionContext ctx;
+    pthread_t thread; // Kept for legacy/fallback tasks if needed
     bool cancelling;
     struct ActiveTaskNode* next;
 } ActiveTaskNode;
@@ -44,6 +60,7 @@ struct AgentLoop {
     char workspace_path[512];   // Workspace path for plugin commands
     bool running;
     LLMProvider llm_call;
+    LLMProviderAsync llm_call_async;
 
     // Task tracking
     pthread_mutex_t task_mutex;
@@ -61,7 +78,7 @@ struct AgentLoop {
 // Functions
 AgentLoop* agent_loop_new(SessionManager* session_mgr, ContextBuilder* ctx_builder, ToolRegistry* tool_reg, MessageBus* bus, Config* config, PluginManager* plugin_mgr, const char* workspace_path);
 void agent_loop_free(AgentLoop* loop);
-void agent_loop_set_llm_provider(AgentLoop* loop, LLMProvider provider);
+void agent_loop_set_llm_provider_async(AgentLoop* loop, LLMProviderAsync provider);
 void agent_loop_run(AgentLoop* loop);
 void agent_loop_stop(AgentLoop* loop);
 void agent_loop_register_builtin_commands(AgentLoop* loop);  // Register built-in commands with PluginManager

@@ -2,6 +2,7 @@
 #include "tool_validation.h"
 #include "../vendor/cJSON/cJSON.h"
 #include "../bus/message_bus.h"
+#include "../include/logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,25 +92,40 @@ static bool is_known_channel(const char* s) {
     return s && (strcmp(s, "console") == 0 || strcmp(s, "telegram") == 0 ||
                  strcmp(s, "email") == 0 || strcmp(s, "discord") == 0 ||
                  strcmp(s, "slack") == 0 || strcmp(s, "dingtalk") == 0 ||
-                 strcmp(s, "system") == 0);
+                 strcmp(s, "feishu") == 0 || strcmp(s, "system") == 0);
 }
 
 static const char* resolve_channel(ToolContext* ctx, const char* channel) {
     if (!is_placeholder_value(channel) && is_known_channel(channel)) return channel;
-    if (ctx && ctx->current_channel && ctx->current_channel[0]) return ctx->current_channel;
+    if (ctx && ctx->current_channel[0]) return ctx->current_channel;
     return "cli";
 }
 
 static const char* resolve_chat_id(ToolContext* ctx, const char* chat_id) {
     if (!is_placeholder_value(chat_id)) return chat_id;
-    if (ctx && ctx->current_chat_id && ctx->current_chat_id[0]) return ctx->current_chat_id;
+    if (ctx && ctx->current_chat_id[0]) return ctx->current_chat_id;
     return "current";
 }
 
 void tool_context_set_route(ToolContext* ctx, const char* channel, const char* chat_id) {
-    if (!ctx || ctx->magic != TOOL_CONTEXT_MAGIC) return;
-    ctx->current_channel = channel;
-    ctx->current_chat_id = chat_id;
+    if (!ctx) return;
+    if (ctx->magic != 0x50474E31) {
+        log_error("[tool_context_set_route] Invalid ToolContext: magic=0x%x (expected 0x50474e31)", ctx->magic);
+        return;
+    }
+    log_debug("[tool_context_set_route] Setting route: channel=%s, chat_id=%s", channel ? channel : "(null)", chat_id ? chat_id : "(null)");
+    if (channel) {
+        strncpy(ctx->current_channel, channel, sizeof(ctx->current_channel) - 1);
+        ctx->current_channel[sizeof(ctx->current_channel) - 1] = '\0';
+    } else {
+        ctx->current_channel[0] = '\0';
+    }
+    if (chat_id) {
+        strncpy(ctx->current_chat_id, chat_id, sizeof(ctx->current_chat_id) - 1);
+        ctx->current_chat_id[sizeof(ctx->current_chat_id) - 1] = '\0';
+    } else {
+        ctx->current_chat_id[0] = '\0';
+    }
 }
 
 static bool command_contains_unsafe_token(const char* command) {
@@ -579,7 +595,17 @@ Error tool_exec(void* user_data, const char* args_json, String* result) {
 
 Error tool_send_message(void* user_data, const char* args_json, String* result) {
     ToolContext* ctx = (ToolContext*)user_data;
-    if (!ctx || !ctx->bus) {
+    log_debug("[send_message] user_data=%p, ctx=%p", user_data, (void*)ctx);
+    if (ctx) {
+        log_debug("[send_message] ctx->magic=0x%x (expected=0x50474e31), ctx->bus=%p", 
+                  ctx->magic, (void*)ctx->bus);
+    }
+    if (!ctx || ctx->magic != 0x50474E31) {
+        log_error("[send_message] Invalid ToolContext: ctx=%p, magic=0x%x", (void*)ctx, ctx ? ctx->magic : 0);
+        return error_new(ERR_INVALID_PARAM, "Invalid tool context");
+    }
+    if (!ctx->bus) {
+        log_error("[send_message] MessageBus is NULL in ToolContext");
         return error_new(ERR_INVALID_PARAM, "MessageBus not available in tool context");
     }
     
@@ -590,8 +616,15 @@ Error tool_send_message(void* user_data, const char* args_json, String* result) 
     char* channel = get_json_string(json, "channel");
     char* chat_id = get_json_string(json, "chat_id");
     
+    log_debug("[send_message] Before resolve: channel=%s, chat_id=%s, ctx->current_channel=%s, ctx->current_chat_id=%s",
+              channel ? channel : "NULL", chat_id ? chat_id : "NULL",
+              ctx->current_channel[0] ? ctx->current_channel : "(empty)",
+              ctx->current_chat_id[0] ? ctx->current_chat_id : "(empty)");
+    
     channel = (char*) resolve_channel(ctx, channel);
     chat_id = (char*) resolve_chat_id(ctx, chat_id);
+    
+    log_debug("[send_message] After resolve: channel=%s, chat_id=%s", channel, chat_id);
     
     if (!content) {
         cJSON_Delete(json);
@@ -604,12 +637,14 @@ Error tool_send_message(void* user_data, const char* args_json, String* result) 
         return error_new(ERR_MEMORY, "Failed to allocate outbound message");
     }
 
+    log_debug("[send_message] Parsing attachments from JSON");
     Error parse_error = parse_send_message_attachments(json, msg);
     if (parse_error.code != ERR_NONE) {
         outbound_message_free(msg);
         cJSON_Delete(json);
         return parse_error;
     }
+    log_debug("[send_message] After parsing: attachments.count=%zu", msg->attachments.count);
 
     message_bus_send_outbound(ctx->bus, msg);
     
@@ -638,8 +673,8 @@ Error tool_spawn(void* user_data, const char* args_json, String* result) {
     SubagentSpawnRequest req;
     req.task = task;
     req.label = label;
-    req.origin_channel = (ctx->current_channel && ctx->current_channel[0]) ? ctx->current_channel : "cli";
-    req.origin_chat_id = (ctx->current_chat_id && ctx->current_chat_id[0]) ? ctx->current_chat_id : "current";
+    req.origin_channel = (ctx->current_channel[0]) ? ctx->current_channel : "cli";
+    req.origin_chat_id = (ctx->current_chat_id[0]) ? ctx->current_chat_id : "current";
     
     char* resp = subagent_manager_spawn(ctx->subagent_mgr, &req);
     if (resp) {

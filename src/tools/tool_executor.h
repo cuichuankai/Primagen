@@ -84,6 +84,9 @@ int tool_executor_submit(ToolExecutor* executor, const char* tool_name,
                          const char* arguments, void* context,
                          void (*callback)(void* context, const char* tool_name, const char* result, Error err));
 
+typedef void (*ToolAsyncCallback)(Error err, const char* result, void* user_data);
+void tool_executor_submit_async(ToolExecutor* executor, const char* tool_name, const char* args_json, ToolAsyncCallback callback, void* user_data);
+
 /**
  * Execute a tool synchronously with timeout (blocking)
  * @param executor The tool executor

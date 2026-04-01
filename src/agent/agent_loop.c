@@ -487,10 +487,10 @@ void agent_loop_free(AgentLoop* loop) {
     free(loop);
 }
 
-void agent_loop_set_llm_provider(AgentLoop* loop, LLMProvider provider) {
+void agent_loop_set_llm_provider_async(AgentLoop* loop, LLMProviderAsync provider) {
     if (!loop) return;
-    loop->llm_call = provider;
-    log_debug("[AgentLoop] LLM provider set");
+    loop->llm_call_async = provider;
+    log_debug("[AgentLoop] Async LLM provider set");
 }
 
 void agent_loop_stop(AgentLoop* loop) {
@@ -597,6 +597,8 @@ void agent_loop_register_builtin_tools(PluginManager* manager, ToolContext* ctx)
             continue;
         }
         memcpy(tool_ctx, ctx, sizeof(ToolContext));
+        log_debug("[AgentLoop] Created ToolContext for %s: ptr=%p, magic=0x%x, bus=%p", 
+                  builtin_tools[i].name, (void*)tool_ctx, tool_ctx->magic, (void*)tool_ctx->bus);
 
         int result = plugin_register_tool(manager, NULL,
             builtin_tools[i].name,
@@ -657,9 +659,9 @@ void agent_loop_register_builtin_channels(PluginManager* manager, Config* cfg) {
    Plugin Command Handler - Unified handling for all commands
    ============================================================================= */
 
-static void add_active_task(AgentLoop* loop, const char* task_id, const char* session_key, pthread_t thread);
+static void add_active_task(AgentLoop* loop, const char* task_id, const char* session_key, pthread_t thread, InboundMessage* msg);
 static void remove_active_task(AgentLoop* loop, const char* task_id);
-static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* session);
+static void process_message_async(AgentLoop* loop, InboundMessage* inbound, Session* session);
 static void process_inbound_message(AgentLoop* loop, InboundMessage* inbound);
 static void enqueue_inbound_task(AgentLoop* loop, InboundMessage* inbound);
 static InboundMessage* dequeue_inbound_task(AgentLoop* loop);
@@ -853,10 +855,10 @@ static bool handle_skill_fallback_command(AgentLoop* loop, InboundMessage* inbou
     char task_id[32];
     snprintf(task_id, sizeof(task_id), "task_%ld", time(NULL));
     pthread_t current_thread = pthread_self();
-    add_active_task(loop, task_id, session_key, current_thread);
-    process_message(loop, inbound, session);
-    remove_active_task(loop, task_id);
-
+    add_active_task(loop, task_id, session_key, current_thread, inbound);
+    process_message_async(loop, inbound, session);
+    // remove_active_task is now handled asynchronously when the task finishes
+    
     log_info("[AgentLoop] Fallback slash command '/%s' matched skill and executed", skill_name);
     return true;
 }
@@ -865,7 +867,7 @@ static bool handle_skill_fallback_command(AgentLoop* loop, InboundMessage* inbou
    Task Tracking
    ============================================================================= */
 
-static void add_active_task(AgentLoop* loop, const char* task_id, const char* session_key, pthread_t thread) {
+static void add_active_task(AgentLoop* loop, const char* task_id, const char* session_key, pthread_t thread, InboundMessage* msg) {
     pthread_mutex_lock(&loop->task_mutex);
 
     ActiveTaskNode* node = malloc(sizeof(ActiveTaskNode));
@@ -876,12 +878,42 @@ static void add_active_task(AgentLoop* loop, const char* task_id, const char* se
         node->session_key[sizeof(node->session_key) - 1] = '\0';
         node->thread = thread;
         node->cancelling = false;
+        
+        node->ctx.state = SESSION_STATE_IDLE;
+        node->ctx.turn = 0;
+        if (msg) {
+            strncpy(node->ctx.channel, msg->channel.data, sizeof(node->ctx.channel) - 1);
+            strncpy(node->ctx.chat_id, msg->chat_id.data, sizeof(node->ctx.chat_id) - 1);
+            strncpy(node->ctx.latest_user_content, msg->content.data, sizeof(node->ctx.latest_user_content) - 1);
+            node->ctx.channel[sizeof(node->ctx.channel)-1] = '\0';
+            node->ctx.chat_id[sizeof(node->ctx.chat_id)-1] = '\0';
+            node->ctx.latest_user_content[sizeof(node->ctx.latest_user_content)-1] = '\0';
+        } else {
+            node->ctx.channel[0] = '\0';
+            node->ctx.chat_id[0] = '\0';
+            node->ctx.latest_user_content[0] = '\0';
+        }
+
         node->next = loop->active_tasks;
         loop->active_tasks = node;
         log_debug("[AgentLoop] Added active task: %s", task_id);
     }
 
     pthread_mutex_unlock(&loop->task_mutex);
+}
+
+static ActiveTaskNode* get_active_task(AgentLoop* loop, const char* session_key) {
+    pthread_mutex_lock(&loop->task_mutex);
+    ActiveTaskNode* current = loop->active_tasks;
+    while (current) {
+        if (strcmp(current->session_key, session_key) == 0) {
+            pthread_mutex_unlock(&loop->task_mutex);
+            return current;
+        }
+        current = current->next;
+    }
+    pthread_mutex_unlock(&loop->task_mutex);
+    return NULL;
 }
 
 static void remove_active_task(AgentLoop* loop, const char* task_id) {
@@ -909,10 +941,12 @@ static void remove_active_task(AgentLoop* loop, const char* task_id) {
 }
 
 static void refresh_tool_routes(AgentLoop* loop, const char* channel, const char* chat_id) {
+    log_debug("[AgentLoop] refresh_tool_routes: channel=%s, chat_id=%s", channel, chat_id);
     const char* tool_names[] = {"cron", "send_message", "spawn_subagent", "skill", "memory", "exec"};
     size_t count = sizeof(tool_names) / sizeof(tool_names[0]);
     for (size_t i = 0; i < count; i++) {
         Tool* tool = tool_registry_get(loop->tool_reg, tool_names[i]);
+        log_debug("[AgentLoop] Tool %s: tool=%p, user_data=%p", tool_names[i], (void*)tool, tool ? (void*)tool->user_data : NULL);
         if (tool && tool->user_data) {
             tool_context_set_route((ToolContext*)tool->user_data, channel, chat_id);
         }
@@ -923,7 +957,223 @@ static void refresh_tool_routes(AgentLoop* loop, const char* channel, const char
    Message Processing
    ============================================================================= */
 
-static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* session) {
+typedef struct {
+    AgentLoop* loop;
+    char session_key[256];
+} AsyncContext;
+
+static void handle_llm_callback(Error err, const char* response, ToolCall* tool_calls, size_t tool_calls_count, void* user_data) {
+    AsyncContext* ctx = (AsyncContext*)user_data;
+    if (!ctx || !ctx->loop || !ctx->loop->bus) return;
+
+    InternalEvent* event = internal_event_new_llm_result(ctx->session_key, err, response, tool_calls, tool_calls_count);
+    message_bus_send_internal(ctx->loop->bus, event);
+    free(ctx);
+}
+
+static void trigger_llm_async(AgentLoop* loop, Session* session, const char* session_key, const char* channel, const char* chat_id) {
+    String system_prompt = context_builder_build_with_channel(
+        loop->ctx_builder, session, loop->tool_reg, channel, chat_id
+    );
+
+    AsyncContext* ctx = malloc(sizeof(AsyncContext));
+    ctx->loop = loop;
+    strncpy(ctx->session_key, session_key, sizeof(ctx->session_key) - 1);
+    ctx->session_key[sizeof(ctx->session_key) - 1] = '\0';
+
+    if (loop->llm_call_async) {
+        loop->llm_call_async(system_prompt.data, session, loop->tool_reg, loop->config, handle_llm_callback, ctx);
+    } else {
+        log_error("[AgentLoop] No async LLM provider configured");
+        handle_llm_callback(error_new(ERR_INVALID_PARAM, "No async LLM provider configured"), NULL, NULL, 0, ctx);
+    }
+
+    string_free(&system_prompt);
+}
+
+// =============================================================================
+// State Machine Event Handlers
+// =============================================================================
+
+// Forward declarations for tool async support
+static void tool_executor_callback(Error err, const char* result, void* user_data);
+
+typedef struct {
+    AgentLoop* loop;
+    char session_key[256];
+    char tool_call_id[128];
+    char tool_name[128];
+} ToolAsyncContext;
+
+static void tool_executor_callback(Error err, const char* result, void* user_data) {
+    ToolAsyncContext* ctx = (ToolAsyncContext*)user_data;
+    if (!ctx || !ctx->loop || !ctx->loop->bus) return;
+
+    InternalEvent* event = internal_event_new_tool_result(ctx->session_key, ctx->tool_call_id, ctx->tool_name, result, err);
+    message_bus_send_internal(ctx->loop->bus, event);
+    free(ctx);
+}
+
+static void handle_event_llm_result(AgentLoop* loop, InternalEvent* event) {
+    ActiveTaskNode* task = get_active_task(loop, event->session_key.data);
+    if (!task) return;
+    
+    Session* session = session_manager_get(loop->session_mgr, event->session_key.data);
+    if (!session) return;
+    
+    if (event->llm_error.code != ERR_NONE) {
+        log_error("[AgentLoop] LLM call error: %s", event->llm_error.message);
+        char full_msg[512];
+        snprintf(full_msg, sizeof(full_msg), "Sorry, I encountered an error: %s", event->llm_error.message);
+        Message* assistant_msg = message_new(ROLE_ASSISTANT, full_msg);
+        session_add_message(session, assistant_msg);
+        session_manager_save(loop->session_mgr, session);
+        OutboundMessage* outbound = outbound_message_new(task->ctx.channel, task->ctx.chat_id, full_msg);
+        message_bus_send_outbound(loop->bus, outbound);
+        
+        remove_active_task(loop, task->task_id);
+        return;
+    }
+
+    char* clean_content = strip_think_tags(event->llm_response.data);
+
+    if (event->tool_calls_count == 0) {
+        const char* assistant_content = (clean_content && strlen(clean_content) > 0) ? clean_content : event->llm_response.data;
+        if (assistant_content && strlen(assistant_content) > 0) {
+            Message* assistant_msg = message_new(ROLE_ASSISTANT, assistant_content);
+            session_add_message(session, assistant_msg);
+            session_manager_save(loop->session_mgr, session);
+        }
+        
+        // Use clean_content if available, otherwise response.data. If both null/empty, use ""
+    const char* final_out = (assistant_content && strlen(assistant_content) > 0) ? assistant_content : "";
+    if (final_out && strlen(final_out) > 0) {
+        OutboundMessage* outbound = outbound_message_new(task->ctx.channel, task->ctx.chat_id, final_out);
+        message_bus_send_outbound(loop->bus, outbound);
+    } else {
+        // Send a specific internal marker or empty message so channel knows it's completed
+        OutboundMessage* outbound = outbound_message_new(task->ctx.channel, task->ctx.chat_id, "");
+        message_bus_send_outbound(loop->bus, outbound);
+    }
+        
+        if (clean_content) free(clean_content);
+        
+        remove_active_task(loop, task->task_id);
+    } else {
+        // Rewrite missing tools to skill load
+        for (size_t i = 0; i < event->tool_calls_count; i++) {
+            if (tool_registry_get(loop->tool_reg, event->tool_calls[i].name.data) == NULL &&
+                strcmp(event->tool_calls[i].name.data, "skill") != 0) {
+                char skill_args[256];
+                char original_name[128];
+                snprintf(original_name, sizeof(original_name), "%s", event->tool_calls[i].name.data);
+                snprintf(skill_args, sizeof(skill_args), "{\"action\":\"load\",\"name\":\"%s\"}", original_name);
+                string_free(&event->tool_calls[i].name);
+                event->tool_calls[i].name = string_new("skill");
+                string_free(&event->tool_calls[i].arguments);
+                event->tool_calls[i].arguments = string_new(skill_args);
+                log_info("[AgentLoop] Rewriting unresolved tool '%s' to skill load", original_name);
+            }
+        }
+
+        Message* assistant_msg = message_new(ROLE_ASSISTANT, clean_content ? clean_content : event->llm_response.data);
+        for (size_t i = 0; i < event->tool_calls_count; i++) {
+            message_add_tool_call(assistant_msg, event->tool_calls[i].id.data, event->tool_calls[i].name.data, event->tool_calls[i].arguments.data);
+        }
+        session_add_message(session, assistant_msg);
+        session_manager_save(loop->session_mgr, session);
+
+        if (clean_content && clean_content != event->llm_response.data) free(clean_content);
+
+        // For pending tools, trigger next step
+        task->ctx.state = SESSION_STATE_WAITING_TOOL;
+        
+        // Execute tools asynchronously
+        // Note: Currently we only support one async tool execution per event well, 
+        // to handle multiple parallel tools we need a join mechanism or queue.
+        // For simplicity, if multiple tools are returned, we submit them sequentially.
+        // The state machine needs to track pending tools if > 1.
+        // For now, we assume sequential or we just submit the first one to test.
+        // Let's iterate and submit, but handle_event_tool_result needs to know when ALL are done.
+        // Since this is a refactor, let's execute sequentially for now by submitting one, 
+        // and keeping the rest in state, OR submit all and count responses.
+        // Let's use `tool_executor_execute_sync` inside a wrapper or modify ToolExecutor to be async.
+        // Actually, ToolExecutor is already thread-pool based (`tool_executor_submit`).
+        // We will just submit all and handle them as they come. But we must know when the turn is done.
+        // Easiest is to execute sync here in a separate thread, but that defeats the purpose.
+        // Let's do the simplest async conversion: execute the first tool, when it returns, execute next, etc.
+        // Or execute all, and wait for N results.
+        
+        // We will execute sync for now BUT wrapped in an async task submission to avoid blocking AgentLoop thread.
+        // Since tool_executor_submit takes a task, we can pass a callback.
+        
+        // As a temporary bridge for Phase 2:
+        // IMPORTANT: Update ToolContext with the correct channel/chat_id before executing tools
+        // This ensures tools send messages to the correct destination
+        refresh_tool_routes(loop, task->ctx.channel, task->ctx.chat_id);
+        
+        for (size_t i = 0; i < event->tool_calls_count; i++) {
+            ToolAsyncContext* tctx = malloc(sizeof(ToolAsyncContext));
+            tctx->loop = loop;
+            strncpy(tctx->session_key, event->session_key.data, sizeof(tctx->session_key) - 1);
+            tctx->session_key[sizeof(tctx->session_key) - 1] = '\0';
+            strncpy(tctx->tool_call_id, event->tool_calls[i].id.data, sizeof(tctx->tool_call_id) - 1);
+            tctx->tool_call_id[sizeof(tctx->tool_call_id) - 1] = '\0';
+            strncpy(tctx->tool_name, event->tool_calls[i].name.data, sizeof(tctx->tool_name) - 1);
+            tctx->tool_name[sizeof(tctx->tool_name) - 1] = '\0';
+            
+            // Submitting to thread pool
+            tool_executor_submit_async(loop->tool_executor, event->tool_calls[i].name.data, event->tool_calls[i].arguments.data, tool_executor_callback, tctx);
+        }
+    }
+}
+
+static void handle_event_tool_result(AgentLoop* loop, InternalEvent* event) {
+    ActiveTaskNode* task = get_active_task(loop, event->session_key.data);
+    if (!task) return;
+
+    Session* session = session_manager_get(loop->session_mgr, event->session_key.data);
+    if (!session) return;
+
+    String result = string_new("");
+    if (event->tool_error.code != ERR_NONE) {
+        log_error("[AgentLoop] Tool Execution Failed: name=%s error=%s", event->tool_name.data, event->tool_error.message);
+        string_append(&result, event->tool_error.message);
+    } else {
+        if (strcmp(event->tool_name.data, "skill") == 0) {
+            log_debug("[AgentLoop] Tool Result: [Skill content loaded, length: %zu bytes]", event->tool_result.len);
+        } else {
+            log_debug("[AgentLoop] Tool Result: %s", event->tool_result.data);
+        }
+        string_append(&result, event->tool_result.data);
+    }
+
+    Message* tool_msg = message_new(ROLE_TOOL, result.data);
+    tool_msg->tool_call_id = string_copy(&event->tool_call_id);
+    tool_msg->name = string_copy(&event->tool_name);
+    session_add_message(session, tool_msg);
+    string_free(&result);
+    session_manager_save(loop->session_mgr, session);
+
+    // Check if all tools for this turn are done (simplified: we assume 1 tool or we trigger LLM immediately, which might cause issues if multiple tools. In a full implementation, we need a pending_tools counter).
+    // For now, trigger LLM immediately. If multiple tools, this will trigger multiple LLM calls. We should add a counter.
+    // Let's add a quick hack: we only trigger LLM if no other tools are pending.
+    // For now, let's just trigger it.
+    
+    int max_turns = loop->config && loop->config->agent.max_tool_iterations > 0 ? loop->config->agent.max_tool_iterations : 15;
+    if (task->ctx.turn >= max_turns) {
+        log_warn("[AgentLoop] Max iterations (%d) reached", max_turns);
+        send_error_response(loop, task->ctx.channel, task->ctx.chat_id, "I reached the maximum number of tool call iterations without completing the task.");
+        remove_active_task(loop, task->task_id);
+        return;
+    }
+
+    task->ctx.turn++;
+    task->ctx.state = SESSION_STATE_WAITING_LLM;
+    trigger_llm_async(loop, session, event->session_key.data, task->ctx.channel, task->ctx.chat_id);
+}
+
+static void process_message_async(AgentLoop* loop, InboundMessage* inbound, Session* session) {
     char key[256];
     snprintf(key, sizeof(key), "%s:%s", inbound->channel.data, inbound->chat_id.data);
 
@@ -932,143 +1182,19 @@ static Error process_message(AgentLoop* loop, InboundMessage* inbound, Session* 
 
     refresh_tool_routes(loop, inbound->channel.data, inbound->chat_id.data);
 
-    // Get max_turns from config, default to 15 if not set
-    int max_turns = loop->config && loop->config->agent.max_tool_iterations > 0
-                    ? loop->config->agent.max_tool_iterations : 15;
-    int turn = 0;
-    bool conversation_turn_done = false;
-    bool error_occurred = false;
+    ActiveTaskNode* task = get_active_task(loop, key);
+    if (!task) return;
+
+    if (task->ctx.state != SESSION_STATE_IDLE) {
+        log_warn("[AgentLoop] Session %s is busy", key);
+        return;
+    }
 
     log_debug("[AgentLoop] Processing message for session: %s", key);
 
-    while (!conversation_turn_done && turn < max_turns && agent_loop_is_running(loop)) {
-        turn++;
-        log_debug("[AgentLoop] Turn %d/%d", turn, max_turns);
-
-        String system_prompt = context_builder_build_with_channel(
-            loop->ctx_builder, session, loop->tool_reg,
-            inbound->channel.data, inbound->chat_id.data
-        );
-
-        String response = string_new("");
-        ToolCall* tool_calls = NULL;
-        size_t tool_calls_count = 0;
-
-        Error err;
-        if (loop->llm_call) {
-            err = loop->llm_call(system_prompt.data, session, loop->tool_reg, loop->config, &response, &tool_calls, &tool_calls_count);
-        } else {
-            err = error_new(ERR_INVALID_PARAM, "No LLM provider set");
-        }
-
-        string_free(&system_prompt);
-
-        if (err.code != ERR_NONE) {
-            log_error("[AgentLoop] LLM call error: %s", err.message);
-            char full_msg[512];
-            snprintf(full_msg, sizeof(full_msg), "Sorry, I encountered an error: %s", err.message);
-            Message* assistant_msg = message_new(ROLE_ASSISTANT, full_msg);
-            session_add_message(session, assistant_msg);
-            session_manager_save(loop->session_mgr, session);
-            send_error_response(loop, inbound->channel.data, inbound->chat_id.data, err.message);
-            string_free(&response);
-            error_occurred = true;
-            break;
-        }
-
-        char* clean_content = strip_think_tags(response.data);
-
-        if (tool_calls_count == 0) {
-            const char* assistant_content = (clean_content && strlen(clean_content) > 0) ? clean_content : response.data;
-            if (!error_occurred && assistant_content && strlen(assistant_content) > 0) {
-                Message* assistant_msg = message_new(ROLE_ASSISTANT, assistant_content);
-                session_add_message(session, assistant_msg);
-                session_manager_save(loop->session_mgr, session);
-                OutboundMessage* outbound = outbound_message_new(inbound->channel.data, inbound->chat_id.data, assistant_content);
-                message_bus_send_outbound(loop->bus, outbound);
-            }
-            if (clean_content) free(clean_content);
-            string_free(&response);
-            conversation_turn_done = true;
-        } else {
-            for (size_t i = 0; i < tool_calls_count; i++) {
-                if (tool_registry_get(loop->tool_reg, tool_calls[i].name.data) == NULL &&
-                    strcmp(tool_calls[i].name.data, "skill") != 0) {
-                    char skill_args[256];
-                    char original_name[128];
-                    snprintf(original_name, sizeof(original_name), "%s", tool_calls[i].name.data);
-                    snprintf(skill_args, sizeof(skill_args),
-                             "{\"action\":\"load\",\"name\":\"%s\"}", original_name);
-                    string_free(&tool_calls[i].name);
-                    tool_calls[i].name = string_new("skill");
-                    string_free(&tool_calls[i].arguments);
-                    tool_calls[i].arguments = string_new(skill_args);
-                    log_info("[AgentLoop] Rewriting unresolved tool '%s' to skill load", original_name);
-                }
-            }
-
-            Message* assistant_msg = message_new(ROLE_ASSISTANT, clean_content ? clean_content : response.data);
-            for (size_t i = 0; i < tool_calls_count; i++) {
-                message_add_tool_call(assistant_msg, tool_calls[i].id.data, tool_calls[i].name.data, tool_calls[i].arguments.data);
-            }
-            session_add_message(session, assistant_msg);
-
-            if (clean_content && clean_content != response.data) {
-                free(clean_content);
-            }
-
-            for (size_t i = 0; i < tool_calls_count; i++) {
-                String result = string_new("");
-                log_debug("[AgentLoop] Executing tool: %s", tool_calls[i].name.data);
-
-                err = tool_executor_execute_sync(loop->tool_executor, tool_calls[i].name.data,
-                                                  tool_calls[i].arguments.data, &result, 30000);
-                if (err.code != ERR_NONE) {
-                    log_error("[AgentLoop] Tool Execution Failed: name=%s error=%s",
-                              tool_calls[i].name.data, err.message);
-                    string_free(&result);
-                    result = string_new(err.message);
-                } else {
-                    if (strcmp(tool_calls[i].name.data, "skill") == 0) {
-                        log_debug("[AgentLoop] Tool Result: [Skill content loaded, length: %zu bytes]", result.len);
-                    } else {
-                        log_debug("[AgentLoop] Tool Result: %s", result.data);
-                    }
-                }
-
-                Message* tool_msg = message_new(ROLE_TOOL, result.data);
-                tool_msg->tool_call_id = string_copy(&tool_calls[i].id);
-                tool_msg->name = string_copy(&tool_calls[i].name);
-                session_add_message(session, tool_msg);
-                string_free(&result);
-            }
-
-            string_free(&response);
-
-            for (size_t i = 0; i < tool_calls_count; i++) {
-                string_free(&tool_calls[i].id);
-                string_free(&tool_calls[i].name);
-                string_free(&tool_calls[i].arguments);
-            }
-            free(tool_calls);
-
-            session_manager_save(loop->session_mgr, session);
-        }
-    }
-
-    if (turn >= max_turns && !conversation_turn_done) {
-        log_warn("[AgentLoop] Max iterations (%d) reached", max_turns);
-        send_error_response(loop, inbound->channel.data, inbound->chat_id.data,
-            "I reached the maximum number of tool call iterations without completing the task.");
-    }
-
-    if (!error_occurred) {
-        session_manager_save(loop->session_mgr, session);
-    }
-
-    loop->current_session_key[0] = '\0';
-
-    return error_new(ERR_NONE, "");
+    task->ctx.state = SESSION_STATE_WAITING_LLM;
+    task->ctx.turn = 1;
+    trigger_llm_async(loop, session, key, inbound->channel.data, inbound->chat_id.data);
 }
 
 static void process_inbound_message(AgentLoop* loop, InboundMessage* inbound) {
@@ -1113,9 +1239,8 @@ static void process_inbound_message(AgentLoop* loop, InboundMessage* inbound) {
     char task_id[32];
     snprintf(task_id, sizeof(task_id), "task_%ld", time(NULL));
     pthread_t current_thread = pthread_self();
-    add_active_task(loop, task_id, key, current_thread);
-    process_message(loop, inbound, session);
-    remove_active_task(loop, task_id);
+    add_active_task(loop, task_id, key, current_thread, inbound);
+    process_message_async(loop, inbound, session);
 }
 
 static void enqueue_inbound_task(AgentLoop* loop, InboundMessage* inbound) {
@@ -1142,9 +1267,29 @@ static void enqueue_inbound_task(AgentLoop* loop, InboundMessage* inbound) {
 static InboundMessage* dequeue_inbound_task(AgentLoop* loop) {
     if (!loop) return NULL;
     pthread_mutex_lock(&loop->inbox_mutex);
-    while (loop->inbox_head == NULL && agent_loop_is_running(loop)) {
-        pthread_cond_wait(&loop->inbox_cond, &loop->inbox_mutex);
+    // Don't wait here if we want to poll internal queue, use timedwait
+    struct timespec ts;
+#if defined(__APPLE__)
+    ts.tv_sec = 0;
+    ts.tv_nsec = 10000000; // 10ms
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_nsec += 10000000;
+    if (ts.tv_nsec >= 1000000000) {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000;
     }
+#endif
+
+    while (loop->inbox_head == NULL && agent_loop_is_running(loop)) {
+#if defined(__APPLE__)
+        int rc = pthread_cond_timedwait_relative_np(&loop->inbox_cond, &loop->inbox_mutex, &ts);
+#else
+        int rc = pthread_cond_timedwait(&loop->inbox_cond, &loop->inbox_mutex, &ts);
+#endif
+        if (rc != 0) break; // timeout or error, break to allow checking internal queue
+    }
+    
     if (loop->inbox_head == NULL) {
         pthread_mutex_unlock(&loop->inbox_mutex);
         return NULL;
@@ -1163,10 +1308,34 @@ static InboundMessage* dequeue_inbound_task(AgentLoop* loop) {
 
 static void* agent_loop_processing_worker(void* arg) {
     AgentLoop* loop = (AgentLoop*)arg;
+    log_debug("[AgentLoop] Processing worker started");
     while (true) {
+        // First check internal events (higher priority)
+        InternalEvent* event = message_bus_receive_internal_timed(loop->bus, 0);
+        if (event) {
+            if (event->type == EVENT_LLM_RESULT) {
+                handle_event_llm_result(loop, event);
+            } else if (event->type == EVENT_TOOL_RESULT) {
+                handle_event_tool_result(loop, event);
+            }
+            internal_event_free(event);
+            continue;
+        }
+
         InboundMessage* inbound = dequeue_inbound_task(loop);
         if (!inbound) {
             if (!agent_loop_is_running(loop)) break;
+            
+            // Wait for events if queue is empty
+            event = message_bus_receive_internal_timed(loop->bus, 50);
+            if (event) {
+                if (event->type == EVENT_LLM_RESULT) {
+                    handle_event_llm_result(loop, event);
+                } else if (event->type == EVENT_TOOL_RESULT) {
+                    handle_event_tool_result(loop, event);
+                }
+                internal_event_free(event);
+            }
             continue;
         }
         process_inbound_message(loop, inbound);

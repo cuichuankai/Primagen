@@ -42,6 +42,24 @@ struct mg_mgr;
 
 void llm_provider_configure_mgr_dns(struct mg_mgr* mgr, const Config* config);
 
+// Async interface callback
+typedef void (*LLMAsyncCallback)(Error err, const char* response, ToolCall* tool_calls, size_t tool_calls_count, void* user_data);
+
+// Async request payload structure
+typedef struct {
+    char* system_prompt;
+    Session* session;
+    ToolRegistry* tools;
+    Config* config;
+    LLMAsyncCallback callback;
+    void* user_data;
+} LLMAsyncRequest;
+
+// Async network lifecycle
+void llm_provider_async_init(void);
+void llm_provider_async_shutdown(void);
+void llm_provider_call_async(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, LLMAsyncCallback callback, void* user_data);
+
 // LLM provider interface
 Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, String* response, ToolCall** tool_calls, size_t* tool_calls_count);
 

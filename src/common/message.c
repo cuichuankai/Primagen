@@ -33,6 +33,56 @@ void message_free(Message* msg) {
     free(msg);
 }
 
+InternalEvent* internal_event_new_llm_result(const char* session_key, Error err, const char* response, ToolCall* calls, size_t count) {
+    InternalEvent* ev = calloc(1, sizeof(InternalEvent));
+    if (!ev) return NULL;
+    ev->type = EVENT_LLM_RESULT;
+    ev->session_key = string_new(session_key ? session_key : "");
+    ev->llm_error = err;
+    ev->llm_response = string_new(response ? response : "");
+    if (count > 0 && calls) {
+        ev->tool_calls = calloc(count, sizeof(ToolCall));
+        for (size_t i = 0; i < count; i++) {
+            ev->tool_calls[i].id = string_copy(&calls[i].id);
+            ev->tool_calls[i].name = string_copy(&calls[i].name);
+            ev->tool_calls[i].arguments = string_copy(&calls[i].arguments);
+        }
+        ev->tool_calls_count = count;
+    }
+    return ev;
+}
+
+InternalEvent* internal_event_new_tool_result(const char* session_key, const char* tool_call_id, const char* tool_name, const char* result, Error err) {
+    InternalEvent* ev = calloc(1, sizeof(InternalEvent));
+    if (!ev) return NULL;
+    ev->type = EVENT_TOOL_RESULT;
+    ev->session_key = string_new(session_key ? session_key : "");
+    ev->tool_call_id = string_new(tool_call_id ? tool_call_id : "");
+    ev->tool_name = string_new(tool_name ? tool_name : "");
+    ev->tool_result = string_new(result ? result : "");
+    ev->tool_error = err;
+    return ev;
+}
+
+void internal_event_free(InternalEvent* ev) {
+    if (!ev) return;
+    string_free(&ev->session_key);
+    if (ev->type == EVENT_LLM_RESULT) {
+        string_free(&ev->llm_response);
+        for (size_t i = 0; i < ev->tool_calls_count; i++) {
+            string_free(&ev->tool_calls[i].id);
+            string_free(&ev->tool_calls[i].name);
+            string_free(&ev->tool_calls[i].arguments);
+        }
+        free(ev->tool_calls);
+    } else if (ev->type == EVENT_TOOL_RESULT) {
+        string_free(&ev->tool_call_id);
+        string_free(&ev->tool_name);
+        string_free(&ev->tool_result);
+    }
+    free(ev);
+}
+
 void message_add_tool_call(Message* msg, const char* id, const char* name, const char* args) {
     ToolCall* new_calls = realloc(msg->tool_calls, (msg->tool_calls_count + 1) * sizeof(ToolCall));
     if (!new_calls) return;

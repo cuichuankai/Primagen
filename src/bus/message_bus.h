@@ -19,6 +19,7 @@ typedef struct {
 typedef struct {
     MessageQueue inbound;
     MessageQueue outbound;
+    MessageQueue internal;
 } MessageBus;
 
 // Functions
@@ -31,5 +32,8 @@ InboundMessage* message_bus_receive_inbound_timed(MessageBus* bus, int timeout_m
 void message_bus_send_outbound(MessageBus* bus, OutboundMessage* msg);
 OutboundMessage* message_bus_receive_outbound(MessageBus* bus);
 bool message_bus_is_outbound_closed(MessageBus* bus);
+
+void message_bus_send_internal(MessageBus* bus, InternalEvent* event);
+InternalEvent* message_bus_receive_internal_timed(MessageBus* bus, int timeout_ms);
 
 #endif // MESSAGE_BUS_H

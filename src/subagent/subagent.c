@@ -161,10 +161,11 @@ static void* subagent_task_runner(void* arg) {
         .cron_service = NULL,
         .skills_loader = NULL,
         .memory = NULL,
-        .workspace = mgr->workspace,
-        .current_channel = "subagent",
-        .current_chat_id = task_data->task_id
+        .workspace = mgr->workspace
     };
+    strcpy(tool_ctx.current_channel, "subagent");
+    strncpy(tool_ctx.current_chat_id, task_data->task_id, sizeof(tool_ctx.current_chat_id) - 1);
+    tool_ctx.current_chat_id[sizeof(tool_ctx.current_chat_id) - 1] = '\0';
 
     // Register all standard tools
     tool_registry_register(task_data->tool_reg, "read_file", "Read file content",
@@ -190,9 +191,7 @@ static void* subagent_task_runner(void* arg) {
         tool_spawn, &tool_ctx);
 
     // Create Loop
-    // Subagent uses the SAME config as main agent for now (same API key, model, etc.)
-    // We might want to override model/temp for subagents, but let's keep it simple.
-    // Note: Subagents don't need plugin manager access, so pass NULL
+    // Subagent uses the SAME config as main agent for now
     task_data->loop = agent_loop_new(
         task_data->session_mgr,
         task_data->ctx_builder,
@@ -208,8 +207,8 @@ static void* subagent_task_runner(void* arg) {
         node->loop = task_data->loop;
     }
 
-    // Set Provider (cast back to function pointer)
-    agent_loop_set_llm_provider(task_data->loop, (LLMProvider)mgr->provider);
+    // Set Provider async
+    agent_loop_set_llm_provider_async(task_data->loop, (LLMProviderAsync)mgr->provider);
 
     // 2. Start Agent Loop Thread
     pthread_t loop_tid;

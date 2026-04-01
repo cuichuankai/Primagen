@@ -36,9 +36,7 @@ static void handle_signal(int sig) {
 }
 
 /* Channel list */
-#define MAX_CHANNELS 64
-static Channel* channels[MAX_CHANNELS];
-static int channel_count = 0;
+static DynamicArray* channels = NULL;
 
 /* Cron job callback - injects message into bus for delivery */
 void cron_callback(CronJob* job, void* user_data) {
@@ -65,7 +63,7 @@ void* agent_thread(void* arg) {
 /* Outbound message dispatcher thread - sends messages to channels */
 void* outbound_thread(void* arg) {
     MessageBus* bus = (MessageBus*)arg;
-    log_debug("[OutboundThread] Started, channel_count=%d", channel_count);
+    log_debug("[OutboundThread] Started");
     while (1) {
         OutboundMessage* outbound = message_bus_receive_outbound(bus);
         if (!outbound) {
@@ -78,14 +76,15 @@ void* outbound_thread(void* arg) {
                  outbound->channel.data, outbound->chat_id.data);
         int sent = 0;
         bool broadcast = strcmp(outbound->channel.data, "*") == 0 || strcmp(outbound->channel.data, "all") == 0;
-        for (int i = 0; i < channel_count; i++) {
-            if (!channels[i]->send) continue;
-            bool direct_match = strcmp(channels[i]->name, outbound->channel.data) == 0;
-            bool cli_console_alias = strcmp(outbound->channel.data, "cli") == 0 && strcmp(channels[i]->name, "console") == 0;
+        for (size_t i = 0; i < channels->count; i++) {
+            Channel* ch = *(Channel**)dynamic_array_get(channels, i);
+            if (!ch->send) continue;
+            bool direct_match = strcmp(ch->name, outbound->channel.data) == 0;
+            bool cli_console_alias = strcmp(outbound->channel.data, "cli") == 0 && strcmp(ch->name, "console") == 0;
             if (broadcast || direct_match || cli_console_alias) {
-                channels[i]->send(channels[i], outbound);
+                ch->send(ch, outbound);
                 sent++;
-                log_debug("[OutboundThread] Sent to channel %d: %s", i, channels[i]->name);
+                log_debug("[OutboundThread] Sent to channel %zu: %s", i, ch->name);
             }
         }
         if (sent == 0) {
@@ -235,6 +234,8 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     log_info("[System] Primagen initializing...");
 
     /* Initialize Components */
+    channels = malloc(sizeof(DynamicArray));
+    *channels = dynamic_array_new(sizeof(Channel*));
     log_debug("[System] Creating MessageBus...");
     MessageBus* bus = message_bus_new();
 
@@ -283,7 +284,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
 
     ToolRegistry* tool_reg = tool_registry_new();
 
-    /* Initialize Plugin Manager */
+    // Initialize Plugin Manager
     log_debug("[System] Creating PluginManager...");
     PluginManager* plugin_mgr = plugin_manager_new(workspace_path);
     if (plugin_mgr) {
@@ -292,17 +293,16 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         plugin_mgr->tool_registry = tool_reg;
         plugin_mgr->agent_loop = NULL;
         plugin_mgr->session_mgr = NULL;
-        plugin_mgr->channel_array = channels;
-        plugin_mgr->channel_count_ptr = &channel_count;
-        plugin_mgr->channel_capacity = MAX_CHANNELS;
+        plugin_mgr->channels = channels;
     } else {
         log_error("[System] Failed to create PluginManager");
     }
 
     /* Initialize Subagent Manager */
     log_debug("[System] Creating SubagentManager...");
+    llm_provider_async_init();
     SubagentManager* subagent_mgr = subagent_manager_create(
-        (void*)llm_provider_call,
+        (void*)llm_provider_call_async,
         workspace_path,
         bus,
         cfg
@@ -336,8 +336,8 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     tool_ctx->memory = memory;
     tool_ctx->config = cfg;
     tool_ctx->workspace = workspace_path;
-    tool_ctx->current_channel = "cli";
-    tool_ctx->current_chat_id = "current";
+    strcpy(tool_ctx->current_channel, "cli");
+    strcpy(tool_ctx->current_chat_id, "current");
 
     /* Register built-in tools with PluginManager */
     log_debug("[System] Registering builtin tools...");
@@ -357,7 +357,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         rc = 1;
         goto cleanup;
     }
-    agent_loop_set_llm_provider(loop, llm_provider_call);
+    agent_loop_set_llm_provider_async(loop, llm_provider_call_async);
 
     if (plugin_mgr) {
         plugin_mgr->agent_loop = loop;
@@ -375,13 +375,14 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     agent_loop_register_builtin_commands(loop);
 
     /* Start Channels */
-    log_debug("[System] Active Channels (%d):", channel_count);
-    if (channel_count == 0) {
+    log_debug("[System] Active Channels (%zu):", channels->count);
+    if (channels->count == 0) {
         log_error("[System] No channels registered! Check channel initialization.");
     }
-    for (int i = 0; i < channel_count; i++) {
-        if (channels[i]->start) channels[i]->start(channels[i]);
-        log_debug("  - %s", channels[i]->name);
+    for (size_t i = 0; i < channels->count; i++) {
+        Channel* ch = *(Channel**)dynamic_array_get(channels, i);
+        if (ch->start) ch->start(ch);
+        log_debug("  - %s", ch->name);
     }
 
     /* Start Threads */
@@ -431,10 +432,12 @@ cleanup:
     }
 
     /* Cleanup */
-    for (int i = 0; i < channel_count; i++) {
-        channels[i]->stop(channels[i]);
-        channels[i]->destroy(channels[i]);
+    for (size_t i = 0; i < channels->count; i++) {
+        Channel* ch = *(Channel**)dynamic_array_get(channels, i);
+        if (ch->stop) ch->stop(ch);
+        if (ch->destroy) ch->destroy(ch);
     }
+    dynamic_array_free(channels);
 
     cron_service_stop(cron_service);
     cron_service_destroy(cron_service);
@@ -450,6 +453,8 @@ cleanup:
     if (loop && !agent_thread_started) {
         agent_loop_free(loop);
     }
+
+    llm_provider_async_shutdown();
 
     /* curl_global_cleanup(); - Removed for Mongoose migration */
     logger_cleanup();

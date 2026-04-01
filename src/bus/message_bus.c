@@ -176,6 +176,16 @@ MessageBus* message_bus_new() {
         free(bus);
         return NULL;
     }
+    if (!message_queue_init(&bus->internal, 0)) {
+        free(bus->inbound.items);
+        pthread_mutex_destroy(&bus->inbound.mutex);
+        pthread_cond_destroy(&bus->inbound.cond);
+        free(bus->outbound.items);
+        pthread_mutex_destroy(&bus->outbound.mutex);
+        pthread_cond_destroy(&bus->outbound.cond);
+        free(bus);
+        return NULL;
+    }
     return bus;
 }
 
@@ -183,6 +193,7 @@ void message_bus_close(MessageBus* bus) {
     if (!bus) return;
     message_queue_close(&bus->inbound);
     message_queue_close(&bus->outbound);
+    message_queue_close(&bus->internal);
 }
 
 void message_bus_free(MessageBus* bus) {
@@ -190,6 +201,7 @@ void message_bus_free(MessageBus* bus) {
     message_bus_close(bus);
     message_queue_free(&bus->inbound);
     message_queue_free(&bus->outbound);
+    message_queue_free(&bus->internal);
     free(bus);
 }
 
@@ -230,4 +242,14 @@ bool message_bus_is_outbound_closed(MessageBus* bus) {
     bool closed = bus->outbound.closed;
     pthread_mutex_unlock(&bus->outbound.mutex);
     return closed;
+}
+
+void message_bus_send_internal(MessageBus* bus, InternalEvent* event) {
+    if (!bus || !event) return;
+    message_queue_send(&bus->internal, event);
+}
+
+InternalEvent* message_bus_receive_internal_timed(MessageBus* bus, int timeout_ms) {
+    if (!bus) return NULL;
+    return (InternalEvent*)message_queue_receive_timed(&bus->internal, timeout_ms);
 }

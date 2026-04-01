@@ -19,8 +19,8 @@ typedef struct {
     Memory* memory;
     Config* config;
     const char* workspace;
-    const char* current_channel;
-    const char* current_chat_id;
+    char current_channel[128];
+    char current_chat_id[512];
 } ToolContext;
 
 void tool_context_set_route(ToolContext* ctx, const char* channel, const char* chat_id);

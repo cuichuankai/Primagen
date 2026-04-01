@@ -6,6 +6,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <pthread.h>
+#include <unistd.h>
+
+// Async global state
+static pthread_t g_async_thread;
+static bool g_async_running = false;
+static struct mg_mgr g_async_mgr;
+static pthread_mutex_t g_async_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Response buffer for Mongoose
 struct MemoryStruct {
@@ -102,6 +110,307 @@ void llm_provider_configure_mgr_dns(struct mg_mgr* mgr, const Config* config) {
     if (config->dns.dns4 && config->dns.dns4[0]) mgr->dns4.url = config->dns.dns4;
     if (config->dns.dns6 && config->dns.dns6[0]) mgr->dns6.url = config->dns.dns6;
     if (config->dns.dns_timeout_ms > 0) mgr->dnstimeout = config->dns.dns_timeout_ms;
+}
+
+// =============================================================================
+// Async Event Loop & Functions
+// =============================================================================
+
+typedef struct {
+    struct MemoryStruct chunk;
+    LLMAsyncCallback callback;
+    void* user_data;
+    uint64_t start_ms;
+} AsyncRequestContext;
+
+static void* llm_async_worker(void* arg) {
+    (void)arg;
+    while (g_async_running) {
+        pthread_mutex_lock(&g_async_mutex);
+        mg_mgr_poll(&g_async_mgr, 100);
+        pthread_mutex_unlock(&g_async_mutex);
+    }
+    return NULL;
+}
+
+void llm_provider_async_init(void) {
+    mg_mgr_init(&g_async_mgr);
+    g_async_running = true;
+    pthread_create(&g_async_thread, NULL, llm_async_worker, NULL);
+    log_debug("[LLM Async] Worker thread started");
+}
+
+void llm_provider_async_shutdown(void) {
+    if (g_async_running) {
+        g_async_running = false;
+        pthread_join(g_async_thread, NULL);
+        mg_mgr_free(&g_async_mgr);
+        log_debug("[LLM Async] Worker thread stopped");
+    }
+}
+
+static void async_fn(struct mg_connection *c, int ev, void *ev_data) {
+    AsyncRequestContext *ctx = (AsyncRequestContext *) c->fn_data;
+    struct MemoryStruct *ms = &ctx->chunk;
+    
+    if (ev == MG_EV_CONNECT) {
+        log_debug("[LLM Async] MG_EV_CONNECT");
+    } else if (ev == MG_EV_TLS_HS) {
+        log_debug("[LLM Async] MG_EV_TLS_HS success");
+    } else if (ev == MG_EV_HTTP_HDRS) {
+        struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+        ms->http_status = mg_http_status(hm);
+        log_debug("[LLM Async] MG_EV_HTTP_HDRS status=%d", ms->http_status);
+    } else if (ev == MG_EV_HTTP_MSG) {
+        struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+        ms->http_status = mg_http_status(hm);
+        size_t new_size = ms->size + hm->body.len;
+        if (new_size + 1 > ms->capacity) {
+            size_t new_cap = ms->capacity * 2;
+            while (new_size + 1 > new_cap) new_cap *= 2;
+            char *new_mem = realloc(ms->memory, new_cap);
+            if (!new_mem) {
+                snprintf(ms->last_error, sizeof(ms->last_error), "OOM in HTTP buffer");
+                ms->done = true;
+                c->is_closing = 1;
+                return;
+            }
+            ms->memory = new_mem;
+            ms->capacity = new_cap;
+        }
+        memcpy(ms->memory + ms->size, hm->body.buf, hm->body.len);
+        ms->size = new_size;
+        ms->memory[ms->size] = '\0';
+        c->is_closing = 1;
+        ms->done = true;
+    } else if (ev == MG_EV_CLOSE) {
+        log_debug("[LLM Async] MG_EV_CLOSE (size=%zu, done=%d, status=%d)", ms->size, ms->done, ms->http_status);
+        if (ms->size == 0 && !ms->done) ms->done = true;
+        
+        // Timeout check could be handled here or in a timer, but since CLOSE triggers end of request:
+        Error final_err = error_new(ERR_NONE, "");
+        String response = string_new("");
+        ToolCall* tool_calls = NULL;
+        size_t tool_calls_count = 0;
+        
+        if (ms->size == 0) {
+            char errbuf[320];
+            snprintf(errbuf, sizeof(errbuf), "Empty LLM response (status=%d, %s)",
+                     ms->http_status, ms->last_error[0] ? ms->last_error : "no payload");
+            final_err = error_new(ERR_NETWORK, errbuf);
+        } else {
+            cJSON *json_response = cJSON_Parse(ms->memory);
+            if (!json_response) {
+                final_err = error_new(ERR_JSON, "Failed to parse LLM response");
+            } else {
+                cJSON *error_obj = cJSON_GetObjectItem(json_response, "error");
+                if (error_obj) {
+                    cJSON *msg_item = cJSON_GetObjectItem(error_obj, "message");
+                    final_err = error_new(ERR_NETWORK, msg_item ? msg_item->valuestring : "Unknown API error");
+                } else {
+                    cJSON *choices = cJSON_GetObjectItem(json_response, "choices");
+                    if (cJSON_IsArray(choices) && cJSON_GetArraySize(choices) > 0) {
+                        cJSON *choice = cJSON_GetArrayItem(choices, 0);
+                        cJSON *message = cJSON_GetObjectItem(choice, "message");
+                        cJSON *content = cJSON_GetObjectItem(message, "content");
+                        if (cJSON_IsString(content) && content->valuestring) {
+                            const char* trimmed = content->valuestring;
+                            while (*trimmed == '\n' || *trimmed == '\r') trimmed++;
+                            response = string_new(trimmed);
+                        }
+                        
+                        cJSON *tcs = cJSON_GetObjectItem(message, "tool_calls");
+                        if (cJSON_IsArray(tcs)) {
+                            tool_calls_count = cJSON_GetArraySize(tcs);
+                            if (tool_calls_count > 0) {
+                                tool_calls = malloc(tool_calls_count * sizeof(ToolCall));
+                                int idx = 0;
+                                cJSON *tc;
+                                cJSON_ArrayForEach(tc, tcs) {
+                                    cJSON *func = cJSON_GetObjectItem(tc, "function");
+                                    tool_calls[idx].id = string_new(cJSON_GetObjectItem(tc, "id")->valuestring);
+                                    tool_calls[idx].name = string_new(cJSON_GetObjectItem(func, "name")->valuestring);
+                                    tool_calls[idx].arguments = string_new(cJSON_GetObjectItem(func, "arguments")->valuestring);
+                                    idx++;
+                                }
+                            }
+                        }
+                    } else {
+                        final_err = error_new(ERR_JSON, "No choices in response");
+                    }
+                }
+                cJSON_Delete(json_response);
+            }
+        }
+        
+        if (ctx->callback) {
+            ctx->callback(final_err, response.data, tool_calls, tool_calls_count, ctx->user_data);
+        }
+        
+        // Cleanup
+        string_free(&response);
+        for (size_t i = 0; i < tool_calls_count; i++) {
+            string_free(&tool_calls[i].id);
+            string_free(&tool_calls[i].name);
+            string_free(&tool_calls[i].arguments);
+        }
+        free(tool_calls);
+        free(ms->memory);
+        free(ctx);
+        
+    } else if (ev == MG_EV_ERROR) {
+        const char* err = ev_data ? (const char*) ev_data : "unknown";
+        log_error("[LLM Async] MG_EV_ERROR: %s", err);
+        snprintf(ms->last_error, sizeof(ms->last_error), "%s", err);
+        ms->done = true;
+    }
+}
+
+void llm_provider_call_async(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, LLMAsyncCallback callback, void* user_data) {
+    const char* api_key = get_api_key(config);
+    if (strlen(api_key) == 0) {
+        if (callback) callback(error_new(ERR_INVALID_PARAM, "API Key not set"), NULL, NULL, 0, user_data);
+        return;
+    }
+
+    // Build JSON Request (same logic as sync)
+    cJSON *root = cJSON_CreateObject();
+    const char* model = (config && config->agent.model) ? config->agent.model : "gpt-4-turbo-preview";
+    cJSON_AddStringToObject(root, "model", model);
+    if (config) {
+        cJSON_AddNumberToObject(root, "temperature", config->agent.temperature);
+        if (config->agent.reasoning_effort && strlen(config->agent.reasoning_effort) > 0) {
+             cJSON_AddStringToObject(root, "reasoning_effort", config->agent.reasoning_effort);
+        }
+    }
+
+    cJSON *messages = cJSON_CreateArray();
+    if (system_prompt && strlen(system_prompt) > 0) {
+        cJSON *sys_msg = cJSON_CreateObject();
+        cJSON_AddStringToObject(sys_msg, "role", "system");
+        cJSON_AddStringToObject(sys_msg, "content", system_prompt);
+        cJSON_AddItemToArray(messages, sys_msg);
+    }
+    
+    if (session) {
+        size_t start_idx = 0;
+        size_t max_history = config && config->agent.memory_window > 0 ? (size_t)config->agent.memory_window : 30;
+        if (session->messages.count > max_history) {
+            start_idx = session->messages.count - max_history;
+        }
+        for (size_t i = start_idx; i < session->messages.count; i++) {
+            Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
+            cJSON *json_msg = cJSON_CreateObject();
+            if (msg->role == ROLE_USER) {
+                cJSON_AddStringToObject(json_msg, "role", "user");
+                cJSON_AddStringToObject(json_msg, "content", msg->content.data);
+            } else if (msg->role == ROLE_ASSISTANT) {
+                cJSON_AddStringToObject(json_msg, "role", "assistant");
+                if (msg->content.len > 0) cJSON_AddStringToObject(json_msg, "content", msg->content.data);
+                else cJSON_AddNullToObject(json_msg, "content");
+                if (msg->tool_calls_count > 0) {
+                    cJSON *tcs = cJSON_CreateArray();
+                    for (size_t j = 0; j < msg->tool_calls_count; j++) {
+                        cJSON *tc = cJSON_CreateObject();
+                        cJSON_AddStringToObject(tc, "id", msg->tool_calls[j].id.data);
+                        cJSON_AddStringToObject(tc, "type", "function");
+                        cJSON *func = cJSON_CreateObject();
+                        cJSON_AddStringToObject(func, "name", msg->tool_calls[j].name.data);
+                        cJSON_AddStringToObject(func, "arguments", msg->tool_calls[j].arguments.data);
+                        cJSON_AddItemToObject(tc, "function", func);
+                        cJSON_AddItemToArray(tcs, tc);
+                    }
+                    cJSON_AddItemToObject(json_msg, "tool_calls", tcs);
+                }
+            } else if (msg->role == ROLE_TOOL) {
+                cJSON_AddStringToObject(json_msg, "role", "tool");
+                cJSON_AddStringToObject(json_msg, "content", msg->content.data);
+                if (msg->tool_call_id.len > 0) cJSON_AddStringToObject(json_msg, "tool_call_id", msg->tool_call_id.data);
+            }
+            cJSON_AddItemToArray(messages, json_msg);
+        }
+    }
+    cJSON_AddItemToObject(root, "messages", messages);
+    
+    if (tools && tools->count > 0) {
+        cJSON *tools_json = cJSON_CreateArray();
+        for (size_t i = 0; i < tools->count; i++) {
+            cJSON *tool_item = cJSON_CreateObject();
+            cJSON_AddStringToObject(tool_item, "type", "function");
+            cJSON *func = cJSON_CreateObject();
+            cJSON_AddStringToObject(func, "name", tools->tools[i].def.name.data);
+            cJSON_AddStringToObject(func, "description", tools->tools[i].def.description.data);
+            cJSON *params = cJSON_Parse(tools->tools[i].def.parameters.data);
+            if (params) cJSON_AddItemToObject(func, "parameters", params);
+            else cJSON_AddItemToObject(func, "parameters", cJSON_CreateObject());
+            cJSON_AddItemToObject(tool_item, "function", func);
+            cJSON_AddItemToArray(tools_json, tool_item);
+        }
+        cJSON_AddItemToObject(root, "tools", tools_json);
+        cJSON_AddStringToObject(root, "tool_choice", "auto");
+    }
+    
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    const char* api_base = (config && config->agent.api_base && strlen(config->agent.api_base) > 0) 
+                           ? config->agent.api_base : "https://api.openai.com/v1";
+    size_t url_len = strlen(api_base) + strlen("chat/completions") + 2;
+    char* url = malloc(url_len);
+    if (!url) {
+        if (callback) callback(error_new(ERR_NETWORK, "OOM building URL"), NULL, NULL, 0, user_data);
+        free(json_str);
+        return;
+    }
+    snprintf(url, url_len, "%s%schat/completions", api_base, api_base[strlen(api_base)-1] == '/' ? "" : "/");
+
+    AsyncRequestContext *ctx = calloc(1, sizeof(AsyncRequestContext));
+    ctx->callback = callback;
+    ctx->user_data = user_data;
+    ctx->chunk.capacity = 4096;
+    ctx->chunk.memory = malloc(ctx->chunk.capacity);
+    ctx->chunk.memory[0] = '\0';
+    ctx->start_ms = mg_millis();
+
+    pthread_mutex_lock(&g_async_mutex);
+    llm_provider_configure_mgr_dns(&g_async_mgr, config);
+    struct mg_connection *c = mg_http_connect(&g_async_mgr, url, async_fn, ctx);
+    if (!c) {
+        pthread_mutex_unlock(&g_async_mutex);
+        free(url);
+        free(json_str);
+        free(ctx->chunk.memory);
+        free(ctx);
+        if (callback) callback(error_new(ERR_NETWORK, "Failed to connect to LLM"), NULL, NULL, 0, user_data);
+        return;
+    }
+
+    struct mg_str host = mg_url_host(url);
+    struct mg_tls_opts opts = {0};
+    opts.ca = mg_str("");
+    opts.name = host;
+    opts.skip_verification = should_skip_tls_verification() ? 1 : 0;
+    if (mg_url_is_ssl(url)) {
+        mg_tls_init(c, &opts);
+    }
+
+    mg_printf(c, 
+        "POST %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Authorization: Bearer %s\r\n"
+        "\r\n"
+        "%s",
+        mg_url_uri(url), 
+        (int)host.len, host.buf,
+        (int) strlen(json_str), 
+        api_key,
+        json_str
+    );
+    pthread_mutex_unlock(&g_async_mutex);
+    free(url);
+    free(json_str);
 }
 
 Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, String* response, ToolCall** tool_calls, size_t* tool_calls_count) {

@@ -219,6 +219,34 @@ static void sync_callback(void* context, const char* tool_name, const char* resu
     sync_context_release(ctx);
 }
 
+// Forward declarations
+static void async_callback_wrapper(void* context, const char* tool_name, const char* result, Error err);
+
+typedef struct {
+    ToolAsyncCallback original_callback;
+    void* original_user_data;
+} AsyncCallbackWrapperCtx;
+
+static void async_callback_wrapper(void* context, const char* tool_name, const char* result, Error err) {
+    (void)tool_name;
+    AsyncCallbackWrapperCtx* ctx = (AsyncCallbackWrapperCtx*)context;
+    if (ctx) {
+        if (ctx->original_callback) {
+            ctx->original_callback(err, result, ctx->original_user_data);
+        }
+        free(ctx);
+    }
+}
+
+void tool_executor_submit_async(ToolExecutor* executor, const char* tool_name, const char* args_json, ToolAsyncCallback callback, void* user_data) {
+    AsyncCallbackWrapperCtx* ctx = malloc(sizeof(AsyncCallbackWrapperCtx));
+    if (ctx) {
+        ctx->original_callback = callback;
+        ctx->original_user_data = user_data;
+        tool_executor_submit(executor, tool_name, args_json, ctx, async_callback_wrapper);
+    }
+}
+
 Error tool_executor_execute_sync(ToolExecutor* executor, const char* tool_name,
                                   const char* arguments, String* result, int timeout_ms) {
     if (!executor || !tool_name || !result) {
