@@ -269,6 +269,7 @@ static bool is_token_valid(DingTalkChannelData* data) {
 typedef struct {
     char type[16];
     char path[1024];
+    char url[2048];
     int duration;
 } DingTalkAttachment;
 
@@ -364,12 +365,16 @@ static bool parse_attachment_spec(const char* raw, DingTalkAttachment* out) {
         cJSON* type = cJSON_GetObjectItem(json, "type");
         cJSON* path = cJSON_GetObjectItem(json, "path");
         cJSON* duration = cJSON_GetObjectItem(json, "duration");
+        cJSON* url = cJSON_GetObjectItem(json, "url");
         if (!cJSON_IsString(type) || !type->valuestring || !cJSON_IsString(path) || !path->valuestring) {
             cJSON_Delete(json);
             return false;
         }
         snprintf(out->type, sizeof(out->type), "%s", type->valuestring);
         snprintf(out->path, sizeof(out->path), "%s", path->valuestring);
+        if (cJSON_IsString(url) && url->valuestring) {
+            snprintf(out->url, sizeof(out->url), "%s", url->valuestring);
+        }
         if (cJSON_IsNumber(duration) && duration->valueint > 0) {
             out->duration = duration->valueint;
         }
@@ -514,7 +519,6 @@ static bool dingtalk_send_attachment_message(DingTalkChannelData* data, const ch
         cJSON_AddStringToObject(msg, "msgtype", "image");
         cJSON* image = cJSON_CreateObject();
         cJSON_AddStringToObject(image, "media_id", media_id);
-        cJSON_AddStringToObject(image, "picURL", media_id);
         cJSON_AddItemToObject(msg, "image", image);
     } else if (strcmp(attachment->type, "audio") == 0) {
         cJSON_AddStringToObject(msg, "msgtype", "voice");
@@ -830,65 +834,37 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
     }
 
     bool has_text = msg->content.data && msg->content.data[0] != '\0';
-    char* attachment_fallback_markdown = NULL;
-    char** uploaded_media_ids = NULL;
-    size_t uploaded_media_ids_count = 0;
-    
+    char* merged_content = NULL;
+
     if (msg->attachments.count > 0) {
-        uploaded_media_ids = malloc(msg->attachments.count * sizeof(char*));
         for (size_t i = 0; i < msg->attachments.count; i++) {
             DingTalkAttachment attachment;
             if (!parse_attachment_spec(msg->attachments.items[i].data, &attachment)) {
                 log_error("[DingTalk] Invalid attachment spec: %s", msg->attachments.items[i].data);
                 continue;
             }
-            
-            // Upload attachment to get media_id
-            char* media_id = NULL;
-            log_debug("[DingTalk] Checking session_webhook: %s", session_webhook ? session_webhook : "(null)");
-            if (session_webhook && strncmp(session_webhook, "http", 4) == 0) {
-                // For session webhook, we can upload and send via webhook
-                log_debug("[DingTalk] Using session webhook path for attachment");
-                if (dingtalk_upload_attachment(data, &attachment, &media_id)) {
-                    log_debug("[DingTalk] Uploaded attachment for session webhook: media_id=%s", media_id);
-                    uploaded_media_ids[uploaded_media_ids_count++] = media_id;
-                } else {
-                    log_error("[DingTalk] Attachment upload failed: %s", attachment.path);
-                }
-            } else {
-                // For group chat, use chat/send API
-                log_debug("[DingTalk] Using group chat path for attachment");
-                if (!dingtalk_send_attachment_message(data, conversation_id, &attachment)) {
-                    log_error("[DingTalk] Attachment delivery failed: %s", attachment.path);
-                }
-            }
-            
-            // Prepare fallback markdown if upload failed or no session webhook
-            if (!media_id && strcmp(attachment.type, "image") == 0) {
-                char sidecar_path[2048];
-                if (snprintf(sidecar_path, sizeof(sidecar_path), "%s.url", attachment.path) > 0) {
-                    char* image_url = NULL;
-                    if (read_first_line(sidecar_path, &image_url)) {
-                        if (strncmp(image_url, "http://", 7) == 0 || strncmp(image_url, "https://", 8) == 0) {
-                            char markdown_line[4096];
-                            if (snprintf(markdown_line, sizeof(markdown_line), "![image](%s)", image_url) > 0) {
-                                if (append_markdown_line(&attachment_fallback_markdown, markdown_line)) {
-                                    has_text = true;
-                                    log_warn("[DingTalk] Attachment fallback prepared via image url sidecar");
-                                }
-                            }
-                        }
-                        free(image_url);
+            if (attachment.url[0] != '\0') {
+                char markdown_line[4096];
+                if (snprintf(markdown_line, sizeof(markdown_line), "![image](%s)", attachment.url) > 0) {
+                    if (!merged_content) {
+                        merged_content = strdup(has_text ? msg->content.data : "");
+                    }
+                    char* next = realloc(merged_content, strlen(merged_content) + strlen(markdown_line) + 3);
+                    if (next) {
+                        strcat(next, "\n\n");
+                        strcat(next, markdown_line);
+                        merged_content = next;
+                        has_text = true;
                     }
                 }
             }
         }
-        if (!has_text && uploaded_media_ids_count == 0) {
-            free(attachment_fallback_markdown);
-            free(webhook_buf);
-            free(uploaded_media_ids);
-            return;
-        }
+    }
+
+    if (!has_text) {
+        free(merged_content);
+        free(webhook_buf);
+        return;
     }
 
     struct mg_mgr mgr;
@@ -901,104 +877,12 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
     apply_dns_config(&mgr, data);
 
     if (session_webhook && strncmp(session_webhook, "http", 4) == 0) {
-        // Use session webhook to send message (preferred method for replies)
         log_info("[DingTalk] Sending via session webhook to %s", conversation_id);
 
-        // First, send any uploaded images
-        for (size_t i = 0; i < uploaded_media_ids_count; i++) {
-            cJSON* img_json = cJSON_CreateObject();
-            cJSON_AddStringToObject(img_json, "msgtype", "image");
-            cJSON* image = cJSON_CreateObject();
-            cJSON_AddStringToObject(image, "media_id", uploaded_media_ids[i]);
-             cJSON_AddStringToObject(image, "picURL", uploaded_media_ids[i]);
-            cJSON_AddItemToObject(img_json, "image", image);
-            char* img_json_str = cJSON_PrintUnformatted(img_json);
-            
-            log_debug("[DingTalk] Sending image message: %s", img_json_str);
-            
-            struct MemoryStruct img_chunk = {0};
-            img_chunk.memory = malloc(1);
-            img_chunk.memory[0] = '\0';
-            
-            struct mg_connection *img_c = mg_http_connect(&mgr, session_webhook, webhook_fn, &img_chunk);
-            if (img_c) {
-                struct mg_str host = mg_url_host(session_webhook);
-                struct mg_tls_opts opts = {0};
-                opts.ca = mg_str("");
-                opts.name = host;
-                opts.skip_verification = true;
-                if (mg_url_is_ssl(session_webhook)) {
-                    mg_tls_init(img_c, &opts);
-                }
-                mg_printf(img_c,
-                    "POST %s HTTP/1.1\r\n"
-                    "Host: %.*s\r\n"
-                    "Content-Type: application/json\r\n"
-                    "Accept: */*\r\n"
-                    "Connection: close\r\n"
-                    "Content-Length: %d\r\n"
-                    "\r\n"
-                    "%s",
-                    mg_url_uri(session_webhook),
-                    (int)host.len, host.buf,
-                    (int)strlen(img_json_str),
-                    img_json_str
-                );
-                while (!img_chunk.done) mg_mgr_poll(&mgr, 1000);
-                log_debug("[DingTalk] Image send response: %s", img_chunk.memory);
-            } else {
-                log_error("[DingTalk] Failed to send image message");
-            }
-            mg_mgr_free(&mgr);
-            free(img_chunk.memory);
-            free(img_json_str);
-            cJSON_Delete(img_json);
-            
-            // Re-initialize mgr for next request
-            mg_mgr_init(&mgr);
-            apply_dns_config(&mgr, data);
-        }
-        
-        // Free uploaded media IDs
-        for (size_t i = 0; i < uploaded_media_ids_count; i++) {
-            free(uploaded_media_ids[i]);
-        }
-        free(uploaded_media_ids);
-        uploaded_media_ids = NULL;
-        
-        // Then send text message if there's content
-        if (!has_text) {
-            free(attachment_fallback_markdown);
-            free(webhook_buf);
-            mg_mgr_free(&mgr);
-            free(chunk.memory);
-            return;
-        }
-
-        // Trim leading/trailing whitespace from content
-        const char* content = msg->content.data;
-        char* merged_content = NULL;
-        if (attachment_fallback_markdown) {
-            size_t text_len = has_text && content ? strlen(content) : 0;
-            size_t fallback_len = strlen(attachment_fallback_markdown);
-            size_t total_len = text_len > 0 ? (text_len + 2 + fallback_len) : fallback_len;
-            merged_content = malloc(total_len + 1);
-            if (merged_content) {
-                if (text_len > 0) {
-                    memcpy(merged_content, content, text_len);
-                    merged_content[text_len] = '\n';
-                    merged_content[text_len + 1] = '\n';
-                    memcpy(merged_content + text_len + 2, attachment_fallback_markdown, fallback_len + 1);
-                } else {
-                    memcpy(merged_content, attachment_fallback_markdown, fallback_len + 1);
-                }
-                content = merged_content;
-            }
-        }
+        const char* content = merged_content ? merged_content : msg->content.data;
         while (*content == ' ' || *content == '\n' || *content == '\r') content++;
         log_info("[DingTalk] Reply content: %s", content);
 
-        // Use markdown format for better readability
         cJSON* json = cJSON_CreateObject();
         cJSON_AddStringToObject(json, "msgtype", "markdown");
         cJSON* markdown = cJSON_CreateObject();
@@ -1017,7 +901,6 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
             free(merged_content);
             mg_mgr_free(&mgr);
             free(chunk.memory);
-            free(attachment_fallback_markdown);
             free(webhook_buf);
             return;
         }
@@ -1049,9 +932,8 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
 
         log_info("[DingTalk] Full request sent: POST %s HTTP/1.1", mg_url_uri(session_webhook));
 
-        // Poll with timeout to prevent hanging
         int timeout_count = 0;
-        const int max_timeout = 30; // 30 seconds max
+        const int max_timeout = 30;
         while (!chunk.done && timeout_count < max_timeout) {
             mg_mgr_poll(&mgr, 1000);
             timeout_count++;
@@ -1063,10 +945,8 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
         }
 
         if (chunk.size > 0) {
-            // Log raw response for debugging (hex dump for non-printable chars)
             log_info("[DingTalk] Webhook response (%zu bytes): %s", chunk.size, chunk.memory);
 
-            // Also log hex dump to see any hidden characters
             char hex_buf[256];
             size_t hex_len = chunk.size > 64 ? 64 : chunk.size;
             for (size_t i = 0; i < hex_len; i++) {
@@ -1089,7 +969,6 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
                     log_error("[DingTalk] Webhook send failed: errcode is not a number: %s", chunk.memory);
                 } else {
                     log_warn("[DingTalk] Webhook response missing errcode field: %s", chunk.memory);
-                    // Assume success if status 200 and no errcode (like Go SDK)
                     log_info("[DingTalk] Sent via webhook to %s (no errcode, assuming success)", conversation_id);
                 }
                 cJSON_Delete(resp);
@@ -1105,12 +984,9 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
         free(merged_content);
         mg_mgr_free(&mgr);
         free(chunk.memory);
-        free(attachment_fallback_markdown);
         free(webhook_buf);
 
     } else {
-        // Fallback: use batchSend API (requires user staff IDs, not conversation ID)
-        // This path is kept for compatibility but won't work with conversation IDs
         log_warn("[DingTalk] Falling back to batchSend API (requires staff IDs)");
 
         const char* url = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend";
@@ -1122,11 +998,10 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
         cJSON_AddItemToArray(userIds, cJSON_CreateString(msg->chat_id.data));
         cJSON_AddItemToObject(json, "userIds", userIds);
 
-        // Use sampleMarkdown type with correct fields
         cJSON_AddStringToObject(json, "msgKey", "sampleMarkdown");
 
         cJSON* msgParam = cJSON_CreateObject();
-        cJSON_AddStringToObject(msgParam, "markdown", msg->content.data);
+        cJSON_AddStringToObject(msgParam, "markdown", merged_content ? merged_content : msg->content.data);
         cJSON_AddStringToObject(msgParam, "title", "Primagen");
         char* param_str = cJSON_PrintUnformatted(msgParam);
         cJSON_AddStringToObject(json, "msgParam", param_str);
@@ -1140,9 +1015,9 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
             log_error("[DingTalk] Send failed: connection error");
             free(json_str);
             cJSON_Delete(json);
+            free(merged_content);
             mg_mgr_free(&mgr);
             free(chunk.memory);
-            free(attachment_fallback_markdown);
             free(webhook_buf);
             return;
         }
@@ -1180,7 +1055,6 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
                 cJSON* code = cJSON_GetObjectItem(resp, "code");
                 if (code && code->valueint == 0) {
                     log_info("[DingTalk] Sent to %s", msg->chat_id.data);
-                    // Log full response for debugging
                     char* resp_str = cJSON_PrintUnformatted(resp);
                     log_debug("[DingTalk] Send response: %s", resp_str);
                     free(resp_str);
@@ -1195,9 +1069,9 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
 
         cJSON_Delete(json);
         free(json_str);
+        free(merged_content);
         mg_mgr_free(&mgr);
         free(chunk.memory);
-        free(attachment_fallback_markdown);
         free(webhook_buf);
     }
 }

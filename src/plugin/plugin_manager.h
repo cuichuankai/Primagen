@@ -79,6 +79,14 @@ int plugin_register_command(PluginManager* manager, LoadedPlugin* plugin,
  */
 CommandPluginDef* plugin_manager_get_commands(PluginManager* manager, size_t* out_count);
 
+/**
+ * Get the list of registered channels
+ * @param manager The plugin manager
+ * @param out_count Output parameter for the number of channels
+ * @return Pointer to the internal channels array (do not modify or free)
+ */
+const char** plugin_manager_get_channels(PluginManager* manager, size_t* out_count);
+
 #ifdef __cplusplus
 }
 #endif

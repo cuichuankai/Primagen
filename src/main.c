@@ -335,6 +335,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     tool_ctx->skills_loader = skills_loader;
     tool_ctx->memory = memory;
     tool_ctx->config = cfg;
+    tool_ctx->plugin_mgr = plugin_mgr;
     tool_ctx->workspace = workspace_path;
     strcpy(tool_ctx->current_channel, "cli");
     strcpy(tool_ctx->current_chat_id, "current");

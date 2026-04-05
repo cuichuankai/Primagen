@@ -23,7 +23,7 @@ It combines a message-driven agent loop, dynamic plugin loading, MCP tool plugin
 
 ## What Primagen Provides
 
-- Multi-turn agent loop with tool calling
+- Multi-turn agent loop with tool calling, and state machine per session to manage the conversation flow.
 - Thread-safe message bus between channels and core runtime
 - Dynamic plugin system for channels, tools, and commands
 - Session persistence (`.primagen/sessions`)
@@ -71,6 +71,54 @@ Inbound Channel
 ```
 
 On startup, Primagen initializes config, session/memory, plugins, cron service, and skills, then starts agent and outbound threads.
+
+## Session Isolation
+
+Primagen implements session isolation to ensure independent conversations across different channels and chat contexts:
+
+- **Session Key Format**: `channel:chat_id` (e.g., `feishu:ou_xxx`, `dingtalk:conversationId`)
+- **Session Manager**: Thread-safe session management with per-session mutex locks
+- **Persistence**: Sessions are persisted to `.primagen/sessions/` in JSONL format
+- **Message History**: Each session maintains its own message history for multi-turn conversations
+
+Session file naming uses a compact format: `{channel_prefix}_{hash}.jsonl` to handle long identifiers safely.
+
+## State Machine
+
+AgentLoop implements a state machine per session to manage the conversation flow:
+
+```text
+                    +-------+
+                    | IDLE  |<------------------+
+                    +-------+                   |
+                        |                       |
+           (new message)|                       |(no tool_calls)
+                        v                       |
+                +---------------+               |
+                | WAITING_LLM   |---------------+
+                +---------------+               |
+                        |                       |
+            (tool_calls returned)               |
+                        v                       |
+                +---------------+               |
+                | WAITING_TOOL  |---------------+
+                +---------------+   (tool done, next turn)
+```
+
+**States**:
+
+| State | Description |
+|-------|-------------|
+| `IDLE` | Session is ready to accept new messages |
+| `WAITING_LLM` | LLM request in progress |
+| `WAITING_TOOL` | Tool execution in progress |
+
+**Key Features**:
+
+- **Async Execution**: LLM calls and tool executions are non-blocking
+- **Turn Tracking**: Each session tracks turn count to prevent infinite loops
+- **Max Iterations**: Configurable via `agent.max_tool_iterations` (default: 15)
+- **Concurrent Sessions**: Multiple sessions can be processed in parallel
 
 ## Built-in vs Plugin Components
 

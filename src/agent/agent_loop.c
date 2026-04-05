@@ -570,7 +570,7 @@ void agent_loop_register_builtin_tools(PluginManager* manager, ToolContext* ctx)
             "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}",
             tool_exec},
         {"send_message", "Send message to user. Optional attachments support image/audio/video uploads.",
-            "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"},\"attachments\":{\"type\":\"array\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"image\",\"audio\",\"video\"]},\"path\":{\"type\":\"string\"},\"duration\":{\"type\":\"integer\",\"minimum\":1},\"cover_path\":{\"type\":\"string\"}},\"required\":[\"type\",\"path\"]}]}}},\"required\":[\"content\"]}",
+            "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"},\"attachments\":{\"type\":\"array\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"image\",\"audio\",\"video\"]},\"path\":{\"type\":\"string\"},\"url\":{\"type\":\"string\"},\"duration\":{\"type\":\"integer\",\"minimum\":1},\"cover_path\":{\"type\":\"string\"}},\"required\":[\"type\",\"path\"]}]}}},\"required\":[\"content\"]}",
             tool_send_message},
         {"spawn_subagent", "Spawn subagent",
             "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"task\"]}",

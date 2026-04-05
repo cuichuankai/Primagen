@@ -178,28 +178,17 @@ Error session_manager_save(SessionManager* mgr, Session* session) {
     for (size_t i = 0; i < session->messages.count; i++) {
         Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
 
-        // Use cJSON to properly escape content
+        if (msg->role == ROLE_TOOL) continue;
+        if (msg->role == ROLE_ASSISTANT && msg->content.len == 0) continue;
+
         cJSON* msg_obj = cJSON_CreateObject();
         if (msg->role == ROLE_USER) cJSON_AddStringToObject(msg_obj, "role", "user");
         else if (msg->role == ROLE_ASSISTANT) cJSON_AddStringToObject(msg_obj, "role", "assistant");
         else cJSON_AddStringToObject(msg_obj, "role", "tool");
-        cJSON_AddStringToObject(msg_obj, "content", msg->content.data);
+        if (msg->content.len > 0) {
+            cJSON_AddStringToObject(msg_obj, "content", msg->content.data);
+        }
         cJSON_AddStringToObject(msg_obj, "timestamp", msg->timestamp.data);
-        if (msg->role == ROLE_ASSISTANT && msg->tool_calls_count > 0) {
-            cJSON* tcs = cJSON_CreateArray();
-            for (size_t j = 0; j < msg->tool_calls_count; j++) {
-                cJSON* tc = cJSON_CreateObject();
-                cJSON_AddStringToObject(tc, "id", msg->tool_calls[j].id.data);
-                cJSON_AddStringToObject(tc, "name", msg->tool_calls[j].name.data);
-                cJSON_AddStringToObject(tc, "arguments", msg->tool_calls[j].arguments.data);
-                cJSON_AddItemToArray(tcs, tc);
-            }
-            cJSON_AddItemToObject(msg_obj, "tool_calls", tcs);
-        }
-        if (msg->role == ROLE_TOOL) {
-            if (msg->tool_call_id.len > 0) cJSON_AddStringToObject(msg_obj, "tool_call_id", msg->tool_call_id.data);
-            if (msg->name.len > 0) cJSON_AddStringToObject(msg_obj, "name", msg->name.data);
-        }
 
         char* msg_json = cJSON_PrintUnformatted(msg_obj);
         if (msg_json) {

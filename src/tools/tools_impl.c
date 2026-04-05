@@ -67,6 +67,11 @@ static Error parse_send_message_attachments(cJSON* json, OutboundMessage* msg) {
             cJSON_AddStringToObject(normalized, "cover_path", cover_path);
         }
 
+        char* url = get_json_string(item, "url");
+        if (url) {
+            cJSON_AddStringToObject(normalized, "url", url);
+        }
+
         char* normalized_str = cJSON_PrintUnformatted(normalized);
         cJSON_Delete(normalized);
         if (!normalized_str) {
@@ -88,15 +93,21 @@ static bool is_placeholder_value(const char* s) {
     return false;
 }
 
-static bool is_known_channel(const char* s) {
-    return s && (strcmp(s, "console") == 0 || strcmp(s, "telegram") == 0 ||
-                 strcmp(s, "email") == 0 || strcmp(s, "discord") == 0 ||
-                 strcmp(s, "slack") == 0 || strcmp(s, "dingtalk") == 0 ||
-                 strcmp(s, "feishu") == 0 || strcmp(s, "system") == 0);
+static bool is_registered_channel(ToolContext* ctx, const char* channel) {
+    if (!ctx || !channel || !ctx->plugin_mgr) return false;
+
+    size_t count = 0;
+    const char** channels = plugin_manager_get_channels(ctx->plugin_mgr, &count);
+    if (!channels) return false;
+
+    for (size_t i = 0; i < count; i++) {
+        if (channels[i] && strcmp(channels[i], channel) == 0) return true;
+    }
+    return false;
 }
 
 static const char* resolve_channel(ToolContext* ctx, const char* channel) {
-    if (!is_placeholder_value(channel) && is_known_channel(channel)) return channel;
+    if (!is_placeholder_value(channel) && is_registered_channel(ctx, channel)) return channel;
     if (ctx && ctx->current_channel[0]) return ctx->current_channel;
     return "cli";
 }

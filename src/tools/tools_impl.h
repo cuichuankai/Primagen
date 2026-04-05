@@ -8,6 +8,7 @@
 #include "../include/skills.h"
 #include "../memory/memory.h"
 #include "../include/config.h"
+#include "../plugin/plugin_manager.h"
 #include "tool.h"
 
 typedef struct {
@@ -18,6 +19,7 @@ typedef struct {
     SkillsLoader* skills_loader;
     Memory* memory;
     Config* config;
+    PluginManager* plugin_mgr;
     const char* workspace;
     char current_channel[128];
     char current_chat_id[512];

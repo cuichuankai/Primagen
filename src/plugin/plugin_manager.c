@@ -525,6 +525,10 @@ int plugin_register_tool(PluginManager* manager, LoadedPlugin* plugin,
     return 0;
 }
 
+static char** channel_names = NULL;
+static size_t channel_names_count = 0;
+static size_t channel_names_capacity = 0;
+
 int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
                             const char* name, ChannelCreateFunc create) {
     // Channels are registered directly in main.c's channel array
@@ -559,6 +563,15 @@ int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
     if (manager->channels) {
         dynamic_array_add(manager->channels, &channel);
         log_debug("[Plugin] Registered channel: %s", name);
+
+        if (!channel_names) {
+            channel_names_capacity = 16;
+            channel_names = calloc(channel_names_capacity, sizeof(char*));
+        }
+        if (channel_names_count < channel_names_capacity) {
+            channel_names[channel_names_count++] = strdup(name);
+        }
+
         pthread_mutex_unlock(&manager->lock);
         
         // Link ownership to plugin for cleanup if it's an external plugin
@@ -614,4 +627,12 @@ CommandPluginDef* plugin_manager_get_commands(PluginManager* manager, size_t* ou
     pthread_mutex_unlock(&manager->lock);
 
     return manager->commands;
+}
+
+const char** plugin_manager_get_channels(PluginManager* manager, size_t* out_count) {
+    if (!manager || !out_count) return NULL;
+    pthread_mutex_lock(&manager->lock);
+    *out_count = channel_names_count;
+    pthread_mutex_unlock(&manager->lock);
+    return (const char**)channel_names;
 }
