@@ -855,9 +855,10 @@ Error tool_cron(void* user_data, const char* args_json, String* result) {
     job.name = name;
     job.payload_message = payload;
     job.schedule = schedule;
-    // Defaults or user provided
-    job.channel = (char*) resolve_channel(ctx, channel);
-    job.to = (char*) resolve_chat_id(ctx, chat_id);
+    job.channel = (char*) ctx->current_channel;
+    job.to = (char*) ctx->current_chat_id;
+    if (!job.channel || job.channel[0] == '\0') job.channel = "cli";
+    if (!job.to || job.to[0] == '\0') job.to = "local_user";
     job.deliver = true;
     
     char* job_id = cron_service_add_job(ctx->cron_service, &job);

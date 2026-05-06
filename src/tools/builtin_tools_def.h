@@ -39,8 +39,8 @@ static const BuiltinToolDef BUILTIN_TOOLS_FULL[] = {
     {"skill", "Manage skills",
         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"load\",\"unload\"]},\"name\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
         tool_skill},
-    {"memory", "Manage long-term memory. Use this to consolidate conversation history into persistent memory.",
-        "{\"type\":\"object\",\"properties\":{\"history_entry\":{\"type\":\"string\",\"description\":\"A paragraph summarizing key events/decisions. Start with [YYYY-MM-DD HH:MM].\"},\"memory_update\":{\"type\":\"string\",\"description\":\"Full updated long-term memory content (facts). Return unchanged if no new facts.\"}},\"required\":[\"history_entry\"]}",
+    {"memory", "Manage long-term memory. Use this to consolidate conversation history into persistent memory. IMPORTANT: memory_update is a COMPLETE REPLACEMENT of the entire memory file. You MUST include ALL existing facts plus any new ones, or existing information will be permanently lost. If you only want to add new facts without changing existing ones, use the content parameter instead.",
+        "{\"type\":\"object\",\"properties\":{\"history_entry\":{\"type\":\"string\",\"description\":\"A paragraph summarizing key events/decisions. Start with [YYYY-MM-DD HH:MM].\"},\"memory_update\":{\"type\":\"string\",\"description\":\"COMPLETE REPLACEMENT of the memory file. MUST include ALL existing facts plus any new/updated ones. Missing existing facts will be permanently lost. Copy all existing content first, then modify.\"},\"content\":{\"type\":\"string\",\"description\":\"A single fact to add (safe, won't lose existing data). Use this instead of memory_update when you only need to add new info.\"}},\"required\":[\"history_entry\"]}",
         tool_memory},
 };
 

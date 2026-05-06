@@ -1,6 +1,7 @@
 #include "memory.h"
 #include "../include/common.h"
 #include "../include/utils.h"
+#include "../include/logger.h"
 #include <sys/stat.h>
 #include <ctype.h>
 
@@ -234,6 +235,17 @@ Error memory_append_history(Memory* mem, const char* workspace_path, const char*
 Error memory_set_facts(Memory* mem, const char* memory_update) {
     if (!mem || !memory_update) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
     pthread_mutex_lock(&mem->mutex);
+
+    size_t old_len = mem->memory_md.len;
+    size_t new_len = strlen(memory_update);
+
+    if (old_len > 100 && new_len < old_len / 3) {
+        log_warn("[Memory] Rejecting memory_update: new content (%zu bytes) is less than 1/3 of existing content (%zu bytes). This likely means existing facts were not included. Use the 'content' parameter to add facts safely.",
+                 new_len, old_len);
+        pthread_mutex_unlock(&mem->mutex);
+        return error_new(ERR_INVALID_PARAM, "Rejected: new content is much shorter than existing memory. You MUST include ALL existing facts in memory_update. Use 'content' parameter to safely add new facts without replacing existing ones.");
+    }
+
     string_free(&mem->memory_md);
     mem->memory_md = string_new(memory_update);
     mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
