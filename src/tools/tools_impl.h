@@ -2,6 +2,7 @@
 #define FILESYSTEM_TOOLS_H
 
 #include "../include/common.h"
+#include "../include/utils.h"
 #include "../bus/message_bus.h"
 #include "../include/subagent.h"
 #include "../include/cron.h"
@@ -10,6 +11,9 @@
 #include "../include/config.h"
 #include "../plugin/plugin_manager.h"
 #include "tool.h"
+#include <pthread.h>
+
+#define TOOL_CONTEXT_MAGIC 0x50474E31
 
 typedef struct {
     unsigned int magic;
@@ -21,11 +25,13 @@ typedef struct {
     Config* config;
     PluginManager* plugin_mgr;
     const char* workspace;
+    pthread_mutex_t route_mutex;
     char current_channel[128];
     char current_chat_id[512];
 } ToolContext;
 
 void tool_context_set_route(ToolContext* ctx, const char* channel, const char* chat_id);
+void tool_context_destroy(void* user_data);
 
 // FileSystem tools
 Error tool_read_file(void* user_data, const char* args_json, String* result);

@@ -14,7 +14,9 @@ struct mg_connection;
 typedef void (*DingTalkWSMessageCallback)(const char* conversation_id,
                                            const char* content,
                                            const char* sender_id,
+                                           const char* sender_name,
                                            const char* session_webhook,
+                                           int64_t webhook_expired_time,
                                            void* user_data);
 
 // Opaque handle

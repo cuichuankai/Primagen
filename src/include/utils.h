@@ -53,4 +53,8 @@ char* generate_id(const char* prefix);
  */
 int ensure_directory(const char* path);
 
+const char* str_trim_left(const char* s);
+
+char* str_trim_copy(const char* s);
+
 #endif // UTILS_H

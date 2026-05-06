@@ -46,6 +46,11 @@ int plugin_register_tool(PluginManager* manager, LoadedPlugin* plugin,
                          const char* name, const char* desc,
                          const char* params, ToolExecuteFunc exec, void* user_data);
 
+int plugin_register_tool_with_destroy(PluginManager* manager, LoadedPlugin* plugin,
+                         const char* name, const char* desc,
+                         const char* params, ToolExecuteFunc exec, void* user_data,
+                         ToolUserDataDestroyFunc user_data_destroy);
+
 /**
  * Register a channel factory from a plugin
  * Note: This function is called by plugin code during plugin_init

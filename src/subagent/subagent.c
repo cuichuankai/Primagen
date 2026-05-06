@@ -4,13 +4,26 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include "../include/common.h"
 #include "../include/message.h"
 #include "../tools/tool.h"
+#include "../tools/builtin_tools_def.h"
 #include "../agent/agent_loop.h"
 #include "../bus/message_bus.h"
 #include "../tools/tools_impl.h"
 #include "../providers/llm_provider.h"
+#include <sys/time.h>
+#include <pthread.h>
+
+// Generate thread-safe task ID
+static void generate_subagent_task_id(char* buf, size_t size) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned int seed = (unsigned int)(ts.tv_nsec ^ (unsigned long)pthread_self());
+    unsigned int rand_val = rand_r(&seed) & 0xFFFFFFFF;
+    snprintf(buf, size, "%08x", rand_val);
+}
 
 // Active subagent task tracking
 typedef struct SubagentTaskNode {
@@ -25,13 +38,11 @@ typedef struct SubagentTaskNode {
 } SubagentTaskNode;
 
 struct SubagentManager {
-    void* provider;  // Function pointer
-    char* workspace;
-    MessageBus* bus; // Main bus
-    Config* config;  // Reference to main config
+    SubagentSharedContext* shared;
 
     pthread_mutex_t mutex;
-    SubagentTaskNode* active_tasks;  // Track active subagents
+    SubagentTaskNode* active_tasks;
+    int active_count;
 };
 
 typedef struct {
@@ -46,8 +57,6 @@ typedef struct {
     MessageBus* sub_bus;
     AgentLoop* loop;
     SessionManager* session_mgr;
-    ContextBuilder* ctx_builder;
-    ToolRegistry* tool_reg;
 } SubagentTask;
 
 static void* subagent_loop_thread(void* arg) {
@@ -57,12 +66,90 @@ static void* subagent_loop_thread(void* arg) {
 }
 
 /**
+ * Create shared context for subagents
+ */
+SubagentSharedContext* subagent_shared_context_create(
+    void* provider,
+    const char* workspace,
+    void* bus,
+    Config* config
+) {
+    SubagentSharedContext* shared = calloc(1, sizeof(SubagentSharedContext));
+    if (!shared) return NULL;
+    
+    shared->provider = provider;
+    shared->workspace = strdup(workspace);
+    shared->bus = (MessageBus*)bus;
+    shared->config = config;
+    
+    // Create shared tool registry
+    shared->tool_registry = tool_registry_new();
+    if (!shared->tool_registry) {
+        free(shared->workspace);
+        free(shared);
+        return NULL;
+    }
+    
+    // Create shared context builder
+    shared->ctx_builder = context_builder_new(workspace);
+    if (!shared->ctx_builder) {
+        tool_registry_free(shared->tool_registry);
+        free(shared->workspace);
+        free(shared);
+        return NULL;
+    }
+    
+    // Register subagent tools
+    ToolContext* tool_ctx = calloc(1, sizeof(ToolContext));
+    if (tool_ctx) {
+        tool_ctx->magic = TOOL_CONTEXT_MAGIC;
+        tool_ctx->bus = shared->bus;
+        tool_ctx->workspace = shared->workspace;
+        strcpy(tool_ctx->current_channel, "subagent");
+        pthread_mutex_init(&tool_ctx->route_mutex, NULL);
+        
+        for (size_t i = 0; i < BUILTIN_TOOLS_SUBAGENT_COUNT; i++) {
+            ToolContext* tool_ctx_copy = malloc(sizeof(ToolContext));
+            if (tool_ctx_copy) {
+                memcpy(tool_ctx_copy, tool_ctx, sizeof(ToolContext));
+                pthread_mutex_init(&tool_ctx_copy->route_mutex, NULL);
+                tool_registry_register_full(shared->tool_registry, BUILTIN_TOOLS_SUBAGENT[i].name, BUILTIN_TOOLS_SUBAGENT[i].desc,
+                    BUILTIN_TOOLS_SUBAGENT[i].params, BUILTIN_TOOLS_SUBAGENT[i].exec, tool_ctx_copy, NULL, tool_context_destroy);
+            }
+        }
+        pthread_mutex_destroy(&tool_ctx->route_mutex);
+        free(tool_ctx);
+    }
+    
+    printf("[Subagent] Shared context created with %zu tools\n", shared->tool_registry->count);
+    return shared;
+}
+
+/**
+ * Destroy shared context
+ */
+void subagent_shared_context_destroy(SubagentSharedContext* shared) {
+    if (!shared) return;
+    
+    if (shared->tool_registry) {
+        tool_registry_free(shared->tool_registry);
+    }
+    if (shared->ctx_builder) {
+        context_builder_free(shared->ctx_builder);
+    }
+    free(shared->workspace);
+    free(shared);
+    printf("[Subagent] Shared context destroyed\n");
+}
+
+/**
  * Add a task to the active tasks list
  */
 static void add_active_task(SubagentManager* manager, SubagentTaskNode* node) {
     pthread_mutex_lock(&manager->mutex);
     node->next = manager->active_tasks;
     manager->active_tasks = node;
+    manager->active_count++;
     pthread_mutex_unlock(&manager->mutex);
 }
 
@@ -84,6 +171,7 @@ static void remove_active_task(SubagentManager* manager, const char* task_id) {
             free(current->origin_channel);
             free(current->origin_chat_id);
             free(current);
+            manager->active_count--;
             break;
         }
         prev = current;
@@ -125,6 +213,7 @@ int subagent_manager_cancel_by_session(SubagentManager* manager, const char* ses
 static void* subagent_task_runner(void* arg) {
     SubagentTask* task_data = (SubagentTask*)arg;
     SubagentManager* mgr = task_data->manager;
+    SubagentSharedContext* shared = mgr->shared;
 
     // Create tracking node
     SubagentTaskNode* node = malloc(sizeof(SubagentTaskNode));
@@ -144,62 +233,36 @@ static void* subagent_task_runner(void* arg) {
     // 1. Initialize components
     task_data->sub_bus = message_bus_new();
 
-    // Use unique session key
-    char session_path[512];
-    snprintf(session_path, sizeof(session_path), "%s/sessions/subagent", mgr->workspace);
-    // Ensure dir exists (simplified, session manager handles it usually)
-    task_data->session_mgr = session_manager_new(mgr->workspace);
+    task_data->session_mgr = session_manager_new(shared->workspace);
 
-    task_data->ctx_builder = context_builder_new(mgr->workspace);
-    task_data->tool_reg = tool_registry_new();
+    // Create a copy of the tool registry for thread safety
+    ToolRegistry* sub_tool_registry = tool_registry_new();
+    if (sub_tool_registry && shared->tool_registry) {
+        for (size_t i = 0; i < shared->tool_registry->count; i++) {
+            Tool* src = &shared->tool_registry->tools[i];
+            ToolContext* tool_ctx_copy = malloc(sizeof(ToolContext));
+            if (!tool_ctx_copy) continue;
+            if (src->user_data) {
+                memcpy(tool_ctx_copy, src->user_data, sizeof(ToolContext));
+                pthread_mutex_init(&tool_ctx_copy->route_mutex, NULL);
+            } else {
+                memset(tool_ctx_copy, 0, sizeof(ToolContext));
+                pthread_mutex_init(&tool_ctx_copy->route_mutex, NULL);
+            }
+            tool_registry_register_full(sub_tool_registry, src->def.name.data, src->def.description.data,
+                src->def.parameters.data, src->execute, tool_ctx_copy, src->user_data ? src->user_data_destroy : NULL, tool_context_destroy);
+        }
+    }
 
-    // Register tools directly (subagents don't use PluginManager)
-    // Note: ToolContext fields not explicitly set are NULL
-    ToolContext tool_ctx = {
-        .bus = task_data->sub_bus,
-        .subagent_mgr = mgr,
-        .cron_service = NULL,
-        .skills_loader = NULL,
-        .memory = NULL,
-        .workspace = mgr->workspace
-    };
-    strcpy(tool_ctx.current_channel, "subagent");
-    strncpy(tool_ctx.current_chat_id, task_data->task_id, sizeof(tool_ctx.current_chat_id) - 1);
-    tool_ctx.current_chat_id[sizeof(tool_ctx.current_chat_id) - 1] = '\0';
-
-    // Register all standard tools
-    tool_registry_register(task_data->tool_reg, "read_file", "Read file content",
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
-        tool_read_file, &tool_ctx);
-    tool_registry_register(task_data->tool_reg, "write_file", "Write file content",
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}",
-        tool_write_file, &tool_ctx);
-    tool_registry_register(task_data->tool_reg, "edit_file", "Edit file content",
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_str\":{\"type\":\"string\"},\"new_str\":{\"type\":\"string\"}},\"required\":[\"path\",\"old_str\",\"new_str\"]}",
-        tool_edit_file, &tool_ctx);
-    tool_registry_register(task_data->tool_reg, "list_dir", "List directory contents",
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
-        tool_list_dir, &tool_ctx);
-    tool_registry_register(task_data->tool_reg, "exec", "Execute shell command",
-        "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}",
-        tool_exec, &tool_ctx);
-    tool_registry_register(task_data->tool_reg, "send_message", "Send message to user. Optional attachments support image/audio/video uploads.",
-        "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"},\"attachments\":{\"type\":\"array\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"image\",\"audio\",\"video\"]},\"path\":{\"type\":\"string\"},\"duration\":{\"type\":\"integer\",\"minimum\":1},\"cover_path\":{\"type\":\"string\"}},\"required\":[\"type\",\"path\"]}]}}},\"required\":[\"content\"]}",
-        tool_send_message, &tool_ctx);
-    tool_registry_register(task_data->tool_reg, "spawn_subagent", "Spawn subagent",
-        "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"task\"]}",
-        tool_spawn, &tool_ctx);
-
-    // Create Loop
-    // Subagent uses the SAME config as main agent for now
+    // Create Loop with own tool registry copy for thread safety
     task_data->loop = agent_loop_new(
         task_data->session_mgr,
-        task_data->ctx_builder,
-        task_data->tool_reg,
+        shared->ctx_builder,
+        sub_tool_registry ? sub_tool_registry : shared->tool_registry,
         task_data->sub_bus,
-        mgr->config,
+        shared->config,
         NULL,
-        ".primagen"  // Default workspace path for subagents
+        shared->workspace
     );
 
     // Update tracking node with loop pointer
@@ -208,7 +271,7 @@ static void* subagent_task_runner(void* arg) {
     }
 
     // Set Provider async
-    agent_loop_set_llm_provider_async(task_data->loop, (LLMProviderAsync)mgr->provider);
+    agent_loop_set_llm_provider_async(task_data->loop, (LLMProviderAsync)shared->provider);
 
     // 2. Start Agent Loop Thread
     pthread_t loop_tid;
@@ -223,16 +286,30 @@ static void* subagent_task_runner(void* arg) {
     InboundMessage* task_msg = inbound_message_new(
         "subagent",
         task_data->task_id,
-        task_data->task
+        task_data->task,
+        NULL
     );
     message_bus_send_inbound(task_data->sub_bus, task_msg);
 
     // 4. Relay Outbound Messages (Main Thread of Subagent Task)
-    // We listen to sub_bus outbound and forward to mgr->bus
-    while (task_data->loop->running) {
-        OutboundMessage* out = message_bus_receive_outbound(task_data->sub_bus);
+    uint64_t start_ms = 0;
+    {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        start_ms = (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
+    }
+    uint64_t timeout_ms = 300000;  // 5 minutes timeout
+    int message_count = 0;
+    bool loop_exited = false;
+
+    // Phase 1: Relay messages while agent loop is running
+    while (!loop_exited) {
+        if (!atomic_load(&task_data->loop->running)) {
+            loop_exited = true;
+            break;
+        }
+        OutboundMessage* out = message_bus_receive_outbound_timed(task_data->sub_bus, 1000);
         if (out) {
-            // Forward to main bus
             char content[2048];
             snprintf(content, sizeof(content), "[Subagent %s]: %s", task_data->label, out->content.data);
 
@@ -241,16 +318,48 @@ static void* subagent_task_runner(void* arg) {
                 task_data->origin_chat_id,
                 content
             );
-            message_bus_send_outbound(mgr->bus, relayed);
+            message_bus_send_outbound(shared->bus, relayed);
 
             outbound_message_free(out);
-
-            // For now, assume any response means we are done?
-            // Or maybe keep running?
-            // Let's keep running for a bit or until explicit stop.
-            // But since we have no interactive way to talk to subagent, we stop after first response.
-            // This is a simplification.
+            message_count++;
+        }
+        uint64_t now_ms = 0;
+        {
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            now_ms = (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
+        }
+        if (now_ms - start_ms > timeout_ms) {
+            printf("[Subagent %s] Timed out after %llu ms\n", task_data->task_id,
+                   (unsigned long long)(now_ms - start_ms));
             agent_loop_stop(task_data->loop);
+            loop_exited = true;
+            break;
+        }
+    }
+
+    // Phase 2: Drain remaining messages from queue (race condition fix)
+    // The agent loop may have sent final messages just before setting running=false
+    int drain_attempts = 0;
+    int max_drain_attempts = 5;
+    while (drain_attempts < max_drain_attempts) {
+        OutboundMessage* out = message_bus_receive_outbound_timed(task_data->sub_bus, 200);
+        if (out) {
+            char content[2048];
+            snprintf(content, sizeof(content), "[Subagent %s]: %s", task_data->label, out->content.data);
+
+            OutboundMessage* relayed = outbound_message_new(
+                task_data->origin_channel,
+                task_data->origin_chat_id,
+                content
+            );
+            message_bus_send_outbound(shared->bus, relayed);
+
+            outbound_message_free(out);
+            message_count++;
+            drain_attempts = 0;
+        } else {
+            drain_attempts++;
         }
     }
 
@@ -258,10 +367,12 @@ static void* subagent_task_runner(void* arg) {
     pthread_join(loop_tid, NULL);
 
     agent_loop_free(task_data->loop);
-    tool_registry_free(task_data->tool_reg);
-    context_builder_free(task_data->ctx_builder);
     session_manager_free(task_data->session_mgr);
     message_bus_free(task_data->sub_bus);
+
+    char saved_task_id[32];
+    strncpy(saved_task_id, task_data->task_id, sizeof(saved_task_id) - 1);
+    saved_task_id[sizeof(saved_task_id) - 1] = '\0';
 
     free(task_data->task);
     free(task_data->label);
@@ -271,38 +382,68 @@ static void* subagent_task_runner(void* arg) {
 
     // Remove from active tasks
     if (node) {
-        remove_active_task(mgr, node->task_id);
+        remove_active_task(mgr, saved_task_id);
     }
 
-    printf("[Subagent] Finished.\n");
+    printf("[Subagent %s] Finished with %d messages\n", saved_task_id, message_count);
     return NULL;
 }
 
 SubagentManager* subagent_manager_create(
-    void* provider,
-    const char* workspace,
-    void* bus,
-    Config* config
+    SubagentSharedContext* shared
 ) {
     SubagentManager* manager = malloc(sizeof(SubagentManager));
     if (!manager) return NULL;
 
-    manager->provider = provider;
-    manager->workspace = strdup(workspace);
-    manager->bus = (MessageBus*)bus;
-    manager->config = config;
-
+    manager->shared = shared;
+    manager->active_tasks = NULL;
+    manager->active_count = 0;
     pthread_mutex_init(&manager->mutex, NULL);
 
+    printf("[Subagent] Manager created with shared context\n");
     return manager;
 }
 
 void subagent_manager_destroy(SubagentManager* manager) {
     if (!manager) return;
 
-    free(manager->workspace);
+    pthread_mutex_lock(&manager->mutex);
+    SubagentTaskNode* current = manager->active_tasks;
+    while (current) {
+        if (current->loop) {
+            agent_loop_stop(current->loop);
+        }
+        current = current->next;
+    }
+    pthread_mutex_unlock(&manager->mutex);
+
+    int wait_attempts = 0;
+    while (wait_attempts < 100) {
+        pthread_mutex_lock(&manager->mutex);
+        int count = manager->active_count;
+        pthread_mutex_unlock(&manager->mutex);
+        if (count == 0) break;
+        usleep(100000);
+        wait_attempts++;
+    }
+
+    pthread_mutex_lock(&manager->mutex);
+    current = manager->active_tasks;
+    while (current) {
+        SubagentTaskNode* next = current->next;
+        free(current->origin_channel);
+        free(current->origin_chat_id);
+        free(current);
+        current = next;
+    }
+    manager->active_tasks = NULL;
+    manager->active_count = 0;
+    pthread_mutex_unlock(&manager->mutex);
+
     pthread_mutex_destroy(&manager->mutex);
     free(manager);
+
+    printf("[Subagent] Manager destroyed\n");
 }
 
 char* subagent_manager_spawn(
@@ -311,9 +452,18 @@ char* subagent_manager_spawn(
 ) {
     if (!manager || !request) return NULL;
 
+    pthread_mutex_lock(&manager->mutex);
+    if (manager->active_count >= 8) {
+        pthread_mutex_unlock(&manager->mutex);
+        char* response = malloc(256);
+        if (response) snprintf(response, 256, "Cannot spawn subagent: maximum concurrent subagents (8) reached. Wait for existing tasks to complete.");
+        return response;
+    }
+    pthread_mutex_unlock(&manager->mutex);
+
     // Generate task ID
     char task_id[32];
-    snprintf(task_id, sizeof(task_id), "%08x", rand() % 0xFFFFFFFF);
+    generate_subagent_task_id(task_id, sizeof(task_id));
 
     // Create task data
     SubagentTask* task_data = malloc(sizeof(SubagentTask));

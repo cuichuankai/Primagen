@@ -7,9 +7,6 @@
 #include <time.h>
 #include <pthread.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <errno.h>
 #include <stdbool.h>
 
@@ -17,6 +14,7 @@
 typedef struct {
     char* data;
     size_t len;
+    size_t capacity;
 } String;
 
 typedef struct {

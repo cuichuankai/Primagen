@@ -29,6 +29,7 @@ typedef struct {
     String channel;
     String chat_id;
     String content;
+    String sender_name;
     StringArray attachments;
 } InboundMessage;
 
@@ -66,7 +67,7 @@ typedef struct {
 Message* message_new(MessageRole role, const char* content);
 void message_free(Message* msg);
 void message_add_tool_call(Message* msg, const char* id, const char* name, const char* args);
-InboundMessage* inbound_message_new(const char* channel, const char* chat_id, const char* content);
+InboundMessage* inbound_message_new(const char* channel, const char* chat_id, const char* content, const char* sender_name);
 void inbound_message_free(InboundMessage* msg);
 OutboundMessage* outbound_message_new(const char* channel, const char* chat_id, const char* content);
 void outbound_message_free(OutboundMessage* msg);

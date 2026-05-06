@@ -45,23 +45,6 @@ static void append_custom_headers(struct mg_connection* c, MCPClient* client) {
     }
 }
 
-static const char* get_header_value_ci(struct mg_http_message* hm, const char* header_name) {
-    if (!hm || !header_name) return NULL;
-    size_t target_len = strlen(header_name);
-    for (int i = 0; i < MG_MAX_HTTP_HEADERS; i++) {
-        struct mg_str name = hm->headers[i].name;
-        struct mg_str value = hm->headers[i].value;
-        if (name.len == 0) continue;
-        if (name.len == target_len && strncasecmp(name.buf, header_name, target_len) == 0) {
-            static char buf[1024];
-            size_t n = value.len < sizeof(buf) - 1 ? value.len : sizeof(buf) - 1;
-            memcpy(buf, value.buf, n);
-            buf[n] = '\0';
-            return buf;
-        }
-    }
-    return NULL;
-}
 
 static void streamable_http_queue_append(MCPStreamableHttpTransport* transport, const char* msg) {
     if (!transport || !msg) return;
@@ -183,7 +166,7 @@ static void mcp_streamable_http_post_event_handler(struct mg_connection* c, int 
     if (ev == MG_EV_HTTP_HDRS) {
         struct mg_http_message* hm = (struct mg_http_message*) ev_data;
         ctx->http_status = mg_http_status(hm);
-        const char* sid = get_header_value_ci(hm, "mcp-session-id");
+        const char* sid = get_header_value_ci(hm, "mcp-session-id", (char[1024]){}, 1024);
         if (sid && sid[0] != '\0') {
             size_t sid_len = strlen(sid);
             ctx->session_id = malloc(sid_len + 1);
@@ -193,7 +176,7 @@ static void mcp_streamable_http_post_event_handler(struct mg_connection* c, int 
             }
         }
 
-        const char* ct = get_header_value_ci(hm, "content-type");
+        const char* ct = get_header_value_ci(hm, "content-type", (char[1024]){}, 1024);
         if (ct && ct[0] != '\0') {
             size_t ct_len = strlen(ct);
             size_t n = ct_len < sizeof(ctx->content_type) - 1 ? ct_len : sizeof(ctx->content_type) - 1;

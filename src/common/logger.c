@@ -134,10 +134,11 @@ static void log_v_with_loc(const char* level, const char* fmt, va_list args,
     /* Get current timestamp */
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    struct tm* tm_info = localtime(&tv.tv_sec);
+    struct tm tm_info_buf;
+    localtime_r(&tv.tv_sec, &tm_info_buf);
 
     char timestamp[64];
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &tm_info_buf);
 
     /* Calculate required buffer size */
     va_list args_copy;

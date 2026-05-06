@@ -3,6 +3,9 @@
 
 #include "common.h"
 #include "config.h"
+#include "../bus/message_bus.h"
+#include "../tools/tool.h"
+#include "../context/context_builder.h"
 
 typedef struct SubagentManager SubagentManager;
 
@@ -13,12 +16,26 @@ typedef struct {
     const char* origin_chat_id;
 } SubagentSpawnRequest;
 
-// Functions
-SubagentManager* subagent_manager_create(
+typedef struct {
+    MessageBus* bus;
+    Config* config;
+    void* provider;
+    char* workspace;
+    ToolRegistry* tool_registry;
+    ContextBuilder* ctx_builder;
+} SubagentSharedContext;
+
+SubagentSharedContext* subagent_shared_context_create(
     void* provider,
     const char* workspace,
     void* bus,
     Config* config
+);
+
+void subagent_shared_context_destroy(SubagentSharedContext* shared);
+
+SubagentManager* subagent_manager_create(
+    SubagentSharedContext* shared
 );
 
 void subagent_manager_destroy(SubagentManager* manager);

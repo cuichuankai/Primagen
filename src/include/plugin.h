@@ -82,6 +82,7 @@ typedef struct {
     const char* description;
     const char* plugin_id;  // Unique identifier
     void* metadata;  // Type-specific (ToolPluginDef*, ChannelPluginDef*, etc.)
+    cJSON* (*get_default_config)(void);  // Function to get default configuration
 } PluginInfo;
 
 // =============================================================================
@@ -133,6 +134,11 @@ typedef struct PluginManager {
     size_t command_count;
     size_t command_capacity;
 
+    // Channel names cache
+    char** channel_names;
+    size_t channel_names_count;
+    size_t channel_names_capacity;
+
     pthread_mutex_t lock;
 } PluginManager;
 
@@ -154,9 +160,17 @@ LoadedPlugin* plugin_manager_find_plugin_by_name(PluginManager* manager, const c
 void plugin_manager_free_plugin_snapshot(LoadedPlugin* plugin);
 
 // Registration helpers (for plugins to register themselves)
-int plugin_manager_register_tool(PluginManager* manager, ToolPluginDef* tool_def);
-int plugin_manager_register_channel(PluginManager* manager, struct ChannelPluginDef* channel_def);
-int plugin_manager_register_command(PluginManager* manager, CommandPluginDef* cmd_def);
+int plugin_register_tool(PluginManager* manager, LoadedPlugin* plugin,
+                         const char* name, const char* desc,
+                         const char* params, ToolExecuteFunc exec, void* user_data);
+int plugin_register_tool_with_destroy(PluginManager* manager, LoadedPlugin* plugin,
+                         const char* name, const char* desc,
+                         const char* params, ToolExecuteFunc exec, void* user_data,
+                         ToolUserDataDestroyFunc user_data_destroy);
+int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
+                            const char* name, ChannelCreateFunc create);
+int plugin_register_command(PluginManager* manager, LoadedPlugin* plugin,
+                            const char* name, const char* desc, CommandFunc handler);
 
 // Plugin reloading support
 void plugin_manager_unload_plugin(PluginManager* manager, LoadedPlugin* plugin);

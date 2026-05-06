@@ -10,9 +10,11 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <dirent.h>
+#include <limits.h>
+#include <signal.h>
+#include <sys/select.h>
 
 #define MAX_READ_SIZE 128000
-#define TOOL_CONTEXT_MAGIC 0x50474E31
 
 // Error hint for tool failures (helps LLM recover)
 #define TOOL_ERROR_HINT "\n\n[Analyze the error above and try a different approach.]"
@@ -85,14 +87,6 @@ static Error parse_send_message_attachments(cJSON* json, OutboundMessage* msg) {
     return error_new(ERR_NONE, "");
 }
 
-static bool is_placeholder_value(const char* s) {
-    if (!s || s[0] == '\0') return true;
-    if (strcmp(s, "current") == 0 || strcmp(s, "chat") == 0 ||
-        strcmp(s, "user") == 0 || strcmp(s, "assistant") == 0) return true;
-    if (strncmp(s, "_user_", 6) == 0 || strncmp(s, "_assistant_", 11) == 0) return true;
-    return false;
-}
-
 static bool is_registered_channel(ToolContext* ctx, const char* channel) {
     if (!ctx || !channel || !ctx->plugin_mgr) return false;
 
@@ -118,6 +112,24 @@ static const char* resolve_chat_id(ToolContext* ctx, const char* chat_id) {
     return "current";
 }
 
+static void tool_context_get_route(ToolContext* ctx, char* channel_out, size_t channel_size, char* chat_id_out, size_t chat_id_size) {
+    if (!ctx) {
+        if (channel_out && channel_size > 0) channel_out[0] = '\0';
+        if (chat_id_out && chat_id_size > 0) chat_id_out[0] = '\0';
+        return;
+    }
+    pthread_mutex_lock(&ctx->route_mutex);
+    if (channel_out && channel_size > 0) {
+        strncpy(channel_out, ctx->current_channel, channel_size - 1);
+        channel_out[channel_size - 1] = '\0';
+    }
+    if (chat_id_out && chat_id_size > 0) {
+        strncpy(chat_id_out, ctx->current_chat_id, chat_id_size - 1);
+        chat_id_out[chat_id_size - 1] = '\0';
+    }
+    pthread_mutex_unlock(&ctx->route_mutex);
+}
+
 void tool_context_set_route(ToolContext* ctx, const char* channel, const char* chat_id) {
     if (!ctx) return;
     if (ctx->magic != 0x50474E31) {
@@ -125,6 +137,7 @@ void tool_context_set_route(ToolContext* ctx, const char* channel, const char* c
         return;
     }
     log_debug("[tool_context_set_route] Setting route: channel=%s, chat_id=%s", channel ? channel : "(null)", chat_id ? chat_id : "(null)");
+    pthread_mutex_lock(&ctx->route_mutex);
     if (channel) {
         strncpy(ctx->current_channel, channel, sizeof(ctx->current_channel) - 1);
         ctx->current_channel[sizeof(ctx->current_channel) - 1] = '\0';
@@ -137,18 +150,52 @@ void tool_context_set_route(ToolContext* ctx, const char* channel, const char* c
     } else {
         ctx->current_chat_id[0] = '\0';
     }
+    pthread_mutex_unlock(&ctx->route_mutex);
+}
+
+void tool_context_destroy(void* user_data) {
+    ToolContext* ctx = (ToolContext*)user_data;
+    if (!ctx) return;
+    if (ctx->magic != TOOL_CONTEXT_MAGIC) return;
+    ctx->magic = 0;
+    pthread_mutex_destroy(&ctx->route_mutex);
+    free(ctx);
 }
 
 static bool command_contains_unsafe_token(const char* command) {
     if (!command) return true;
-    const char* tokens[] = {"&&", "||", ";", "|", ">", "<", "`", "$(", "\n", "\r"};
-    size_t n = sizeof(tokens) / sizeof(tokens[0]);
-    for (size_t i = 0; i < n; i++) {
-        if (strstr(command, tokens[i])) return true;
+    if (strstr(command, "../")) return true;
+    if (strstr(command, "$(")) return true;
+    if (strstr(command, "${")) return true;
+    if (strchr(command, '`')) return true;
+    size_t cmd_len = strlen(command);
+    for (size_t i = 0; i < cmd_len; i++) {
+        if (command[i] == '$' && i + 1 < cmd_len &&
+            (command[i+1] == '(' || command[i+1] == '{' ||
+             (command[i+1] >= 'A' && command[i+1] <= 'Z') ||
+             (command[i+1] >= 'a' && command[i+1] <= 'z') ||
+             command[i+1] == '_')) {
+            return true;
+        }
     }
-    if (strncmp(command, "/", 1) == 0) return true;
-    if (strstr(command, " ../") || strstr(command, "../")) return true;
     return false;
+}
+
+static bool is_path_within_workspace(const char* path, const char* workspace) {
+    if (!path || !workspace) return false;
+    char resolved[4096];
+    char ws_resolved[4096];
+    if (realpath(path, resolved) == NULL) {
+        if (path[0] == '/') return false;
+        char full[4096];
+        snprintf(full, sizeof(full), "%s/%s", workspace, path);
+        if (realpath(full, resolved) == NULL) return false;
+    }
+    if (realpath(workspace, ws_resolved) == NULL) return false;
+    size_t ws_len = strlen(ws_resolved);
+    if (strncmp(resolved, ws_resolved, ws_len) != 0) return false;
+    if (resolved[ws_len] != '/' && resolved[ws_len] != '\0') return false;
+    return true;
 }
 
 static char* shell_escape_single_quotes(const char* input) {
@@ -287,7 +334,8 @@ Error tool_skill(void* user_data, const char* args_json, String* result) {
             return error_new(ERR_INVALID_PARAM, "Missing 'name' argument for load action");
         }
         
-        char* content = skills_loader_load_skill(ctx->skills_loader, name);
+        // Use path hints version to help LLM find correct script paths
+        char* content = skills_loader_load_skill_with_path_hints(ctx->skills_loader, name);
         if (content) {
             *result = string_new(content);
             free(content);
@@ -306,9 +354,8 @@ Error tool_skill(void* user_data, const char* args_json, String* result) {
 }
 
 Error tool_read_file(void* user_data, const char* args_json, String* result) {
-    (void)user_data;
+    ToolContext* ctx = (ToolContext*)user_data;
 
-    // Validate and cast parameters
     char* error_msg = NULL;
     char* casted_args = tool_validate_and_cast_params(args_json,
         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
@@ -337,6 +384,14 @@ Error tool_read_file(void* user_data, const char* args_json, String* result) {
     if (!path) {
         cJSON_Delete(json);
         return error_new(ERR_INVALID_PARAM, "Missing 'path' argument");
+    }
+
+    if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config &&
+        (ctx->config->tools.restrict_to_workspace || ctx->config->tools.exec.restrict_to_workspace)) {
+        if (!is_path_within_workspace(path, ctx->workspace)) {
+            cJSON_Delete(json);
+            return error_new(ERR_TOOL, "Access denied: path is outside workspace");
+        }
     }
     
     FILE* fp = fopen(path, "r");
@@ -389,7 +444,7 @@ Error tool_read_file(void* user_data, const char* args_json, String* result) {
 }
 
 Error tool_write_file(void* user_data, const char* args_json, String* result) {
-    (void)user_data;
+    ToolContext* ctx = (ToolContext*)user_data;
     cJSON* json = cJSON_Parse(args_json);
     if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
     
@@ -399,6 +454,14 @@ Error tool_write_file(void* user_data, const char* args_json, String* result) {
     if (!path || !content) {
         cJSON_Delete(json);
         return error_new(ERR_INVALID_PARAM, "Missing 'path' or 'content' argument");
+    }
+
+    if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config &&
+        (ctx->config->tools.restrict_to_workspace || ctx->config->tools.exec.restrict_to_workspace)) {
+        if (!is_path_within_workspace(path, ctx->workspace)) {
+            cJSON_Delete(json);
+            return error_new(ERR_TOOL, "Access denied: path is outside workspace");
+        }
     }
     
     ensure_dir(path);
@@ -418,7 +481,7 @@ Error tool_write_file(void* user_data, const char* args_json, String* result) {
 }
 
 Error tool_edit_file(void* user_data, const char* args_json, String* result) {
-    (void)user_data;
+    ToolContext* ctx = (ToolContext*)user_data;
     cJSON* json = cJSON_Parse(args_json);
     if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
     
@@ -429,6 +492,14 @@ Error tool_edit_file(void* user_data, const char* args_json, String* result) {
     if (!path || !old_str || !new_str) {
         cJSON_Delete(json);
         return error_new(ERR_INVALID_PARAM, "Missing arguments");
+    }
+
+    if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config &&
+        (ctx->config->tools.restrict_to_workspace || ctx->config->tools.exec.restrict_to_workspace)) {
+        if (!is_path_within_workspace(path, ctx->workspace)) {
+            cJSON_Delete(json);
+            return error_new(ERR_TOOL, "Access denied: path is outside workspace");
+        }
     }
     
     FILE* fp = fopen(path, "r");
@@ -498,13 +569,21 @@ Error tool_edit_file(void* user_data, const char* args_json, String* result) {
 }
 
 Error tool_list_dir(void* user_data, const char* args_json, String* result) {
-    (void)user_data;
+    ToolContext* ctx = (ToolContext*)user_data;
     cJSON* json = cJSON_Parse(args_json);
     if (!json) return error_new(ERR_JSON, "Invalid JSON arguments");
     
     char* path = get_json_string(json, "path");
     if (!path) path = "."; 
-    
+
+    if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config &&
+        (ctx->config->tools.restrict_to_workspace || ctx->config->tools.exec.restrict_to_workspace)) {
+        if (!is_path_within_workspace(path, ctx->workspace)) {
+            cJSON_Delete(json);
+            return error_new(ERR_TOOL, "Access denied: path is outside workspace");
+        }
+    }
+
     DIR* d = opendir(path);
     if (!d) {
         cJSON_Delete(json);
@@ -548,57 +627,109 @@ Error tool_exec(void* user_data, const char* args_json, String* result) {
         return error_new(ERR_INVALID_PARAM, "Missing 'command' argument");
     }
 
-    char* shell_cmd = NULL;
     bool restrict_exec = true;
     if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config) {
         restrict_exec = ctx->config->tools.exec.restrict_to_workspace || ctx->config->tools.restrict_to_workspace;
     }
+
     if (restrict_exec) {
         if (command_contains_unsafe_token(command)) {
             cJSON_Delete(json);
             return error_new(ERR_TOOL, "Command rejected by workspace restriction policy");
         }
-        const char* workspace = (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->workspace) ? ctx->workspace : ".";
-        char* escaped_workspace = shell_escape_single_quotes(workspace);
-        if (!escaped_workspace) {
-            cJSON_Delete(json);
-            return error_new(ERR_MEMORY, "Memory allocation failed");
+    }
+
+    const char* workspace = (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->workspace) ? ctx->workspace : ".";
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        cJSON_Delete(json);
+        return error_new(ERR_TOOL, "Failed to create pipe");
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        cJSON_Delete(json);
+        return error_new(ERR_TOOL, "Failed to fork");
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+
+        if (restrict_exec && workspace) {
+            chdir(workspace);
         }
-        asprintf(&shell_cmd, "cd '%s' && %s 2>&1", escaped_workspace, command);
-        free(escaped_workspace);
-    } else {
-        asprintf(&shell_cmd, "%s 2>&1", command);
-    }
-    if (!shell_cmd) {
-        cJSON_Delete(json);
-        return error_new(ERR_MEMORY, "Memory allocation failed");
+
+        char* shell_args[] = {"sh", "-c", (char*)command, NULL};
+        execvp("sh", shell_args);
+        _exit(127);
     }
 
-    FILE* fp = popen(shell_cmd, "r");
-    free(shell_cmd);
+    close(pipefd[1]);
 
-    if (!fp) {
-        cJSON_Delete(json);
-        return error_new(ERR_TOOL, "Failed to execute command");
-    }
-
-    char buffer[1024];
     *result = string_new("");
+    char buffer[4096];
+    ssize_t n;
 
-    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+    int timeout_secs = 300;
+    if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config) {
+        timeout_secs = ctx->config->tools.exec.timeout;
+    }
+    
+    fd_set read_fds;
+    struct timeval tv;
+    bool timed_out = false;
+    time_t start_time = time(NULL);
+
+    while (1) {
+        FD_ZERO(&read_fds);
+        FD_SET(pipefd[0], &read_fds);
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        
+        int sel = select(pipefd[0] + 1, &read_fds, NULL, NULL, &tv);
+        if (sel < 0) break;
+        
+        if (sel == 0) {
+            if (time(NULL) - start_time >= timeout_secs) {
+                timed_out = true;
+                break;
+            }
+            continue;
+        }
+        
+        n = read(pipefd[0], buffer, sizeof(buffer) - 1);
+        if (n <= 0) break;
+        buffer[n] = '\0';
         string_append(result, buffer);
     }
+    close(pipefd[0]);
 
-    int status = pclose(fp);
-    char status_str[128];
-    if (WIFEXITED(status)) {
-        snprintf(status_str, sizeof(status_str), "\nExit code: %d", WEXITSTATUS(status));
-    } else if (WIFSIGNALED(status)) {
-        snprintf(status_str, sizeof(status_str), "\nTerminated by signal: %d", WTERMSIG(status));
+    int status;
+    if (timed_out) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+        string_append(result, "\n[TIMEOUT] Command timed out after ");
+        char timeout_str[32];
+        snprintf(timeout_str, sizeof(timeout_str), "%d seconds", timeout_secs);
+        string_append(result, timeout_str);
     } else {
-        snprintf(status_str, sizeof(status_str), "\nExit status: %d", status);
+        waitpid(pid, &status, 0);
+        char status_str[128];
+        if (WIFEXITED(status)) {
+            snprintf(status_str, sizeof(status_str), "\nExit code: %d", WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            snprintf(status_str, sizeof(status_str), "\nTerminated by signal: %d", WTERMSIG(status));
+        } else {
+            snprintf(status_str, sizeof(status_str), "\nExit status: %d", status);
+        }
+        string_append(result, status_str);
     }
-    string_append(result, status_str);
 
     cJSON_Delete(json);
     return error_new(ERR_NONE, "");

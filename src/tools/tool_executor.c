@@ -78,15 +78,12 @@ ToolExecutor* tool_executor_new(ToolRegistry* tool_reg, size_t num_workers) {
 
     // Auto-detect number of workers
     if (num_workers == 0) {
-        num_workers = sysconf(_SC_NPROCESSORS_ONLN);
-        if (num_workers < 2) num_workers = 2;
+        num_workers = 2;
     }
 
-    // Initialize queue
     pthread_mutex_init(&executor->queue_mutex, NULL);
     pthread_cond_init(&executor->queue_cond, NULL);
 
-    // Create worker threads
     executor->num_workers = num_workers;
     executor->workers = malloc(num_workers * sizeof(ToolExecutorWorker));
     if (!executor->workers) {
@@ -94,12 +91,18 @@ ToolExecutor* tool_executor_new(ToolRegistry* tool_reg, size_t num_workers) {
         return NULL;
     }
 
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 32 * 1024);
+
     for (size_t i = 0; i < num_workers; i++) {
         executor->workers[i].executor = executor;
         executor->workers[i].worker_id = i;
-        pthread_create(&executor->workers[i].thread, NULL,
+        pthread_create(&executor->workers[i].thread, &attr,
                        tool_executor_worker, &executor->workers[i]);
     }
+
+    pthread_attr_destroy(&attr);
 
     log_debug("[ToolExecutor] Created with %zu workers", num_workers);
     return executor;
@@ -240,10 +243,16 @@ static void async_callback_wrapper(void* context, const char* tool_name, const c
 
 void tool_executor_submit_async(ToolExecutor* executor, const char* tool_name, const char* args_json, ToolAsyncCallback callback, void* user_data) {
     AsyncCallbackWrapperCtx* ctx = malloc(sizeof(AsyncCallbackWrapperCtx));
-    if (ctx) {
-        ctx->original_callback = callback;
-        ctx->original_user_data = user_data;
-        tool_executor_submit(executor, tool_name, args_json, ctx, async_callback_wrapper);
+    if (!ctx) {
+        if (callback) callback(error_new(ERR_MEMORY, "OOM allocating async context"), NULL, user_data);
+        return;
+    }
+    ctx->original_callback = callback;
+    ctx->original_user_data = user_data;
+    int ret = tool_executor_submit(executor, tool_name, args_json, ctx, async_callback_wrapper);
+    if (ret != 0) {
+        free(ctx);
+        if (callback) callback(error_new(ERR_TOOL, "Failed to submit tool execution"), NULL, user_data);
     }
 }
 

@@ -31,13 +31,13 @@ static void* console_input_loop(void* arg) {
             // Actually main joins agent_thread, which runs forever. 
             // We need a way to stop agent loop.
             // Sending a special message?
-            InboundMessage* msg = inbound_message_new("system", "local_user", "exit");
+            InboundMessage* msg = inbound_message_new("system", "local_user", "exit", NULL);
             message_bus_send_inbound(data->bus, msg);
             break;
         }
         
         if (strlen(buffer) > 0) {
-            InboundMessage* msg = inbound_message_new("console", "local_user", buffer);
+            InboundMessage* msg = inbound_message_new("console", "local_user", buffer, NULL);
             message_bus_send_inbound(data->bus, msg);
         }
         
@@ -69,8 +69,6 @@ static void console_start(Channel* self) {
 static void console_stop(Channel* self) {
     ConsoleData* data = (ConsoleData*)self->user_data;
     data->running = false;
-    // pthread_cancel(data->thread_id); // Unsafe, better to let it finish or detach
-    // Since fgets is blocking, it's hard to stop cleanly without signals or select
 }
 
 static void console_send(Channel* self, OutboundMessage* msg) {
@@ -87,12 +85,7 @@ static void console_destroy(Channel* self) {
     if (data) {
         data->running = false;
         if (data->thread_started) {
-#if defined(__ANDROID__)
             pthread_detach(data->thread_id);
-#else
-            pthread_cancel(data->thread_id);
-            pthread_join(data->thread_id, NULL);
-#endif
         }
         free(data);
     }

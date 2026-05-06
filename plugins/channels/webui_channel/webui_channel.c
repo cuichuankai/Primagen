@@ -271,7 +271,7 @@ static void handle_chat_send(struct mg_connection* c, struct mg_http_message* hm
         send_json(c, 400, "{\"error\":\"message_length_invalid\"}");
         return;
     }
-    InboundMessage* inbound = inbound_message_new("webui", chat_id->valuestring, message->valuestring);
+    InboundMessage* inbound = inbound_message_new("webui", chat_id->valuestring, message->valuestring, NULL);
     if (!inbound) {
         cJSON_Delete(req);
         send_json(c, 500, "{\"error\":\"alloc_failed\"}");

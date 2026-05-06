@@ -7,7 +7,7 @@
 typedef struct FeishuWS FeishuWS;
 
 // Callback for received text messages
-typedef void (*FeishuWSMessageCallback)(const char* chat_id, const char* content, const char* sender_id, void* user_data);
+typedef void (*FeishuWSMessageCallback)(const char* chat_id, const char* content, const char* sender_id, const char* sender_name, void* user_data);
 
 FeishuWS* feishu_ws_create();
 void feishu_ws_destroy(FeishuWS* ws);

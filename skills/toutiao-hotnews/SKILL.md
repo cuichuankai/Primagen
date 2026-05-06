@@ -24,7 +24,7 @@ description: 抓取多个科技媒体 24 小时内热点新闻的综合技能。
 
 ```bash
 # 抓取 36 氪 (默认)
-.primagen/skills/toutiao-hotnews/scripts/rss_fetch.sh
+skills/toutiao-hotnews/scripts/rss_fetch.sh
 
 ```
 
@@ -32,13 +32,13 @@ description: 抓取多个科技媒体 24 小时内热点新闻的综合技能。
 
 ```bash
 # 抓取虎嗅网
-.primagen/skills/toutiao-hotnews/scripts/rss_fetch.sh huxiu
+skills/toutiao-hotnews/scripts/rss_fetch.sh huxiu
 
 # 抓取艾瑞网
-.primagen/skills/toutiao-hotnews/scripts/rss_fetch.sh iresearch
+skills/toutiao-hotnews/scripts/rss_fetch.sh iresearch
 
 # 抓取爱范儿
-.primagen/skills/toutiao-hotnews/scripts/rss_fetch.sh appsolution
+skills/toutiao-hotnews/scripts/rss_fetch.sh appsolution
 
 ```
 
@@ -48,23 +48,23 @@ description: 抓取多个科技媒体 24 小时内热点新闻的综合技能。
 # 语法：脚本 [新闻源] [小时数] [文章数量]
 
 # 抓取 36 氪最近 12 小时的 5 篇新闻
-.primagen/skills/toutiao-hotnews/scripts/rss_fetch.sh 36kr 12 5
+skills/toutiao-hotnews/scripts/rss_fetch.sh 36kr 12 5
 
 # 抓取虎嗅网最近 3 天 (72 小时) 的 20 篇新闻
-.primagen/skills/toutiao-hotnews/scripts/rss_fetch.sh huxiu 72 20
+skills/toutiao-hotnews/scripts/rss_fetch.sh huxiu 72 20
 
 # 抓取所有新闻源最近 24 小时的各 10 篇新闻
-.primagen/skills/toutiao-hotnews/scripts/rss_fetch.sh all 24 10
+skills/toutiao-hotnews/scripts/rss_fetch.sh all 24 10
 
 # 抓取所有新闻源最近一周 (168 小时) 的各 15 篇新闻
-.primagen/skills/toutiao-hotnews/scripts/rss_fetch.sh all 168 15
+skills/toutiao-hotnews/scripts/rss_fetch.sh all 168 15
 
 ```
 
 ### 查看帮助信息
 
 ```bash
-.primagen/skills/toutiao-hotnews/scripts/rss_fetch.sh --help
+skills/toutiao-hotnews/scripts/rss_fetch.sh --help
 ```
 
 ### 输出格式

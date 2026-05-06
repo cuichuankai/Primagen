@@ -126,7 +126,7 @@ Config* config_create() {
     cfg->agent.api_base = strdup("https://api.openai.com/v1");
     cfg->agent.temperature = 0.1;
     cfg->agent.max_tokens = 4096;
-    cfg->agent.max_tool_iterations = 40;
+    cfg->agent.max_tool_iterations = 15;
     cfg->agent.memory_window = 100;
     cfg->agent.reasoning_effort = strdup("medium");
 
@@ -136,63 +136,21 @@ Config* config_create() {
     cfg->tools.exec.path_append = strdup("");
     cfg->tools.restrict_to_workspace = true;
 
-    cfg->dns.dns4 = NULL;
-    cfg->dns.dns6 = NULL;
-    cfg->dns.dns_timeout_ms = 0;
+    cfg->dns.dns4 = strdup("8.8.8.8");
+    cfg->dns.dns6 = strdup("2001:4860:4860::8888");
+    cfg->dns.dns4_url = strdup("udp://8.8.8.8:53");
+    cfg->dns.dns6_url = strdup("udp://2001:4860:4860::8888:53");
+    cfg->dns.dns_timeout_ms = 5000;
     cfg->dns.use_system_resolver = false;
 
     // Default heartbeat config
     cfg->heartbeat.enabled = true;
     cfg->heartbeat.interval_s = 300;
 
-    // Allocate plugins on heap (not stack!) so they persist after function returns
-    cfg->plugins.items = malloc(6 * sizeof(PluginConfig));
-    if (!cfg->plugins.items) {
-        cfg->plugins.count = 0;
-        cfg->plugins.capacity = 0;
-    } else {
-        cfg->plugins.count = 6;
-        cfg->plugins.capacity = 6;
-
-        cfg->plugins.items[0].plugin_id = strdup("feishu_channel");
-        cfg->plugins.items[0].enabled = false;
-        cfg->plugins.items[0].config = cJSON_CreateObject();
-        cJSON_AddStringToObject(cfg->plugins.items[0].config, "app_id", "");
-        cJSON_AddStringToObject(cfg->plugins.items[0].config, "app_secret", "");
-        cJSON_AddBoolToObject(cfg->plugins.items[0].config, "use_card", false);
-        cJSON_AddNullToObject(cfg->plugins.items[0].config, "allow_from");
-
-        cfg->plugins.items[1].plugin_id = strdup("dingtalk_channel");
-        cfg->plugins.items[1].enabled = false;
-        cfg->plugins.items[1].config = cJSON_CreateObject();
-        cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientId", "");
-        cJSON_AddStringToObject(cfg->plugins.items[1].config, "clientSecret", "");
-        cJSON_AddBoolToObject(cfg->plugins.items[1].config, "use_card", false);
-        cJSON_AddNullToObject(cfg->plugins.items[1].config, "allow_from");
-
-        cfg->plugins.items[2].plugin_id = strdup("web_tools");
-        cfg->plugins.items[2].enabled = true;
-        cfg->plugins.items[2].config = cJSON_CreateObject();
-        cJSON_AddBoolToObject(cfg->plugins.items[2].config, "search_enabled", true);
-        cJSON_AddStringToObject(cfg->plugins.items[2].config, "search_api_key", "");
-        cJSON_AddStringToObject(cfg->plugins.items[2].config, "proxy", "");
-
-        cfg->plugins.items[3].plugin_id = strdup("webui_channel");
-        cfg->plugins.items[3].enabled = false;
-        cfg->plugins.items[3].config = cJSON_CreateObject();
-        cJSON_AddNumberToObject(cfg->plugins.items[3].config, "port", 16714);
-
-        cfg->plugins.items[4].plugin_id = strdup("acp_channel");
-        cfg->plugins.items[4].enabled = false;
-        cfg->plugins.items[4].config = cJSON_CreateObject();
-        cJSON_AddNumberToObject(cfg->plugins.items[4].config, "port", 8080);
-        cJSON_AddStringToObject(cfg->plugins.items[4].config, "host", "127.0.0.1");
-
-        cfg->plugins.items[5].plugin_id = strdup("mcp_tools");
-        cfg->plugins.items[5].enabled = false;
-        cfg->plugins.items[5].config = cJSON_CreateObject();
-        cJSON_AddItemToObject(cfg->plugins.items[5].config, "servers", cJSON_CreateArray());
-    }
+    // Initialize plugins with empty list
+    cfg->plugins.items = NULL;
+    cfg->plugins.count = 0;
+    cfg->plugins.capacity = 0;
 
     // Default log config
     cfg->log.level = strdup("INFO");
@@ -211,6 +169,8 @@ void config_destroy(Config* cfg) {
     free(cfg->tools.exec.path_append);
     free(cfg->dns.dns4);
     free(cfg->dns.dns6);
+    free(cfg->dns.dns4_url);
+    free(cfg->dns.dns6_url);
     
     free(cfg->log.level);
 
@@ -248,9 +208,13 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
 
     fseek(fp, 0, SEEK_END);
     long length = ftell(fp);
+    if (length < 0) {
+        fclose(fp);
+        return false;
+    }
     fseek(fp, 0, SEEK_SET);
     
-    char* data = malloc(length + 1);
+    char* data = malloc((size_t)length + 1);
     if (!data) {
         fclose(fp);
         return false;
@@ -289,7 +253,7 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
         }
         if ((item = cJSON_GetObjectItem(agent, "temperature"))) cfg->agent.temperature = get_json_double(item, 0.1);
         if ((item = cJSON_GetObjectItem(agent, "max_tokens"))) cfg->agent.max_tokens = get_json_int(item, 4096);
-        if ((item = cJSON_GetObjectItem(agent, "max_tool_iterations"))) cfg->agent.max_tool_iterations = get_json_int(item, 40);
+        if ((item = cJSON_GetObjectItem(agent, "max_tool_iterations"))) cfg->agent.max_tool_iterations = get_json_int(item, 15);
         if ((item = cJSON_GetObjectItem(agent, "memory_window"))) cfg->agent.memory_window = get_json_int(item, 100);
         if ((item = cJSON_GetObjectItem(agent, "memory_max_tokens"))) cfg->agent.memory_max_tokens = get_json_int(item, 4000);
         if ((item = cJSON_GetObjectItem(agent, "memory_consolidation_threshold"))) cfg->agent.memory_consolidation_threshold = get_json_double(item, 0.8);
@@ -342,6 +306,21 @@ bool config_load_from_file(Config* cfg, const char* filepath) {
         if ((item = cJSON_GetObjectItem(dns, "useSystemResolver"))) {
             cfg->dns.use_system_resolver = get_json_bool(item, false);
         }
+    }
+
+    free(cfg->dns.dns4_url);
+    cfg->dns.dns4_url = NULL;
+    if (cfg->dns.dns4 && cfg->dns.dns4[0]) {
+        size_t len = strlen(cfg->dns.dns4) + 16;
+        cfg->dns.dns4_url = malloc(len);
+        if (cfg->dns.dns4_url) snprintf(cfg->dns.dns4_url, len, "udp://%s:53", cfg->dns.dns4);
+    }
+    free(cfg->dns.dns6_url);
+    cfg->dns.dns6_url = NULL;
+    if (cfg->dns.dns6 && cfg->dns.dns6[0]) {
+        size_t len = strlen(cfg->dns.dns6) + 16;
+        cfg->dns.dns6_url = malloc(len);
+        if (cfg->dns.dns6_url) snprintf(cfg->dns.dns6_url, len, "udp://%s:53", cfg->dns.dns6);
     }
     
     // Heartbeat Config
@@ -478,13 +457,39 @@ void config_load_from_env(Config* cfg) {
 
 }
 
+Error config_validate(const Config* cfg) {
+    if (!cfg) {
+        return error_new(ERR_INVALID_PARAM, "Config is NULL");
+    }
+    if (!cfg->agent.model || cfg->agent.model[0] == '\0') {
+        return error_new(ERR_INVALID_PARAM, "agent.model must not be empty");
+    }
+    if (cfg->agent.max_tokens <= 0) {
+        return error_new(ERR_INVALID_PARAM, "agent.max_tokens must be greater than 0");
+    }
+    if (cfg->agent.temperature < 0.0 || cfg->agent.temperature > 2.0) {
+        return error_new(ERR_INVALID_PARAM, "agent.temperature must be between 0.0 and 2.0");
+    }
+    if (cfg->tools.exec.timeout <= 0) {
+        return error_new(ERR_INVALID_PARAM, "tool.timeout must be greater than 0");
+    }
+    if (!cfg->log.level || cfg->log.level[0] == '\0') {
+        return error_new(ERR_INVALID_PARAM, "log.level must not be empty");
+    }
+    return error_new(ERR_NONE, "");
+}
+
 bool config_save_to_file(Config* cfg, const char* filepath) {
     cJSON* json = cJSON_CreateObject();
     
     // Agent
     cJSON* agent = cJSON_CreateObject();
     cJSON_AddStringToObject(agent, "model", cfg->agent.model);
-    cJSON_AddStringToObject(agent, "apiKey", cfg->agent.api_key);
+    if (cfg->agent.api_key && strlen(cfg->agent.api_key) > 0) {
+        cJSON_AddStringToObject(agent, "apiKey", "***REDACTED***");
+    } else {
+        cJSON_AddStringToObject(agent, "apiKey", "");
+    }
     cJSON_AddStringToObject(agent, "apiBase", cfg->agent.api_base);
     cJSON_AddNumberToObject(agent, "temperature", cfg->agent.temperature);
     cJSON_AddNumberToObject(agent, "max_tokens", cfg->agent.max_tokens);

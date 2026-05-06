@@ -401,7 +401,7 @@ void acp_handle_chat_completions(struct mg_connection* nc, ACPServer* server, co
     log_debug("[ACP] Chat completion request, session: %s, message: %s", session_id, user_message);
 
     // Create inbound message and send to agent loop
-    InboundMessage* inbound_msg = inbound_message_new("acp", session_id, user_message);
+    InboundMessage* inbound_msg = inbound_message_new("acp", session_id, user_message, NULL);
     if (inbound_msg) {
         message_bus_send_inbound(server->bus, inbound_msg);
         log_debug("[ACP] Message sent to agent loop, session: %s", session_id);

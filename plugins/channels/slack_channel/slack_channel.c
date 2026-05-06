@@ -170,12 +170,12 @@ static void slack_send(Channel* self, OutboundMessage* msg) {
 
     struct mg_str host = mg_url_host(url);
     mg_printf(c,
-        "POST %s HTTP/1.0\n"
-        "Host: %.*s\n"
-        "Authorization: Bearer %s\n"
-        "Content-Type: application/json; charset=utf-8\n"
-        "Content-Length: %d\n"
-        "\n"
+        "POST %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "Authorization: Bearer %s\r\n"
+        "Content-Type: application/json; charset=utf-8\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
         "%s",
         mg_url_uri(url),
         (int)host.len, host.buf,

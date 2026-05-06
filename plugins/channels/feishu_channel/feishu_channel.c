@@ -33,7 +33,7 @@
 typedef struct FeishuWS FeishuWS;
 
 // Callback for received text messages
-typedef void (*FeishuWSMessageCallback)(const char* chat_id, const char* content, const char* sender_id, void* user_data);
+typedef void (*FeishuWSMessageCallback)(const char* chat_id, const char* content, const char* sender_id, const char* sender_name, void* user_data);
 
 FeishuWS* feishu_ws_create(void);
 void feishu_ws_destroy(FeishuWS* ws);
@@ -47,12 +47,16 @@ void feishu_ws_stop(FeishuWS* ws);
 // =============================================================================
 
 typedef struct {
+    char* open_id;
+    char* name;
+} UserNameCacheEntry;
+
+typedef struct {
     MessageBus* bus;
     bool running;
     char* access_token;
     pthread_t thread_id;
     FeishuWS* ws;
-    // Plugin configuration
     char* app_id;
     char* app_secret;
     bool use_card;
@@ -60,6 +64,9 @@ typedef struct {
     char* dns6;
     int dns_timeout_ms;
     bool use_system_resolver;
+    UserNameCacheEntry* user_cache;
+    size_t user_cache_count;
+    size_t user_cache_capacity;
 } FeishuChannelData;
 
 struct MemoryStruct {
@@ -110,7 +117,13 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
         c->is_closing = 1;
         ms->done = true;
     } else if (ev == MG_EV_ERROR) {
+        const char* err = ev_data ? (const char*) ev_data : "unknown";
+        log_error("[Feishu] HTTP connection error: %s", err);
         ms->done = true;
+    } else if (ev == MG_EV_CLOSE) {
+        if (!ms->done) {
+            log_debug("[Feishu] HTTP connection closed");
+        }
     }
 }
 
@@ -129,6 +142,8 @@ static void refresh_token(FeishuChannelData* data) {
     char* json_str = cJSON_PrintUnformatted(payload);
 
     const char* url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal";
+
+    log_debug("[Feishu] Refreshing token from: %s", url);
 
     struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
     if (!c) {
@@ -151,10 +166,11 @@ static void refresh_token(FeishuChannelData* data) {
     }
 
     mg_printf(c,
-        "POST %s HTTP/1.0\r\n"
+        "POST %s HTTP/1.1\r\n"
         "Host: %.*s\r\n"
         "Content-Type: application/json; charset=utf-8\r\n"
         "Content-Length: %d\r\n"
+        "Connection: close\r\n"
         "\r\n"
         "%s",
         mg_url_uri(url),
@@ -163,7 +179,17 @@ static void refresh_token(FeishuChannelData* data) {
         json_str
     );
 
-    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+    uint64_t start = (uint64_t)(time(NULL) * 1000);
+    const int timeout_ms = 10000;
+    while (!chunk.done) {
+        mg_mgr_poll(&mgr, 100);
+        uint64_t now = (uint64_t)(time(NULL) * 1000);
+        if (now - start > timeout_ms) {
+            log_error("[Feishu] Token refresh timeout after %dms", timeout_ms);
+            c->is_closing = 1;
+            break;
+        }
+    }
 
     if (chunk.size > 0) {
         cJSON* resp = cJSON_Parse(chunk.memory);
@@ -178,6 +204,7 @@ static void refresh_token(FeishuChannelData* data) {
                 if (cJSON_IsString(token)) {
                     if (data->access_token) free(data->access_token);
                     data->access_token = strdup(token->valuestring);
+                    log_debug("[Feishu] Token refreshed successfully");
                 }
             }
             cJSON_Delete(resp);
@@ -192,6 +219,121 @@ static void refresh_token(FeishuChannelData* data) {
     free(json_str);
     cJSON_Delete(payload);
     mg_mgr_free(&mgr);
+}
+
+static const char* user_cache_lookup(FeishuChannelData* data, const char* open_id) {
+    if (!data || !open_id) return NULL;
+    for (size_t i = 0; i < data->user_cache_count; i++) {
+        if (data->user_cache[i].open_id &&
+            strcmp(data->user_cache[i].open_id, open_id) == 0) {
+            return data->user_cache[i].name;
+        }
+    }
+    return NULL;
+}
+
+static void user_cache_store(FeishuChannelData* data, const char* open_id, const char* name) {
+    if (!data || !open_id || !name) return;
+    if (data->user_cache_count >= data->user_cache_capacity) {
+        size_t new_cap = data->user_cache_capacity == 0 ? 32 : data->user_cache_capacity * 2;
+        UserNameCacheEntry* new_cache = realloc(data->user_cache, new_cap * sizeof(UserNameCacheEntry));
+        if (!new_cache) return;
+        data->user_cache = new_cache;
+        data->user_cache_capacity = new_cap;
+    }
+    data->user_cache[data->user_cache_count].open_id = strdup(open_id);
+    data->user_cache[data->user_cache_count].name = strdup(name);
+    data->user_cache_count++;
+}
+
+static char* feishu_get_user_name(FeishuChannelData* data, const char* open_id) {
+    if (!data || !open_id) return NULL;
+
+    const char* cached = user_cache_lookup(data, open_id);
+    if (cached) return strdup(cached);
+
+    if (!data->access_token) refresh_token(data);
+    if (!data->access_token) return NULL;
+
+    struct mg_mgr mgr;
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.memory[0] = '\0';
+
+    mg_mgr_init(&mgr);
+    apply_dns_config(&mgr, data);
+
+    char url_buf[512];
+    snprintf(url_buf, sizeof(url_buf),
+             "https://open.feishu.cn/open-apis/contact/v3/users/%s?user_id_type=open_id",
+             open_id);
+
+    struct mg_connection* c = mg_http_connect(&mgr, url_buf, fn, &chunk);
+    if (!c) {
+        log_error("[Feishu] Failed to connect for user info lookup");
+        mg_mgr_free(&mgr);
+        free(chunk.memory);
+        return NULL;
+    }
+
+    struct mg_str host = mg_url_host(url_buf);
+    struct mg_tls_opts opts = {0};
+    opts.ca = mg_str("");
+    opts.name = host;
+    opts.skip_verification = true;
+    if (mg_url_is_ssl(url_buf)) {
+        mg_tls_init(c, &opts);
+    }
+
+    char auth_header[512];
+    snprintf(auth_header, sizeof(auth_header), "Bearer %s", data->access_token);
+
+    mg_printf(c,
+        "GET %s HTTP/1.1\r\n"
+        "Host: %.*s\r\n"
+        "Authorization: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        mg_url_uri(url_buf),
+        (int)host.len, host.buf,
+        auth_header);
+
+    uint64_t start = (uint64_t)(time(NULL) * 1000);
+    const int timeout_ms = 5000;
+    while (!chunk.done) {
+        mg_mgr_poll(&mgr, 100);
+        uint64_t now = (uint64_t)(time(NULL) * 1000);
+        if (now - start > timeout_ms) {
+            log_warn("[Feishu] User info lookup timeout for %s", open_id);
+            c->is_closing = 1;
+            break;
+        }
+    }
+
+    char* result = NULL;
+    if (chunk.size > 0) {
+        cJSON* resp = cJSON_Parse(chunk.memory);
+        if (resp) {
+            cJSON* code = cJSON_GetObjectItem(resp, "code");
+            if (code && code->valueint == 0) {
+                cJSON* data_obj = cJSON_GetObjectItem(resp, "data");
+                cJSON* user = data_obj ? cJSON_GetObjectItem(data_obj, "user") : NULL;
+                cJSON* name_obj = user ? cJSON_GetObjectItem(user, "name") : NULL;
+                if (name_obj && cJSON_IsString(name_obj) && name_obj->valuestring) {
+                    result = strdup(name_obj->valuestring);
+                    user_cache_store(data, open_id, result);
+                    log_debug("[Feishu] Cached user name: %s -> %s", open_id, result);
+                }
+            } else {
+                log_debug("[Feishu] User info API returned code: %d", code ? code->valueint : -1);
+            }
+            cJSON_Delete(resp);
+        }
+    }
+
+    free(chunk.memory);
+    mg_mgr_free(&mgr);
+    return result;
 }
 
 static char* get_ws_url(FeishuChannelData* data) {
@@ -795,17 +937,31 @@ static bool feishu_send_attachment(FeishuChannelData* data, const char* receive_
     return ok;
 }
 
-static void on_feishu_message(const char* chat_id, const char* content, const char* sender_id, void* user_data) {
+static void on_feishu_message(const char* chat_id, const char* content, const char* sender_id, const char* sender_name, void* user_data) {
+    (void)sender_name;
     FeishuChannelData* data = (FeishuChannelData*)user_data;
-    log_info("[Feishu] Received from %s: %s", sender_id, content);
 
-    // Create InboundMessage
-    InboundMessage* msg = inbound_message_new("feishu", chat_id, content);
+    char* resolved_name = NULL;
+    if (sender_id && sender_id[0] != '\0') {
+        resolved_name = feishu_get_user_name(data, sender_id);
+    }
+
+    if (resolved_name) {
+        log_info("[Feishu] Received from %s (%s): %s", sender_id, resolved_name, content);
+    } else {
+        log_info("[Feishu] Received from %s: %s", sender_id ? sender_id : "unknown", content);
+    }
+
+    InboundMessage* msg = inbound_message_new("feishu", chat_id, content, resolved_name);
     message_bus_send_inbound(data->bus, msg);
+
+    if (resolved_name) free(resolved_name);
 }
 
 static void* feishu_receive_loop(void* arg) {
     FeishuChannelData* data = (FeishuChannelData*)arg;
+    int reconnect_attempt = 0;
+    const int max_reconnect_attempts = 10;
 
     while (data->running) {
         char* url = get_ws_url(data);
@@ -815,18 +971,32 @@ static void* feishu_receive_loop(void* arg) {
             feishu_ws_set_dns(data->ws, data->dns4, data->dns6, data->dns_timeout_ms, data->use_system_resolver);
             if (feishu_ws_connect(data->ws, url)) {
                 log_info("[Feishu] WebSocket connected.");
+                reconnect_attempt = 0;
                 feishu_ws_run(data->ws, on_feishu_message, data);
             } else {
-                log_error("[Feishu] WebSocket connect failed.");
+                reconnect_attempt++;
+                log_error("[Feishu] WebSocket connect failed (attempt %d/%d)", reconnect_attempt, max_reconnect_attempts);
             }
             feishu_ws_destroy(data->ws);
             data->ws = NULL;
             free(url);
         } else {
-            log_error("[Feishu] Failed to get WebSocket URL");
+            reconnect_attempt++;
+            log_error("[Feishu] Failed to get WebSocket URL (attempt %d/%d)", reconnect_attempt, max_reconnect_attempts);
         }
 
-        if (data->running) sleep(5);
+        if (reconnect_attempt >= max_reconnect_attempts) {
+            log_error("[Feishu] Max reconnect attempts (%d) reached. Channel stopped.", max_reconnect_attempts);
+            data->running = false;
+            break;
+        }
+
+        if (data->running) {
+            int delay = reconnect_attempt < 6 ? (1 << reconnect_attempt) : 60;
+            if (delay > 60) delay = 60;
+            log_warn("[Feishu] Reconnect in %ds", delay);
+            sleep(delay);
+        }
     }
     return NULL;
 }
@@ -1009,6 +1179,11 @@ static void feishu_destroy(Channel* self) {
         if (data->dns4) free(data->dns4);
         if (data->dns6) free(data->dns6);
         if (data->ws) feishu_ws_destroy(data->ws);
+        for (size_t i = 0; i < data->user_cache_count; i++) {
+            free(data->user_cache[i].open_id);
+            free(data->user_cache[i].name);
+        }
+        free(data->user_cache);
         free(data);
     }
     free(self);

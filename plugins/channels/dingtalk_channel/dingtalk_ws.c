@@ -354,11 +354,13 @@ static bool is_duplicate_event(DingTalkWS* ws, const char* event_id) {
 
 static void handle_event_json(DingTalkWS* ws, const char* event_json) {
     cJSON *root, *type_item, *headers, *data_item, *message_id;
-    cJSON *parsed_data, *conversation_id, *text_content, *sender_id, *msg_type;
-    cJSON *session_webhook_item;
+    cJSON *parsed_data, *conversation_id, *text_content, *sender_id, *sender_nick, *msg_type;
+    cJSON *session_webhook_item, *webhook_expired_item;
     const char* type_str = NULL;
     const char* data_str = NULL;
     const char* session_webhook_str = NULL;
+    const char* sender_name_str = NULL;
+    int64_t webhook_expired_time = 0;
 
     if (!event_json) return;
 
@@ -411,8 +413,13 @@ static void handle_event_json(DingTalkWS* ws, const char* event_json) {
         conversation_id = cJSON_GetObjectItem(parsed_data, "conversationId");
         text_content = cJSON_GetObjectItem(parsed_data, "text");
         sender_id = cJSON_GetObjectItem(parsed_data, "senderId");
+        sender_nick = cJSON_GetObjectItem(parsed_data, "senderNick");
         msg_type = cJSON_GetObjectItem(parsed_data, "msgtype");
         session_webhook_item = cJSON_GetObjectItem(parsed_data, "sessionWebhook");
+
+        if (sender_nick && cJSON_IsString(sender_nick)) {
+            sender_name_str = sender_nick->valuestring;
+        }
 
         // Extract session webhook URL if present
         if (session_webhook_item && cJSON_IsString(session_webhook_item)) {
@@ -420,10 +427,15 @@ static void handle_event_json(DingTalkWS* ws, const char* event_json) {
             log_info("[DingTalk] Session webhook URL found: %s", session_webhook_str);
         } else {
             log_warn("[DingTalk] No sessionWebhook field in CALLBACK data");
-            // Log full parsed data for debugging
             char* debug_json = cJSON_PrintUnformatted(parsed_data);
             log_info("[DingTalk] CALLBACK data content: %s", debug_json ? debug_json : "null");
             free(debug_json);
+        }
+
+        webhook_expired_item = cJSON_GetObjectItem(parsed_data, "sessionWebhookExpiredTime");
+        if (webhook_expired_item && cJSON_IsNumber(webhook_expired_item)) {
+            webhook_expired_time = (int64_t)webhook_expired_item->valuedouble;
+            log_info("[DingTalk] Session webhook expires at: %lld", (long long)webhook_expired_time);
         }
 
         // Handle different message types
@@ -451,11 +463,16 @@ static void handle_event_json(DingTalkWS* ws, const char* event_json) {
 
         // Send to callback
         if (conversation_id && cJSON_IsString(conversation_id) && text && ws->callback) {
-            log_info("[DingTalk] Message from %s: %s",
-                    sender_id ? sender_id->valuestring : "unknown", text);
+            log_info("[DingTalk] Message from %s (%s): %s",
+                    sender_id ? sender_id->valuestring : "unknown",
+                    sender_name_str ? sender_name_str : "",
+                    text);
             ws->callback(conversation_id->valuestring, text,
                         sender_id ? sender_id->valuestring : NULL,
-                        session_webhook_str, ws->user_data);
+                        sender_name_str,
+                        session_webhook_str,
+                        webhook_expired_time,
+                        ws->user_data);
         }
 
         // Send ACK for CALLBACK messages

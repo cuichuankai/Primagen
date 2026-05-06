@@ -94,12 +94,13 @@ void message_add_tool_call(Message* msg, const char* id, const char* name, const
     msg->tool_calls_count++;
 }
 
-InboundMessage* inbound_message_new(const char* channel, const char* chat_id, const char* content) {
+InboundMessage* inbound_message_new(const char* channel, const char* chat_id, const char* content, const char* sender_name) {
     InboundMessage* msg = malloc(sizeof(InboundMessage));
     if (!msg) return NULL;
     msg->channel = string_new(channel);
     msg->chat_id = string_new(chat_id);
     msg->content = string_new(content);
+    msg->sender_name = sender_name ? string_new(sender_name) : string_new("");
     msg->attachments = string_array_new();
     return msg;
 }
@@ -109,6 +110,7 @@ void inbound_message_free(InboundMessage* msg) {
     string_free(&msg->channel);
     string_free(&msg->chat_id);
     string_free(&msg->content);
+    string_free(&msg->sender_name);
     string_array_free(&msg->attachments);
     free(msg);
 }

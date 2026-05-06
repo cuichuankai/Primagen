@@ -5,24 +5,42 @@
 #include "../include/message.h"
 #include <pthread.h>
 
-typedef struct {
-    String key; // "channel:chat_id"
-    DynamicArray messages; // Message*
+#define SESSION_HASHTABLE_BUCKETS 64
+
+/*
+ * Lock ordering protocol (must be followed to prevent deadlocks):
+ *   1. SessionManager.rwlock  (read or write)
+ *   2. Session.mutex
+ *
+ * Never acquire in reverse order. If Session.mutex is held,
+ * do not attempt to acquire SessionManager.rwlock.
+ */
+
+typedef struct Session Session;
+
+typedef struct SessionEntry {
+    Session* session;
+    struct SessionEntry* next;
+} SessionEntry;
+
+struct Session {
+    String key;
+    DynamicArray messages;
     time_t created_at;
     time_t updated_at;
     size_t last_consolidated;
     pthread_mutex_t mutex;
-} Session;
+    int ref_count;
+};
 
 typedef struct {
-    Session** sessions;
+    SessionEntry* buckets[SESSION_HASHTABLE_BUCKETS];
     size_t count;
-    size_t capacity;
     String workspace_path;
     pthread_mutex_t mutex;
+    pthread_rwlock_t rwlock;
 } SessionManager;
 
-// Functions
 SessionManager* session_manager_new(const char* workspace_path);
 void session_manager_free(SessionManager* mgr);
 Session* session_manager_get(SessionManager* mgr, const char* key);
@@ -30,5 +48,7 @@ Session* session_manager_create(SessionManager* mgr, const char* key);
 Error session_manager_save(SessionManager* mgr, Session* session);
 Error session_manager_load(SessionManager* mgr, const char* key, Session** session);
 void session_add_message(Session* session, Message* msg);
+Session* session_ref(Session* session);
+void session_unref(Session* session);
 
-#endif // SESSION_H
+#endif

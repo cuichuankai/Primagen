@@ -44,7 +44,7 @@ static void add_fact_unlocked(Memory* mem, const char* fact) {
     }
     size_t fact_len = strlen(fact);
     bool need_newline = (insert_idx > 0 && mem->memory_md.data[insert_idx - 1] != '\n');
-    size_t new_total_len = mem->memory_md.len + fact_len + 20;
+    size_t new_total_len = mem->memory_md.len + fact_len + 64;
     char* new_data = malloc(new_total_len);
     if (!new_data) return;
     if (insert_idx > 0) {
@@ -105,11 +105,13 @@ Error memory_load(Memory* mem, const char* workspace_path) {
     f = fopen(path, "r");
     if (f) {
         fseek(f, 0, SEEK_END);
-        size_t size = ftell(f);
+        long fsize = ftell(f);
         fseek(f, 0, SEEK_SET);
+        if (fsize < 0) fsize = 0;
+        size_t size = (size_t)fsize;
         char* buf = malloc(size + 1);
         if (buf) {
-            fread(buf, 1, size, f);
+            if (size > 0) fread(buf, 1, size, f);
             buf[size] = '\0';
             string_free(&mem->memory_md);
             mem->memory_md = string_new(buf);
@@ -133,11 +135,13 @@ Error memory_load(Memory* mem, const char* workspace_path) {
     f = fopen(path, "r");
     if (f) {
         fseek(f, 0, SEEK_END);
-        size_t size = ftell(f);
+        long fsize = ftell(f);
         fseek(f, 0, SEEK_SET);
+        if (fsize < 0) fsize = 0;
+        size_t size = (size_t)fsize;
         char* buf = malloc(size + 1);
         if (buf) {
-            fread(buf, 1, size, f);
+            if (size > 0) fread(buf, 1, size, f);
             buf[size] = '\0';
             string_free(&mem->history_md);
             mem->history_md = string_new(buf);
@@ -315,7 +319,8 @@ Error memory_consolidate(Memory* mem, const char* workspace_path) {
         }
     }
     if (old_part) {
-            char* line = strtok(old_part, "\n");
+            char* saveptr = NULL;
+            char* line = strtok_r(old_part, "\n", &saveptr);
             int added = 0;
             while (line && added < 5) {
                 while (*line && isspace((unsigned char)*line)) line++;
@@ -330,7 +335,7 @@ Error memory_consolidate(Memory* mem, const char* workspace_path) {
                         added++;
                     }
                 }
-                line = strtok(NULL, "\n");
+                line = strtok_r(NULL, "\n", &saveptr);
             }
         free(old_part);
     }

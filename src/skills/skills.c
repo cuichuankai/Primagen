@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "../include/common.h"
+#include "../include/utils.h"
 #include "../vendor/cJSON/cJSON.h"
 
 struct SkillsLoader {
@@ -33,8 +34,8 @@ static char* read_file(const char* path) {
     char* buffer = malloc(length + 1);
     if (!buffer) { fclose(fp); return NULL; }
     
-    fread(buffer, 1, length, fp);
-    buffer[length] = '\0';
+    size_t bytes_read = fread(buffer, 1, length, fp);
+    buffer[bytes_read] = '\0';
     fclose(fp);
     return buffer;
 }
@@ -45,7 +46,8 @@ static bool command_exists(const char* cmd) {
     if (!path_env) return false;
     
     char* path = strdup(path_env);
-    char* token = strtok(path, ":");
+    char* saveptr = NULL;
+    char* token = strtok_r(path, ":", &saveptr);
     char full_path[1024];
     
     while (token) {
@@ -54,7 +56,7 @@ static bool command_exists(const char* cmd) {
             free(path);
             return true;
         }
-        token = strtok(NULL, ":");
+        token = strtok_r(NULL, ":", &saveptr);
     }
     
     free(path);
@@ -194,35 +196,6 @@ void skills_loader_destroy(SkillsLoader* loader) {
     free(loader);
 }
 
-// Helper to escape XML
-static char* escape_xml(const char* s) {
-    if (!s) return strdup("");
-    // Simplified escape: & < >
-    // Calculate len
-    size_t len = 0;
-    const char* p = s;
-    while (*p) {
-        if (*p == '&') len += 5;
-        else if (*p == '<') len += 4;
-        else if (*p == '>') len += 4;
-        else len++;
-        p++;
-    }
-    
-    char* out = malloc(len + 1);
-    char* d = out;
-    p = s;
-    while (*p) {
-        if (*p == '&') { strcpy(d, "&amp;"); d += 5; }
-        else if (*p == '<') { strcpy(d, "&lt;"); d += 4; }
-        else if (*p == '>') { strcpy(d, "&gt;"); d += 4; }
-        else { *d++ = *p; }
-        p++;
-    }
-    *d = 0;
-    return out;
-}
-
 // Helper: Check if skill name already exists in array
 static bool skill_name_exists(StringArray* arr, const char* name) {
     for (size_t i = 0; i < arr->count; i++) {
@@ -319,45 +292,116 @@ char* skills_loader_load_skill(SkillsLoader* loader, const char* name) {
     return NULL;
 }
 
+char* skills_loader_load_skill_with_path_hints(SkillsLoader* loader, const char* name) {
+    if (!loader || !name) return NULL;
+
+    // First: Check workspace skills (highest priority)
+    char workspace_skill_path[1024];
+    snprintf(workspace_skill_path, sizeof(workspace_skill_path), "%s/skills/%s/SKILL.md", loader->workspace, name);
+
+    if (file_exists(workspace_skill_path)) {
+        char* content = read_file(workspace_skill_path);
+        if (!content) return NULL;
+
+        // Find skill directory and add path hints for scripts
+        char skill_dir[1024];
+        snprintf(skill_dir, sizeof(skill_dir), "%s/skills/%s", loader->workspace, name);
+
+        // Add path hint section at the end
+        char* hint_section = malloc(512);
+        if (hint_section) {
+            snprintf(hint_section, 512, 
+                "\n\n[Execution Path Hint]\n"
+                "Script files in this skill are located at: %s/scripts/\n"
+                "Use relative path from workspace: skills/%s/scripts/<script_name>\n",
+                skill_dir, name);
+
+            size_t content_len = strlen(content);
+            size_t hint_len = strlen(hint_section);
+            char* combined = realloc(content, content_len + hint_len + 1);
+            if (combined) {
+                memcpy(combined + content_len, hint_section, hint_len + 1);
+                free(hint_section);
+                return combined;
+            }
+            free(hint_section);
+        }
+        return content;
+    }
+
+    // Second: Check builtin skills
+    if (loader->builtin_skills_dir) {
+        char builtin_skill_path[1024];
+        snprintf(builtin_skill_path, sizeof(builtin_skill_path), "%s/%s/SKILL.md", loader->builtin_skills_dir, name);
+
+        if (file_exists(builtin_skill_path)) {
+            char* content = read_file(builtin_skill_path);
+            if (content) {
+                char* hint_section = malloc(512);
+                if (hint_section) {
+                    snprintf(hint_section, 512,
+                        "\n\n[Execution Path Hint]\n"
+                        "Script files in this skill are located at: %s/%s/scripts/\n"
+                        "Use relative path: skills/%s/scripts/<script_name>\n",
+                        loader->builtin_skills_dir, name, name);
+
+                    size_t content_len = strlen(content);
+                    size_t hint_len = strlen(hint_section);
+                    char* combined = realloc(content, content_len + hint_len + 1);
+                    if (combined) {
+                        memcpy(combined + content_len, hint_section, hint_len + 1);
+                        free(hint_section);
+                        return combined;
+                    }
+                    free(hint_section);
+                }
+            }
+            return content;
+        }
+    }
+
+    return NULL;
+}
+
 char* skills_loader_load_skills_for_context(SkillsLoader* loader, StringArray* skill_names) {
     if (!skill_names || skill_names->count == 0) return strdup("");
     
-    // Estimate size (rough)
-    size_t total_size = 0;
+    size_t total_size = 1024;
+    char** contents = calloc(skill_names->count, sizeof(char*));
+    if (!contents) return strdup("");
+    
     for (size_t i = 0; i < skill_names->count; i++) {
-        char* content = skills_loader_load_skill(loader, skill_names->items[i].data);
-        if (content) {
-            total_size += strlen(content) + 100; // Headers + margin
-            free(content);
+        contents[i] = skills_loader_load_skill(loader, skill_names->items[i].data);
+        if (contents[i]) {
+            total_size += strlen(contents[i]) + 100;
         }
     }
     
-    if (total_size == 0) return strdup("");
-    
-    char* result = malloc(total_size + 1);
+    char* result = malloc(total_size);
+    if (!result) {
+        for (size_t i = 0; i < skill_names->count; i++) free(contents[i]);
+        free(contents);
+        return strdup("");
+    }
     result[0] = 0;
+    size_t pos = 0;
     
     for (size_t i = 0; i < skill_names->count; i++) {
-        char* content = skills_loader_load_skill(loader, skill_names->items[i].data);
-        if (content) {
-            // Strip frontmatter
-            char* body = content;
-            if (strncmp(content, "---\n", 4) == 0) {
-                char* end = strstr(content + 4, "\n---\n");
+        if (contents[i]) {
+            char* body = contents[i];
+            if (strncmp(contents[i], "---\n", 4) == 0) {
+                char* end = strstr(contents[i] + 4, "\n---\n");
                 if (end) body = end + 5;
             }
             
-            strcat(result, "### Skill: ");
-            strcat(result, skill_names->items[i].data);
-            strcat(result, "\n\n");
-            strcat(result, body);
-            strcat(result, "\n\n---\n\n");
+            pos += snprintf(result + pos, total_size - pos, "### Skill: %s\n\n%s\n\n---\n\n", skill_names->items[i].data, body);
+            if (pos >= total_size) pos = total_size - 1;
             
-            free(content);
+            free(contents[i]);
         }
     }
+    free(contents);
     
-    // Remove last separator if present
     size_t len = strlen(result);
     if (len > 7 && strcmp(result + len - 7, "\n---\n\n") == 0) {
         result[len - 7] = 0;
@@ -394,10 +438,21 @@ static void add_skill_xml(SkillsSummaryCtx* ctx, const char* name, const char* b
     char* name_esc = escape_xml(name);
     char* desc_esc = escape_xml(desc);
 
-    // Check buffer size
-    if (strlen(ctx->xml) + 1000 > ctx->cap) {
-        ctx->cap *= 2;
-        ctx->xml = realloc(ctx->xml, ctx->cap);
+    size_t current_len = strlen(ctx->xml);
+    size_t needed = current_len + 2048;
+    if (needed > ctx->cap) {
+        while (needed > ctx->cap) ctx->cap *= 2;
+        char* new_xml = realloc(ctx->xml, ctx->cap);
+        if (!new_xml) {
+            free(name_esc);
+            free(desc_esc);
+            free(desc);
+            if (missing) free(missing);
+            cJSON_Delete(meta);
+            free(content);
+            return;
+        }
+        ctx->xml = new_xml;
     }
 
     char chunk[2048];

@@ -481,7 +481,7 @@ static void handle_event_json(FeishuWS *ws, const char *event_json) {
     }
     if (!text && content->valuestring) text = strdup(content->valuestring);
     if (text) {
-      ws->callback(chat_id->valuestring, text, sender_id, ws->user_data);
+      ws->callback(chat_id->valuestring, text, sender_id, NULL, ws->user_data);
       free(text);
     }
   }

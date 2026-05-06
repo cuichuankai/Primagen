@@ -151,7 +151,7 @@ static void* telegram_poller(void* arg) {
 
                                     log_info("[Telegram] Received: %s from %s", text->valuestring, chat_id_str);
 
-                                    InboundMessage* msg = inbound_message_new("telegram", chat_id_str, text->valuestring);
+                                    InboundMessage* msg = inbound_message_new("telegram", chat_id_str, text->valuestring, NULL);
                                     message_bus_send_inbound(data->bus, msg);
                                 }
                             }

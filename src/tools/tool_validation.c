@@ -395,6 +395,7 @@ char* tool_validate_and_cast_params(const char* args_json, const char* schema_js
  */
 char* tool_validate_params(const char* args_json, const char* schema_json) {
     char* error_msg = NULL;
-    tool_validate_and_cast_params(args_json, schema_json, &error_msg);
+    char* casted = tool_validate_and_cast_params(args_json, schema_json, &error_msg);
+    free(casted);
     return error_msg;
 }

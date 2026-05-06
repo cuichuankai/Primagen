@@ -15,7 +15,10 @@ struct CronJob {
     char* to;
     bool deliver;
     time_t next_run;
-    char* schedule;  // cron expression
+    char* schedule;
+    int retry_count;
+    int max_retries;
+    int last_status;
 };
 
 typedef void (*CronCallback)(CronJob* job, void* user_data);

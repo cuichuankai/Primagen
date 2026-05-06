@@ -6,19 +6,18 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <time.h>
+#include <stdatomic.h>
 #include "../include/common.h"
-
-// Heartbeat service implementation
 
 struct HeartbeatService {
     char* workspace;
-    void* provider;  // LLMProvider stub
+    void* provider;
     char* model;
     HeartbeatExecuteCallback on_execute;
     HeartbeatNotifyCallback on_notify;
     int interval_s;
     bool enabled;
-    bool running;
+    atomic_bool running;
     pthread_t worker_thread;
     pthread_mutex_t mutex;
 };
@@ -104,10 +103,10 @@ static int heartbeat_decide(void* provider, const char* model, const char* conte
 static void* heartbeat_worker(void* arg) {
     HeartbeatService* service = (HeartbeatService*)arg;
 
-    while (service->running) {
+    while (atomic_load(&service->running)) {
         sleep(service->interval_s);
 
-        if (!service->running) break;
+        if (!atomic_load(&service->running)) break;
 
         // Read HEARTBEAT.md
         char* content = read_heartbeat_file(service->workspace);
@@ -163,7 +162,7 @@ HeartbeatService* heartbeat_service_create(
     service->on_notify = on_notify;
     service->interval_s = interval_s;
     service->enabled = enabled;
-    service->running = false;
+    atomic_store(&service->running, false);
 
     pthread_mutex_init(&service->mutex, NULL);
 
@@ -181,12 +180,12 @@ void heartbeat_service_destroy(HeartbeatService* service) {
 }
 
 bool heartbeat_service_start(HeartbeatService* service) {
-    if (!service || !service->enabled || service->running) return false;
+    if (!service || !service->enabled || atomic_load(&service->running)) return false;
 
-    service->running = true;
+    atomic_store(&service->running, true);
 
     if (pthread_create(&service->worker_thread, NULL, heartbeat_worker, service) != 0) {
-        service->running = false;
+        atomic_store(&service->running, false);
         log_error("[Heartbeat] Failed to start worker thread");
         return false;
     }
@@ -196,9 +195,9 @@ bool heartbeat_service_start(HeartbeatService* service) {
 }
 
 void heartbeat_service_stop(HeartbeatService* service) {
-    if (!service || !service->running) return;
+    if (!service || !atomic_load(&service->running)) return;
 
-    service->running = false;
+    atomic_store(&service->running, false);
     pthread_join(service->worker_thread, NULL);
     log_debug("[Heartbeat] Stopped");
 }

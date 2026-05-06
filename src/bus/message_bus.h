@@ -31,6 +31,7 @@ InboundMessage* message_bus_receive_inbound(MessageBus* bus);
 InboundMessage* message_bus_receive_inbound_timed(MessageBus* bus, int timeout_ms);
 void message_bus_send_outbound(MessageBus* bus, OutboundMessage* msg);
 OutboundMessage* message_bus_receive_outbound(MessageBus* bus);
+OutboundMessage* message_bus_receive_outbound_timed(MessageBus* bus, int timeout_ms);
 bool message_bus_is_outbound_closed(MessageBus* bus);
 
 void message_bus_send_internal(MessageBus* bus, InternalEvent* event);

@@ -33,8 +33,11 @@ static const PluginConfig* plugin_config_from_so_name(const Config* cfg, const c
 // Helper function to add a file to the string list
 static void string_list_add(StringList* list, const char* path) {
     if (list->count >= list->capacity) {
-        list->capacity *= 2;
-        list->files = realloc(list->files, list->capacity * sizeof(char*));
+        size_t new_capacity = list->capacity * 2;
+        char** new_files = realloc(list->files, new_capacity * sizeof(char*));
+        if (!new_files) return;
+        list->files = new_files;
+        list->capacity = new_capacity;
     }
     list->files[list->count++] = strdup(path);
 }
@@ -182,7 +185,11 @@ PluginManager* plugin_manager_new(const char* base_dir) {
 
     // Set up plugin directory for external plugins
     manager->external_dir = malloc(strlen(base_dir) + 16);
-    sprintf(manager->external_dir, "%s/plugins", base_dir);
+    if (!manager->external_dir) {
+        free(manager);
+        return NULL;
+    }
+    snprintf(manager->external_dir, strlen(base_dir) + 16, "%s/plugins", base_dir);
 
     // Create directory if it doesn't exist
     mkdir(manager->external_dir, 0755);
@@ -215,6 +222,12 @@ void plugin_manager_free(PluginManager* manager) {
         free(manager->commands[i].description);
     }
     free(manager->commands);
+
+    // Free channel names cache
+    for (size_t i = 0; i < manager->channel_names_count; i++) {
+        free(manager->channel_names[i]);
+    }
+    free(manager->channel_names);
 
     pthread_mutex_unlock(&manager->lock);
     pthread_mutex_destroy(&manager->lock);
@@ -304,13 +317,44 @@ int plugin_manager_load_plugin(PluginManager* manager, const char* path) {
     manager->plugins = plugin;
     manager->plugin_count++;
 
+    // Add plugin configuration if not already present
+    if (manager->config) {
+        PluginConfig* plugin_config = config_get_plugin_config(manager->config, plugin->id);
+        if (!plugin_config) {
+            plugin_config = config_add_plugin_config(manager->config, plugin->id);
+            if (plugin_config) {
+                // Set default enabled state based on plugin type
+                if (plugin->type == PLUGIN_TOOL) {
+                    plugin_config->enabled = true;
+                } else {
+                    plugin_config->enabled = false;
+                }
+                
+                // Get default config from plugin if available
+                if (plugin->info->get_default_config) {
+                    cJSON* default_config = plugin->info->get_default_config();
+                    if (default_config) {
+                        if (plugin_config->config) {
+                            cJSON_Delete(plugin_config->config);
+                        }
+                        plugin_config->config = default_config;
+                    }
+                }
+                log_debug("[PluginManager] Added default config for plugin: %s", plugin->id);
+            }
+        }
+    }
+
     pthread_mutex_unlock(&manager->lock);
-    log_info("[PluginManager] Loaded plugin: %s", plugin->name);
+
+    log_debug("[PluginManager] Plugin loaded: %s", plugin->name);
     return 0;
 }
 
 void plugin_manager_unload_plugin(PluginManager* manager, LoadedPlugin* plugin) {
     if (!manager || !plugin) return;
+
+    pthread_mutex_lock(&manager->lock);
 
     // Call cleanup
     if (plugin->cleanup) {
@@ -321,6 +365,25 @@ void plugin_manager_unload_plugin(PluginManager* manager, LoadedPlugin* plugin) 
     if (plugin->handle) {
         dlclose(plugin->handle);
     }
+
+    // Remove from linked list
+    LoadedPlugin** indirect = &manager->plugins;
+    while (*indirect) {
+        if (*indirect == plugin) {
+            *indirect = plugin->next;
+            break;
+        }
+        indirect = &(*indirect)->next;
+    }
+
+    manager->plugin_count--;
+
+    free(plugin->name);
+    free(plugin->id);
+    free(plugin->path);
+    free(plugin);
+
+    pthread_mutex_unlock(&manager->lock);
 }
 
 int plugin_manager_reload_plugin(PluginManager* manager, const char* plugin_id) {
@@ -498,12 +561,18 @@ void plugin_manager_free_plugin_snapshot(LoadedPlugin* plugin) {
 int plugin_register_tool(PluginManager* manager, LoadedPlugin* plugin,
                          const char* name, const char* desc,
                          const char* params, ToolExecuteFunc exec, void* user_data) {
+    return plugin_register_tool_with_destroy(manager, plugin, name, desc, params, exec, user_data, NULL);
+}
+
+int plugin_register_tool_with_destroy(PluginManager* manager, LoadedPlugin* plugin,
+                         const char* name, const char* desc,
+                         const char* params, ToolExecuteFunc exec, void* user_data,
+                         ToolUserDataDestroyFunc user_data_destroy) {
     if (!manager) {
         log_error("[Plugin] PluginManager is NULL");
         return -1;
     }
 
-    // Lock to protect access to manager->tool_registry
     pthread_mutex_lock(&manager->lock);
 
     if (!manager->tool_registry) {
@@ -512,7 +581,7 @@ int plugin_register_tool(PluginManager* manager, LoadedPlugin* plugin,
         return -1;
     }
 
-    Error err = tool_registry_register_plugin_tool(manager->tool_registry, name, desc, params, exec, user_data, plugin);
+    Error err = tool_registry_register_full(manager->tool_registry, name, desc, params, exec, user_data, plugin, user_data_destroy);
 
     pthread_mutex_unlock(&manager->lock);
 
@@ -524,10 +593,6 @@ int plugin_register_tool(PluginManager* manager, LoadedPlugin* plugin,
     log_debug("[Plugin] Registered tool: %s from %s", name, plugin ? plugin->name : "builtin");
     return 0;
 }
-
-static char** channel_names = NULL;
-static size_t channel_names_count = 0;
-static size_t channel_names_capacity = 0;
 
 int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
                             const char* name, ChannelCreateFunc create) {
@@ -564,12 +629,12 @@ int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
         dynamic_array_add(manager->channels, &channel);
         log_debug("[Plugin] Registered channel: %s", name);
 
-        if (!channel_names) {
-            channel_names_capacity = 16;
-            channel_names = calloc(channel_names_capacity, sizeof(char*));
+        if (!manager->channel_names) {
+            manager->channel_names_capacity = 16;
+            manager->channel_names = calloc(manager->channel_names_capacity, sizeof(char*));
         }
-        if (channel_names_count < channel_names_capacity) {
-            channel_names[channel_names_count++] = strdup(name);
+        if (manager->channel_names_count < manager->channel_names_capacity) {
+            manager->channel_names[manager->channel_names_count++] = strdup(name);
         }
 
         pthread_mutex_unlock(&manager->lock);
@@ -624,15 +689,26 @@ CommandPluginDef* plugin_manager_get_commands(PluginManager* manager, size_t* ou
 
     pthread_mutex_lock(&manager->lock);
     *out_count = manager->command_count;
+    CommandPluginDef* cmds = manager->commands;
     pthread_mutex_unlock(&manager->lock);
 
-    return manager->commands;
+    return cmds;
 }
 
 const char** plugin_manager_get_channels(PluginManager* manager, size_t* out_count) {
     if (!manager || !out_count) return NULL;
     pthread_mutex_lock(&manager->lock);
-    *out_count = channel_names_count;
+    size_t count = manager->channel_names_count;
+    const char** result = NULL;
+    if (count > 0) {
+        result = malloc(count * sizeof(char*));
+        if (result) {
+            for (size_t i = 0; i < count; i++) {
+                result[i] = manager->channel_names[i];
+            }
+        }
+    }
+    *out_count = count;
     pthread_mutex_unlock(&manager->lock);
-    return (const char**)channel_names;
+    return result;
 }

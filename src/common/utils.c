@@ -74,23 +74,15 @@ char* strip_think_tags(const char* text) {
 char* format_tool_hint(ToolCall* tool_calls, size_t count) {
     if (!tool_calls || count == 0) return NULL;
 
-    // Estimate buffer size
-    size_t estimate = 0;
-    for (size_t i = 0; i < count; i++) {
-        estimate += tool_calls[i].name.len + 40; // name + args + formatting
-    }
-
-    char* result = malloc(estimate + 1);
-    if (!result) return NULL;
-    result[0] = '\0';
+    String result = string_new("");
+    if (!result.data) return NULL;
 
     for (size_t i = 0; i < count; i++) {
-        if (i > 0) strcat(result, ", ");
+        if (i > 0) string_append(&result, ", ");
 
-        strcat(result, tool_calls[i].name.data);
-        strcat(result, "(");
+        string_append(&result, tool_calls[i].name.data);
+        string_append(&result, "(");
 
-        // Try to extract first string argument value
         const char* args = tool_calls[i].arguments.data;
         const char* quote_start = strchr(args, '"');
         if (quote_start) {
@@ -98,15 +90,19 @@ char* format_tool_hint(ToolCall* tool_calls, size_t count) {
             if (quote_end) {
                 size_t val_len = quote_end - quote_start - 1;
                 if (val_len > 40) val_len = 40;
-                strncat(result, quote_start + 1, val_len);
-                if (val_len >= 40) strcat(result, "...");
+                char temp[45];
+                memcpy(temp, quote_start + 1, val_len);
+                temp[val_len] = '\0';
+                string_append(&result, temp);
+                if (val_len >= 40) string_append(&result, "...");
             }
         }
 
-        strcat(result, ")");
+        string_append(&result, ")");
     }
 
-    return result;
+    char* ret = result.data;
+    return ret;
 }
 
 /**
@@ -114,8 +110,21 @@ char* format_tool_hint(ToolCall* tool_calls, size_t count) {
  * Assumes ~4 characters per token for English text
  */
 size_t estimate_tokens(const char* text) {
-    if (!text || strlen(text) == 0) return 0;
-    return strlen(text) / 4;
+    if (!text || !*text) return 0;
+    size_t ascii_bytes = 0;
+    size_t non_ascii_bytes = 0;
+    const unsigned char* p = (const unsigned char*)text;
+    while (*p) {
+        if (*p < 0x80) {
+            ascii_bytes++;
+        } else {
+            non_ascii_bytes++;
+        }
+        p++;
+    }
+    size_t ascii_tokens = ascii_bytes / 4;
+    size_t cjk_tokens = non_ascii_bytes / 2;
+    return ascii_tokens + cjk_tokens;
 }
 
 /**
@@ -192,17 +201,19 @@ char* escape_xml(const char* s) {
 }
 
 /**
- * Generate a unique ID (timestamp-based)
+ * Generate a unique ID (timestamp-based, thread-safe)
  */
 char* generate_id(const char* prefix) {
     char id[64];
-    time_t now = time(NULL);
-    unsigned int rand_val = rand() % 0xFFFF;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned int seed = (unsigned int)(ts.tv_nsec ^ (unsigned long)pthread_self());
+    unsigned int rand_val = rand_r(&seed) % 0xFFFF;
 
     if (prefix) {
-        snprintf(id, sizeof(id), "%s_%ld_%x", prefix, (long)now, rand_val);
+        snprintf(id, sizeof(id), "%s_%ld_%x", prefix, (long)ts.tv_sec, rand_val);
     } else {
-        snprintf(id, sizeof(id), "id_%ld_%x", (long)now, rand_val);
+        snprintf(id, sizeof(id), "id_%ld_%x", (long)ts.tv_sec, rand_val);
     }
 
     return strdup(id);
@@ -241,4 +252,23 @@ int ensure_directory(const char* path) {
     mkdir(tmp, 0755);
 
     return 0;
+}
+
+const char* str_trim_left(const char* s) {
+    if (!s) return s;
+    while (*s && isspace((unsigned char)*s)) s++;
+    return s;
+}
+
+char* str_trim_copy(const char* s) {
+    if (!s) return NULL;
+    const char* start = s;
+    while (*start && isspace((unsigned char)*start)) start++;
+    size_t len = strlen(start);
+    while (len > 0 && isspace((unsigned char)start[len - 1])) len--;
+    char* result = malloc(len + 1);
+    if (!result) return NULL;
+    memcpy(result, start, len);
+    result[len] = '\0';
+    return result;
 }

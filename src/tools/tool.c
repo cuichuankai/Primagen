@@ -7,18 +7,37 @@ ToolRegistry* tool_registry_new() {
     reg->count = 0;
     reg->capacity = 8;
     reg->tools = malloc(reg->capacity * sizeof(Tool));
+    if (!reg->tools) {
+        free(reg);
+        return NULL;
+    }
     return reg;
 }
 
 void tool_registry_free(ToolRegistry* reg) {
     if (!reg) return;
+    void* freed_ptrs[64];
+    size_t freed_count = 0;
     for (size_t i = 0; i < reg->count; i++) {
         string_free(&reg->tools[i].def.name);
         string_free(&reg->tools[i].def.description);
         string_free(&reg->tools[i].def.parameters);
-        // Free user_data for builtin tools (no plugin_ref means it was allocated by agent_loop)
         if (reg->tools[i].user_data && reg->tools[i].plugin_ref == NULL) {
-            free(reg->tools[i].user_data);
+            bool already_freed = false;
+            for (size_t j = 0; j < freed_count; j++) {
+                if (freed_ptrs[j] == reg->tools[i].user_data) {
+                    already_freed = true;
+                    break;
+                }
+            }
+            if (!already_freed) {
+                if (reg->tools[i].user_data_destroy) {
+                    reg->tools[i].user_data_destroy(reg->tools[i].user_data);
+                } else {
+                    free(reg->tools[i].user_data);
+                }
+                if (freed_count < 64) freed_ptrs[freed_count++] = reg->tools[i].user_data;
+            }
         }
     }
     free(reg->tools);
@@ -26,9 +45,19 @@ void tool_registry_free(ToolRegistry* reg) {
 }
 
 Error tool_registry_register(ToolRegistry* reg, const char* name, const char* desc, const char* params_schema, ToolExecuteFunc exec, void* user_data) {
+    return tool_registry_register_full(reg, name, desc, params_schema, exec, user_data, NULL, NULL);
+}
+
+Error tool_registry_register_full(ToolRegistry* reg, const char* name, const char* desc,
+                                   const char* params_schema, ToolExecuteFunc exec,
+                                   void* user_data, void* plugin_ref,
+                                   ToolUserDataDestroyFunc user_data_destroy) {
     if (reg->count >= reg->capacity) {
-        reg->capacity *= 2;
-        reg->tools = realloc(reg->tools, reg->capacity * sizeof(Tool));
+        size_t new_cap = reg->capacity * 2;
+        Tool* new_tools = realloc(reg->tools, new_cap * sizeof(Tool));
+        if (!new_tools) return error_new(ERR_MEMORY, "Failed to expand tool registry");
+        reg->tools = new_tools;
+        reg->capacity = new_cap;
     }
     Tool* tool = &reg->tools[reg->count];
     tool->def.name = string_new(name);
@@ -36,54 +65,35 @@ Error tool_registry_register(ToolRegistry* reg, const char* name, const char* de
     tool->def.parameters = string_new(params_schema);
     tool->execute = exec;
     tool->user_data = user_data;
-    tool->plugin_ref = NULL;  // NULL means builtin tool
+    tool->plugin_ref = plugin_ref;
+    tool->user_data_destroy = user_data_destroy;
     reg->count++;
     return error_new(ERR_NONE, "");
 }
 
-// Plugin-aware tool registration
 Error tool_registry_register_plugin_tool(ToolRegistry* reg, const char* name, const char* desc,
                                           const char* params_schema, ToolExecuteFunc exec,
                                           void* user_data, void* plugin_ref) {
-    if (reg->count >= reg->capacity) {
-        reg->capacity *= 2;
-        reg->tools = realloc(reg->tools, reg->capacity * sizeof(Tool));
-    }
-    Tool* tool = &reg->tools[reg->count];
-    tool->def.name = string_new(name);
-    tool->def.description = string_new(desc);
-    tool->def.parameters = string_new(params_schema);
-    tool->execute = exec;
-    tool->user_data = user_data;
-    tool->plugin_ref = plugin_ref;  // Track which plugin this tool comes from
-    reg->count++;
-    return error_new(ERR_NONE, "");
+    return tool_registry_register_full(reg, name, desc, params_schema, exec, user_data, plugin_ref, NULL);
 }
 
 Tool* tool_registry_get(ToolRegistry* reg, const char* name) {
-    String name_str = string_new(name);
+    if (!reg || !name) return NULL;
     for (size_t i = 0; i < reg->count; i++) {
-        if (string_equals(&reg->tools[i].def.name, &name_str)) {
-            string_free(&name_str);
+        if (reg->tools[i].def.name.data && strcmp(reg->tools[i].def.name.data, name) == 0) {
             return &reg->tools[i];
         }
     }
-    if (name) {
-        const char* alias = strrchr(name, '.');
-        if (!alias) alias = strrchr(name, ':');
-        if (alias && *(alias + 1) != '\0') {
-            String alias_str = string_new(alias + 1);
-            for (size_t i = 0; i < reg->count; i++) {
-                if (string_equals(&reg->tools[i].def.name, &alias_str)) {
-                    string_free(&alias_str);
-                    string_free(&name_str);
-                    return &reg->tools[i];
-                }
+    const char* alias = strrchr(name, '.');
+    if (!alias) alias = strrchr(name, ':');
+    if (alias && *(alias + 1) != '\0') {
+        const char* alias_name = alias + 1;
+        for (size_t i = 0; i < reg->count; i++) {
+            if (reg->tools[i].def.name.data && strcmp(reg->tools[i].def.name.data, alias_name) == 0) {
+                return &reg->tools[i];
             }
-            string_free(&alias_str);
         }
     }
-    string_free(&name_str);
     return NULL;
 }
 

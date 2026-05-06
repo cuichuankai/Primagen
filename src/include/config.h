@@ -48,6 +48,8 @@ typedef struct {
 typedef struct {
     char* dns4;
     char* dns6;
+    char* dns4_url;
+    char* dns6_url;
     int dns_timeout_ms;
     bool use_system_resolver;
 } DNSConfig;
@@ -92,5 +94,7 @@ void config_load_from_env(Config* cfg);
 PluginConfig* config_add_plugin_config(Config* cfg, const char* plugin_id);
 PluginConfig* config_get_plugin_config(Config* cfg, const char* plugin_id);
 void config_plugin_config_free(PluginConfig* item);
+
+Error config_validate(const Config* cfg);
 
 #endif // CONFIG_H

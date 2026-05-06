@@ -25,18 +25,20 @@
 #include <sys/stat.h>
 #include <signal.h>
 
-/* Global loop reference for signal handler */
-static AgentLoop* g_loop = NULL;
+#include <stdatomic.h>
+
+/* Global loop reference for signal handler - using atomic for thread safety */
+static _Atomic(AgentLoop*) g_loop = NULL;
+static volatile sig_atomic_t g_shutdown_requested = 0;
 
 static void handle_signal(int sig) {
-    if (g_loop) {
-        log_info("[System] Received signal %d, stopping agent loop...", sig);
-        agent_loop_stop(g_loop);
+    (void)sig;
+    g_shutdown_requested = 1;
+    AgentLoop* loop = atomic_load(&g_loop);
+    if (loop) {
+        agent_loop_stop(loop);
     }
 }
-
-/* Channel list */
-static DynamicArray* channels = NULL;
 
 /* Cron job callback - injects message into bus for delivery */
 void cron_callback(CronJob* job, void* user_data) {
@@ -48,7 +50,8 @@ void cron_callback(CronJob* job, void* user_data) {
     InboundMessage* msg = inbound_message_new(
         job->channel ? job->channel : "cli",
         job->to ? job->to : "local_user",
-        job->payload_message ? job->payload_message : "Cron trigger"
+        job->payload_message ? job->payload_message : "Cron trigger",
+        NULL
     );
     message_bus_send_inbound(bus, msg);
 }
@@ -60,9 +63,16 @@ void* agent_thread(void* arg) {
     return NULL;
 }
 
+typedef struct {
+    MessageBus* bus;
+    DynamicArray* channels;
+} OutboundThreadArgs;
+
 /* Outbound message dispatcher thread - sends messages to channels */
 void* outbound_thread(void* arg) {
-    MessageBus* bus = (MessageBus*)arg;
+    OutboundThreadArgs* args = (OutboundThreadArgs*)arg;
+    MessageBus* bus = args->bus;
+    DynamicArray* channels = args->channels;
     log_debug("[OutboundThread] Started");
     while (1) {
         OutboundMessage* outbound = message_bus_receive_outbound(bus);
@@ -101,6 +111,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
 
 /* Main entry point - parses command line arguments and dispatches to appropriate handler */
 int main(int argc, char* argv[]) {
+    srand((unsigned int)time(NULL));
     /* Default paths */
     char* config_path = strdup(".primagen/config.json");
     char* workspace_path = strdup(".primagen");
@@ -219,6 +230,8 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     pthread_t agent_tid = 0, outbound_tid = 0;
     bool agent_thread_started = false;
     bool outbound_thread_started = false;
+    DynamicArray* channels = NULL;
+    OutboundThreadArgs* outbound_args = NULL;
     printf("      Primagen(Primitive Genesis) - AI Agent Framework\n");
     printf("===================================================================\n");
     mg_log_set(MG_LL_INFO); /* Set mongoose log level if needed */
@@ -266,8 +279,8 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
             if (len > 0) {
                 char* content = malloc(len + 1);
                 if (content) {
-                    fread(content, 1, len, fp);
-                    content[len] = '\0';
+                    size_t bytes_read = fread(content, 1, len, fp);
+                    content[bytes_read] = '\0';
                     
                     if (strcmp(bootstrap_files[i], "AGENTS.md") == 0) {
                         context_builder_set_identity(ctx_builder, content);
@@ -301,12 +314,13 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     /* Initialize Subagent Manager */
     log_debug("[System] Creating SubagentManager...");
     llm_provider_async_init();
-    SubagentManager* subagent_mgr = subagent_manager_create(
+    SubagentSharedContext* subagent_shared = subagent_shared_context_create(
         (void*)llm_provider_call_async,
         workspace_path,
         bus,
         cfg
     );
+    SubagentManager* subagent_mgr = subagent_manager_create(subagent_shared);
 
     /* Initialize Cron Service */
     log_debug("[System] Creating CronService...");
@@ -337,6 +351,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     tool_ctx->config = cfg;
     tool_ctx->plugin_mgr = plugin_mgr;
     tool_ctx->workspace = workspace_path;
+    pthread_mutex_init(&tool_ctx->route_mutex, NULL);
     strcpy(tool_ctx->current_channel, "cli");
     strcpy(tool_ctx->current_chat_id, "current");
 
@@ -368,12 +383,11 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     }
 
     /* Set global loop for signal handler and register signals */
-    g_loop = loop;
+    atomic_store(&g_loop, loop);
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
 
-    /* Register built-in commands with PluginManager */
-    agent_loop_register_builtin_commands(loop);
+    /* Register built-in commands with PluginManager - already done in agent_loop_new */
 
     /* Start Channels */
     log_debug("[System] Active Channels (%zu):", channels->count);
@@ -397,8 +411,18 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     agent_thread_started = true;
 
     log_debug("[System] Starting outbound thread...");
-    if (pthread_create(&outbound_tid, NULL, outbound_thread, bus) != 0) {
+    outbound_args = calloc(1, sizeof(OutboundThreadArgs));
+    if (!outbound_args) {
+        fprintf(stderr, "Failed to allocate outbound thread args\n");
+        rc = 1;
+        goto cleanup;
+    }
+    outbound_args->bus = bus;
+    outbound_args->channels = channels;
+    
+    if (pthread_create(&outbound_tid, NULL, outbound_thread, outbound_args) != 0) {
         fprintf(stderr, "Failed to create outbound thread\n");
+        free(outbound_args);
         rc = 1;
         goto cleanup;
     }
@@ -408,7 +432,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
     if (initial_message) {
         log_debug("[System] Injecting initial message: %s", initial_message);
         /* Use "cli" channel and "local_user" chat_id */
-        InboundMessage* msg = inbound_message_new("cli", "local_user", initial_message);
+        InboundMessage* msg = inbound_message_new("cli", "local_user", initial_message, NULL);
         message_bus_send_inbound(bus, msg);
     }
 
@@ -433,16 +457,22 @@ cleanup:
     }
 
     /* Cleanup */
-    for (size_t i = 0; i < channels->count; i++) {
-        Channel* ch = *(Channel**)dynamic_array_get(channels, i);
-        if (ch->stop) ch->stop(ch);
-        if (ch->destroy) ch->destroy(ch);
+    if (channels) {
+        for (size_t i = 0; i < channels->count; i++) {
+            Channel* ch = *(Channel**)dynamic_array_get(channels, i);
+            if (ch->stop) ch->stop(ch);
+            if (ch->destroy) ch->destroy(ch);
+        }
+        dynamic_array_free(channels);
+        free(channels);
     }
-    dynamic_array_free(channels);
+    
+    free(outbound_args);
 
     cron_service_stop(cron_service);
     cron_service_destroy(cron_service);
     subagent_manager_destroy(subagent_mgr);
+    subagent_shared_context_destroy(subagent_shared);
     skills_loader_destroy(skills_loader);
     memory_free(memory);
     free(tool_ctx);
@@ -451,7 +481,7 @@ cleanup:
     if (plugin_mgr) {
         plugin_manager_free(plugin_mgr);
     }
-    if (loop && !agent_thread_started) {
+    if (loop) {
         agent_loop_free(loop);
     }
 

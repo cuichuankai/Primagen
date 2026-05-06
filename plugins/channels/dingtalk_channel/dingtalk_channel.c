@@ -121,7 +121,13 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
         c->is_closing = 1;
         ms->done = true;
     } else if (ev == MG_EV_ERROR) {
+        const char* err = ev_data ? (const char*) ev_data : "unknown";
+        log_error("[DingTalk] HTTP connection error: %s", err);
         ms->done = true;
+    } else if (ev == MG_EV_CLOSE) {
+        if (!ms->done) {
+            log_debug("[DingTalk] HTTP connection closed");
+        }
     }
 }
 
@@ -224,10 +230,11 @@ static void refresh_token(DingTalkChannelData* data) {
     }
 
     mg_printf(c,
-        "POST %s HTTP/1.0\r\n"
+        "POST %s HTTP/1.1\r\n"
         "Host: %.*s\r\n"
         "Content-Type: application/json\r\n"
         "Content-Length: %d\r\n"
+        "Connection: close\r\n"
         "\r\n"
         "%s",
         mg_url_uri(url),
@@ -236,7 +243,17 @@ static void refresh_token(DingTalkChannelData* data) {
         json_str
     );
 
-    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+    uint64_t start = (uint64_t)(time(NULL) * 1000);
+    const int timeout_ms = 10000;
+    while (!chunk.done) {
+        mg_mgr_poll(&mgr, 100);
+        uint64_t now = (uint64_t)(time(NULL) * 1000);
+        if (now - start > timeout_ms) {
+            log_error("[DingTalk] Token refresh timeout after %dms", timeout_ms);
+            c->is_closing = 1;
+            break;
+        }
+    }
 
     if (chunk.size > 0) {
         cJSON* resp = cJSON_Parse(chunk.memory);
@@ -596,32 +613,38 @@ static bool dingtalk_send_attachment_message(DingTalkChannelData* data, const ch
 // =============================================================================
 
 static void on_dingtalk_message(const char* conversation_id, const char* content,
-                                 const char* sender_id, const char* session_webhook,
+                                 const char* sender_id, const char* sender_name,
+                                 const char* session_webhook,
+                                 int64_t webhook_expired_time,
                                  void* user_data) {
-    (void)sender_id;
     DingTalkChannelData* data = (DingTalkChannelData*)user_data;
 
-    // Log session webhook for debugging
+    if (sender_name && sender_name[0] != '\0') {
+        log_info("[DingTalk] Message from %s in conversation %s", sender_name, conversation_id);
+    }
+
     if (session_webhook) {
-        log_info("[DingTalk] Session webhook received: %s", session_webhook);
+        log_info("[DingTalk] Session webhook received (expires: %lld)", (long long)webhook_expired_time);
     } else {
         log_warn("[DingTalk] No session webhook in CALLBACK message");
     }
 
-    // Send to message bus - include session_webhook in chat_id field for reply routing
-    // Format: "sessionWebhookURL|conversationId"
     char* routing_info = NULL;
     if (session_webhook && session_webhook[0] != '\0') {
-        size_t len = strlen(session_webhook) + strlen(conversation_id) + 2;
+        size_t len = strlen(session_webhook) + strlen(conversation_id) + (sender_id ? strlen(sender_id) : 0) + 24;
         routing_info = malloc(len);
-        snprintf(routing_info, len, "%s|%s", session_webhook, conversation_id);
+        if (sender_id && sender_id[0] != '\0') {
+            snprintf(routing_info, len, "%s|%s|%s|%lld", session_webhook, conversation_id, sender_id, (long long)webhook_expired_time);
+        } else {
+            snprintf(routing_info, len, "%s|%s||%lld", session_webhook, conversation_id, (long long)webhook_expired_time);
+        }
         log_info("[DingTalk] Created routing info: %s", routing_info);
     }
 
     const char* final_chat_id = routing_info ? routing_info : conversation_id;
     log_info("[DingTalk] Sending to message bus with chat_id: %s", final_chat_id);
 
-    InboundMessage* inbound = inbound_message_new("dingtalk", final_chat_id, content);
+    InboundMessage* inbound = inbound_message_new("dingtalk", final_chat_id, content, sender_name);
     message_bus_send_inbound(data->bus, inbound);
 
     if (routing_info) free(routing_info);
@@ -634,6 +657,7 @@ static void on_dingtalk_message(const char* conversation_id, const char* content
 static void* dingtalk_receive_loop(void* arg) {
     DingTalkChannelData* data = (DingTalkChannelData*)arg;
     int reconnect_attempt = 0;
+    const int max_reconnect_attempts = 10;
 
     while (data->running) {
         if (!is_token_valid(data)) {
@@ -641,14 +665,18 @@ static void* dingtalk_receive_loop(void* arg) {
         }
         if (!data->access_token || data->access_token[0] == '\0') {
             reconnect_attempt++;
+            if (reconnect_attempt >= max_reconnect_attempts) {
+                log_error("[DingTalk] Max reconnect attempts (%d) reached. Channel stopped.", max_reconnect_attempts);
+                data->running = false;
+                break;
+            }
             int delay = reconnect_attempt < 6 ? (1 << reconnect_attempt) : 60;
             if (delay > 60) delay = 60;
-            log_error("[DingTalk] Missing access token, reconnect in %ds (attempt %d)", delay, reconnect_attempt);
+            log_error("[DingTalk] Missing access token, reconnect in %ds (attempt %d/%d)", delay, reconnect_attempt, max_reconnect_attempts);
             if (data->running) sleep(delay);
             continue;
         }
 
-        // Get WebSocket URL from DingTalk
         char* ws_url = dingtalk_get_ws_url(data->client_id,
                                            data->client_secret,
                                            data->access_token,
@@ -666,24 +694,36 @@ static void* dingtalk_receive_loop(void* arg) {
                                     data->client_secret)) {
                 log_info("[DingTalk] WebSocket connected.");
                 reconnect_attempt = 0;
-                // Run WebSocket loop (blocks until disconnected)
                 dingtalk_ws_run(data->ws, on_dingtalk_message, data);
                 if (data->running) {
                     reconnect_attempt++;
+                    if (reconnect_attempt >= max_reconnect_attempts) {
+                        log_error("[DingTalk] Max reconnect attempts (%d) reached. Channel stopped.", max_reconnect_attempts);
+                        data->running = false;
+                        dingtalk_ws_destroy(data->ws);
+                        data->ws = NULL;
+                        free(ws_url);
+                        break;
+                    }
                     int delay = reconnect_attempt < 6 ? (1 << reconnect_attempt) : 60;
                     if (delay > 60) delay = 60;
-                    log_warn("[DingTalk] WebSocket disconnected, reconnect in %ds (attempt %d)", delay, reconnect_attempt);
+                    log_warn("[DingTalk] WebSocket disconnected, reconnect in %ds (attempt %d/%d)", delay, reconnect_attempt, max_reconnect_attempts);
                     sleep(delay);
                 }
             } else {
                 reconnect_attempt++;
+                if (reconnect_attempt >= max_reconnect_attempts) {
+                    log_error("[DingTalk] Max reconnect attempts (%d) reached. Channel stopped.", max_reconnect_attempts);
+                    data->running = false;
+                    dingtalk_ws_destroy(data->ws);
+                    data->ws = NULL;
+                    free(ws_url);
+                    break;
+                }
                 int delay = reconnect_attempt < 6 ? (1 << reconnect_attempt) : 60;
                 if (delay > 60) delay = 60;
-                log_error("[DingTalk] WebSocket connect failed.");
-                if (data->running) {
-                    log_warn("[DingTalk] Reconnect in %ds (attempt %d)", delay, reconnect_attempt);
-                    sleep(delay);
-                }
+                log_error("[DingTalk] WebSocket connect failed, reconnect in %ds (attempt %d/%d)", delay, reconnect_attempt, max_reconnect_attempts);
+                if (data->running) sleep(delay);
             }
 
             dingtalk_ws_destroy(data->ws);
@@ -691,14 +731,16 @@ static void* dingtalk_receive_loop(void* arg) {
             free(ws_url);
         } else {
             reconnect_attempt++;
+            if (reconnect_attempt >= max_reconnect_attempts) {
+                log_error("[DingTalk] Max reconnect attempts (%d) reached. Channel stopped.", max_reconnect_attempts);
+                data->running = false;
+                break;
+            }
             int delay = reconnect_attempt < 6 ? (1 << reconnect_attempt) : 60;
             if (delay > 60) delay = 60;
-            log_error("[DingTalk] Failed to get WebSocket URL");
+            log_error("[DingTalk] Failed to get WebSocket URL, reconnect in %ds (attempt %d/%d)", delay, reconnect_attempt, max_reconnect_attempts);
             refresh_token(data);
-            if (data->running) {
-                log_warn("[DingTalk] Reconnect in %ds (attempt %d)", delay, reconnect_attempt);
-                sleep(delay);
-            }
+            if (data->running) sleep(delay);
         }
     }
 
@@ -788,23 +830,342 @@ static void dingtalk_stop(Channel* self) {
     }
 }
 
+static bool dingtalk_send_via_webhook(DingTalkChannelData* data, const char* session_webhook,
+                                       const char* content, const char* merged_content) {
+    const char* send_content = merged_content ? merged_content : content;
+    while (*send_content == ' ' || *send_content == '\n' || *send_content == '\r') send_content++;
+
+    log_info("[DingTalk] Sending via session webhook");
+
+    cJSON* json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "msgtype", "markdown");
+    cJSON* markdown = cJSON_CreateObject();
+    cJSON_AddStringToObject(markdown, "title", "Primagen");
+    cJSON_AddStringToObject(markdown, "text", send_content);
+    cJSON_AddItemToObject(json, "markdown", markdown);
+    char* json_str = cJSON_PrintUnformatted(json);
+
+    log_debug("[DingTalk] Request body: %s", json_str);
+
+    struct mg_mgr mgr;
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.memory[0] = '\0';
+
+    mg_mgr_init(&mgr);
+    apply_dns_config(&mgr, data);
+
+    struct mg_connection* c = mg_http_connect(&mgr, session_webhook, webhook_fn, &chunk);
+    if (!c) {
+        log_error("[DingTalk] Webhook send failed: connection error");
+        free(json_str);
+        cJSON_Delete(json);
+        mg_mgr_free(&mgr);
+        free(chunk.memory);
+        return false;
+    }
+
+    struct mg_str host = mg_url_host(session_webhook);
+    struct mg_tls_opts opts = {0};
+    opts.ca = mg_str("");
+    opts.name = host;
+    opts.skip_verification = true;
+    if (mg_url_is_ssl(session_webhook)) {
+        mg_tls_init(c, &opts);
+    }
+
+    mg_printf(c,
+        "POST %s HTTP/1.1\r\n"
+        "Host: %.*s\r\n"
+        "Content-Type: application/json\r\n"
+        "Accept: */*\r\n"
+        "Connection: close\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
+        "%s",
+        mg_url_uri(session_webhook),
+        (int)host.len, host.buf,
+        (int)strlen(json_str),
+        json_str
+    );
+
+    log_info("[DingTalk] Full request sent: POST %s HTTP/1.1", mg_url_uri(session_webhook));
+
+    int timeout_count = 0;
+    const int max_timeout = 30;
+    while (!chunk.done && timeout_count < max_timeout) {
+        mg_mgr_poll(&mgr, 1000);
+        timeout_count++;
+    }
+
+    if (timeout_count >= max_timeout) {
+        log_error("[DingTalk] Webhook send timeout");
+        c->is_closing = 1;
+    }
+
+    bool success = false;
+    int err_code = -1;
+    if (chunk.size > 0) {
+        log_info("[DingTalk] Webhook response (%zu bytes): %s", chunk.size, chunk.memory);
+
+        char hex_buf[256];
+        size_t hex_len = chunk.size > 64 ? 64 : chunk.size;
+        for (size_t i = 0; i < hex_len; i++) {
+            snprintf(hex_buf + (i * 3), 4, "%02x ", (unsigned char)chunk.memory[i]);
+        }
+        hex_buf[hex_len * 3] = '\0';
+        log_info("[DingTalk] Webhook response hex: %s", hex_buf);
+
+        cJSON* resp = cJSON_Parse(chunk.memory);
+        if (resp) {
+            cJSON* errcode = cJSON_GetObjectItem(resp, "errcode");
+            if (errcode && cJSON_IsNumber(errcode)) {
+                err_code = errcode->valueint;
+                log_debug("[DingTalk] Response errcode: %d", err_code);
+                if (err_code == 0) {
+                    success = true;
+                } else {
+                    log_error("[DingTalk] Webhook send failed with errcode %d: %s", err_code, chunk.memory);
+                }
+            } else {
+                log_warn("[DingTalk] Webhook response missing errcode field: %s", chunk.memory);
+                success = true;
+            }
+            cJSON_Delete(resp);
+        } else {
+            log_error("[DingTalk] Failed to parse webhook response as JSON: %s", chunk.memory);
+        }
+    } else {
+        log_error("[DingTalk] Webhook send failed: empty response");
+    }
+
+    cJSON_Delete(json);
+    free(json_str);
+    mg_mgr_free(&mgr);
+    free(chunk.memory);
+
+    if (err_code == 300001) {
+        log_warn("[DingTalk] Session webhook expired (errcode 300001), need fallback");
+        return false;
+    }
+
+    return success;
+}
+
+static bool dingtalk_send_via_group(DingTalkChannelData* data, const char* conversation_id,
+                                     const char* content, const char* merged_content) {
+    if (!conversation_id || conversation_id[0] == '\0') {
+        log_error("[DingTalk] Cannot use groupMessages: no conversation ID available");
+        return false;
+    }
+
+    log_info("[DingTalk] Falling back to groupMessages API for conversation: %s", conversation_id);
+
+    const char* url = "https://api.dingtalk.com/v1.0/robot/groupMessages/send";
+
+    cJSON* json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "robotCode", data->client_id);
+    cJSON_AddStringToObject(json, "openConversationId", conversation_id);
+    cJSON_AddStringToObject(json, "msgKey", "sampleMarkdown");
+
+    cJSON* msgParam = cJSON_CreateObject();
+    cJSON_AddStringToObject(msgParam, "text", merged_content ? merged_content : content);
+    cJSON_AddStringToObject(msgParam, "title", "Primagen");
+    char* param_str = cJSON_PrintUnformatted(msgParam);
+    cJSON_AddStringToObject(json, "msgParam", param_str);
+    free(param_str);
+    cJSON_Delete(msgParam);
+
+    char* json_str = cJSON_PrintUnformatted(json);
+
+    struct mg_mgr mgr;
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.memory[0] = '\0';
+
+    mg_mgr_init(&mgr);
+    apply_dns_config(&mgr, data);
+
+    struct mg_connection* c = mg_http_connect(&mgr, url, fn, &chunk);
+    if (!c) {
+        log_error("[DingTalk] groupMessages failed: connection error");
+        free(json_str);
+        cJSON_Delete(json);
+        mg_mgr_free(&mgr);
+        free(chunk.memory);
+        return false;
+    }
+
+    struct mg_str host = mg_url_host(url);
+    struct mg_tls_opts opts = {0};
+    opts.ca = mg_str("");
+    opts.name = host;
+    opts.skip_verification = true;
+    if (mg_url_is_ssl(url)) {
+        mg_tls_init(c, &opts);
+    }
+
+    mg_printf(c,
+        "POST %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "x-acs-dingtalk-access-token: %s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
+        "%s",
+        mg_url_uri(url),
+        (int)host.len, host.buf,
+        data->access_token,
+        (int)strlen(json_str),
+        json_str
+    );
+
+    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+
+    bool success = false;
+    if (chunk.size > 0) {
+        cJSON* resp = cJSON_Parse(chunk.memory);
+        if (resp) {
+            cJSON* code = cJSON_GetObjectItem(resp, "code");
+            cJSON* process_query_key = cJSON_GetObjectItem(resp, "processQueryKey");
+            if (process_query_key && cJSON_IsString(process_query_key)) {
+                log_info("[DingTalk] Sent via groupMessages to conversation %s (processQueryKey: %s)",
+                         conversation_id, process_query_key->valuestring);
+                success = true;
+            } else if (code && code->valueint == 0) {
+                log_info("[DingTalk] Sent via groupMessages to conversation %s", conversation_id);
+                success = true;
+            } else {
+                log_error("[DingTalk] groupMessages failed: %s", chunk.memory);
+            }
+            cJSON_Delete(resp);
+        }
+    } else {
+        log_error("[DingTalk] groupMessages failed: empty response");
+    }
+
+    cJSON_Delete(json);
+    free(json_str);
+    mg_mgr_free(&mgr);
+    free(chunk.memory);
+    return success;
+}
+
+static bool dingtalk_send_via_batch(DingTalkChannelData* data, const char* user_id,
+                                     const char* content, const char* merged_content) {
+    if (!user_id || user_id[0] == '\0') {
+        log_error("[DingTalk] Cannot use batchSend: no user ID available");
+        return false;
+    }
+
+    log_info("[DingTalk] Falling back to batchSend API for user: %s", user_id);
+
+    const char* url = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend";
+
+    cJSON* json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "robotCode", data->client_id);
+
+    cJSON* userIds = cJSON_CreateArray();
+    cJSON_AddItemToArray(userIds, cJSON_CreateString(user_id));
+    cJSON_AddItemToObject(json, "userIds", userIds);
+
+    cJSON_AddStringToObject(json, "msgKey", "sampleMarkdown");
+
+    cJSON* msgParam = cJSON_CreateObject();
+    cJSON_AddStringToObject(msgParam, "text", merged_content ? merged_content : content);
+    cJSON_AddStringToObject(msgParam, "title", "Primagen");
+    char* param_str = cJSON_PrintUnformatted(msgParam);
+    cJSON_AddStringToObject(json, "msgParam", param_str);
+    free(param_str);
+    cJSON_Delete(msgParam);
+
+    char* json_str = cJSON_PrintUnformatted(json);
+
+    struct mg_mgr mgr;
+    struct MemoryStruct chunk = {0};
+    chunk.memory = malloc(1);
+    chunk.memory[0] = '\0';
+
+    mg_mgr_init(&mgr);
+    apply_dns_config(&mgr, data);
+
+    struct mg_connection* c = mg_http_connect(&mgr, url, fn, &chunk);
+    if (!c) {
+        log_error("[DingTalk] batchSend failed: connection error");
+        free(json_str);
+        cJSON_Delete(json);
+        mg_mgr_free(&mgr);
+        free(chunk.memory);
+        return false;
+    }
+
+    struct mg_str host = mg_url_host(url);
+    struct mg_tls_opts opts = {0};
+    opts.ca = mg_str("");
+    opts.name = host;
+    opts.skip_verification = true;
+    if (mg_url_is_ssl(url)) {
+        mg_tls_init(c, &opts);
+    }
+
+    mg_printf(c,
+        "POST %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "x-acs-dingtalk-access-token: %s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
+        "%s",
+        mg_url_uri(url),
+        (int)host.len, host.buf,
+        data->access_token,
+        (int)strlen(json_str),
+        json_str
+    );
+
+    while (!chunk.done) mg_mgr_poll(&mgr, 1000);
+
+    bool success = false;
+    if (chunk.size > 0) {
+        cJSON* resp = cJSON_Parse(chunk.memory);
+        if (resp) {
+            cJSON* code = cJSON_GetObjectItem(resp, "code");
+            if (code && code->valueint == 0) {
+                log_info("[DingTalk] Sent via batchSend to user %s", user_id);
+                success = true;
+            } else {
+                log_error("[DingTalk] batchSend failed: %s", chunk.memory);
+            }
+            cJSON_Delete(resp);
+        }
+    } else {
+        log_error("[DingTalk] batchSend failed: empty response");
+    }
+
+    cJSON_Delete(json);
+    free(json_str);
+    mg_mgr_free(&mgr);
+    free(chunk.memory);
+    return success;
+}
+
 static void dingtalk_send(Channel* self, OutboundMessage* msg) {
     DingTalkChannelData* data = (DingTalkChannelData*)self->user_data;
     if (!data->client_id || !data->client_id[0] || !data->client_secret || !data->client_secret[0]) return;
 
-    // Only process messages meant for this channel
     if (strcmp(msg->channel.data, "dingtalk") != 0) return;
 
-    // Parse chat_id to check for session webhook format: "webhookURL|conversationId"
     const char* session_webhook = NULL;
     const char* conversation_id = NULL;
-    char* webhook_buf = NULL;  // Track allocated buffer for cleanup
-    char* pipe_pos = strchr(msg->chat_id.data, '|');
+    const char* sender_id = NULL;
+    int64_t webhook_expired_time = 0;
+    char* webhook_buf = NULL;
+    char* conv_id_buf = NULL;
+    char* sender_buf = NULL;
 
-    if (pipe_pos) {
-        // Session webhook format - extract webhook URL and conversation ID
-        // Copy webhook URL (before |) to a buffer
-        size_t webhook_len = pipe_pos - msg->chat_id.data;
+    char* pipe1 = strchr(msg->chat_id.data, '|');
+    if (pipe1) {
+        size_t webhook_len = pipe1 - msg->chat_id.data;
         webhook_buf = malloc(webhook_len + 1);
         if (!webhook_buf) {
             log_error("[DingTalk] Failed to allocate webhook buffer");
@@ -813,16 +1174,44 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
         memcpy(webhook_buf, msg->chat_id.data, webhook_len);
         webhook_buf[webhook_len] = '\0';
         session_webhook = webhook_buf;
-        conversation_id = pipe_pos + 1;
-        log_debug("[DingTalk] Using session webhook: %s for conversation: %s",
-                  session_webhook, conversation_id);
+
+        char* pipe2 = strchr(pipe1 + 1, '|');
+        if (pipe2) {
+            size_t conv_len = pipe2 - (pipe1 + 1);
+            conv_id_buf = malloc(conv_len + 1);
+            if (conv_id_buf) {
+                memcpy(conv_id_buf, pipe1 + 1, conv_len);
+                conv_id_buf[conv_len] = '\0';
+                conversation_id = conv_id_buf;
+            }
+
+            char* pipe3 = strchr(pipe2 + 1, '|');
+            if (pipe3) {
+                size_t sender_len = pipe3 - (pipe2 + 1);
+                sender_buf = malloc(sender_len + 1);
+                if (sender_buf) {
+                    memcpy(sender_buf, pipe2 + 1, sender_len);
+                    sender_buf[sender_len] = '\0';
+                    sender_id = sender_buf;
+                }
+                webhook_expired_time = strtoll(pipe3 + 1, NULL, 10);
+            } else {
+                sender_id = pipe2 + 1;
+            }
+        } else {
+            conversation_id = pipe1 + 1;
+        }
+
+        log_debug("[DingTalk] Parsed chat_id: webhook=%s, conv=%s, sender=%s, expires=%lld",
+                  session_webhook,
+                  conversation_id ? conversation_id : "null",
+                  sender_id ? sender_id : "null",
+                  (long long)webhook_expired_time);
     } else {
-        // Legacy format - just conversation ID (cannot reply effectively)
         conversation_id = msg->chat_id.data;
-        log_warn("[DingTalk] No session webhook available for %s, reply may fail", conversation_id);
+        log_warn("[DingTalk] No session webhook available for %s", conversation_id);
     }
 
-    // Ensure we have a valid token
     if (!is_token_valid(data)) {
         refresh_token(data);
     }
@@ -830,6 +1219,8 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
     if (!data->access_token) {
         log_error("[DingTalk] Cannot send: no access token");
         free(webhook_buf);
+        free(conv_id_buf);
+        free(sender_buf);
         return;
     }
 
@@ -864,216 +1255,48 @@ static void dingtalk_send(Channel* self, OutboundMessage* msg) {
     if (!has_text) {
         free(merged_content);
         free(webhook_buf);
+        free(conv_id_buf);
+        free(sender_buf);
         return;
     }
 
-    struct mg_mgr mgr;
-    struct MemoryStruct chunk = {0};
-    chunk.memory = malloc(1);
-    chunk.memory[0] = '\0';
+    bool sent = false;
 
-    mg_mgr_init(&mgr);
-
-    apply_dns_config(&mgr, data);
-
-    if (session_webhook && strncmp(session_webhook, "http", 4) == 0) {
-        log_info("[DingTalk] Sending via session webhook to %s", conversation_id);
-
-        const char* content = merged_content ? merged_content : msg->content.data;
-        while (*content == ' ' || *content == '\n' || *content == '\r') content++;
-        log_info("[DingTalk] Reply content: %s", content);
-
-        cJSON* json = cJSON_CreateObject();
-        cJSON_AddStringToObject(json, "msgtype", "markdown");
-        cJSON* markdown = cJSON_CreateObject();
-        cJSON_AddStringToObject(markdown, "title", "Primagen");
-        cJSON_AddStringToObject(markdown, "text", content);
-        cJSON_AddItemToObject(json, "markdown", markdown);
-        char* json_str = cJSON_PrintUnformatted(json);
-
-        log_debug("[DingTalk] Request body: %s", json_str);
-
-        struct mg_connection *c = mg_http_connect(&mgr, session_webhook, webhook_fn, &chunk);
-        if (!c) {
-            log_error("[DingTalk] Webhook send failed: connection error");
-            free(json_str);
-            cJSON_Delete(json);
-            free(merged_content);
-            mg_mgr_free(&mgr);
-            free(chunk.memory);
-            free(webhook_buf);
-            return;
+    bool webhook_expired = false;
+    if (webhook_expired_time > 0) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        int64_t now_ms = (int64_t)tv.tv_sec * 1000 + (int64_t)tv.tv_usec / 1000;
+        if (now_ms >= webhook_expired_time) {
+            log_warn("[DingTalk] Session webhook expired at %lld (now: %lld), skipping webhook",
+                     (long long)webhook_expired_time, (long long)now_ms);
+            webhook_expired = true;
         }
-
-        struct mg_str host = mg_url_host(session_webhook);
-
-        struct mg_tls_opts opts = {0};
-        opts.ca = mg_str("");
-        opts.name = host;
-        opts.skip_verification = true;
-        if (mg_url_is_ssl(session_webhook)) {
-            mg_tls_init(c, &opts);
-        }
-
-        mg_printf(c,
-            "POST %s HTTP/1.1\r\n"
-            "Host: %.*s\r\n"
-            "Content-Type: application/json\r\n"
-            "Accept: */*\r\n"
-            "Connection: close\r\n"
-            "Content-Length: %d\r\n"
-            "\r\n"
-            "%s",
-            mg_url_uri(session_webhook),
-            (int)host.len, host.buf,
-            (int)strlen(json_str),
-            json_str
-        );
-
-        log_info("[DingTalk] Full request sent: POST %s HTTP/1.1", mg_url_uri(session_webhook));
-
-        int timeout_count = 0;
-        const int max_timeout = 30;
-        while (!chunk.done && timeout_count < max_timeout) {
-            mg_mgr_poll(&mgr, 1000);
-            timeout_count++;
-        }
-
-        if (timeout_count >= max_timeout) {
-            log_error("[DingTalk] Webhook send timeout");
-            c->is_closing = 1;
-        }
-
-        if (chunk.size > 0) {
-            log_info("[DingTalk] Webhook response (%zu bytes): %s", chunk.size, chunk.memory);
-
-            char hex_buf[256];
-            size_t hex_len = chunk.size > 64 ? 64 : chunk.size;
-            for (size_t i = 0; i < hex_len; i++) {
-                snprintf(hex_buf + (i * 3), 4, "%02x ", (unsigned char)chunk.memory[i]);
-            }
-            hex_buf[hex_len * 3] = '\0';
-            log_info("[DingTalk] Webhook response hex: %s", hex_buf);
-
-            cJSON* resp = cJSON_Parse(chunk.memory);
-            if (resp) {
-                cJSON* errcode = cJSON_GetObjectItem(resp, "errcode");
-                if (errcode && cJSON_IsNumber(errcode)) {
-                    log_debug("[DingTalk] Response errcode: %d", errcode->valueint);
-                    if (errcode->valueint == 0) {
-                        log_info("[DingTalk] Sent via webhook to %s", conversation_id);
-                    } else {
-                        log_error("[DingTalk] Webhook send failed with errcode %d: %s", errcode->valueint, chunk.memory);
-                    }
-                } else if (errcode && !cJSON_IsNumber(errcode)) {
-                    log_error("[DingTalk] Webhook send failed: errcode is not a number: %s", chunk.memory);
-                } else {
-                    log_warn("[DingTalk] Webhook response missing errcode field: %s", chunk.memory);
-                    log_info("[DingTalk] Sent via webhook to %s (no errcode, assuming success)", conversation_id);
-                }
-                cJSON_Delete(resp);
-            } else {
-                log_error("[DingTalk] Failed to parse webhook response as JSON: %s", chunk.memory);
-            }
-        } else {
-            log_error("[DingTalk] Webhook send failed: empty response");
-        }
-
-        cJSON_Delete(json);
-        free(json_str);
-        free(merged_content);
-        mg_mgr_free(&mgr);
-        free(chunk.memory);
-        free(webhook_buf);
-
-    } else {
-        log_warn("[DingTalk] Falling back to batchSend API (requires staff IDs)");
-
-        const char* url = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend";
-
-        cJSON* json = cJSON_CreateObject();
-        cJSON_AddStringToObject(json, "robotCode", data->client_id);
-
-        cJSON* userIds = cJSON_CreateArray();
-        cJSON_AddItemToArray(userIds, cJSON_CreateString(msg->chat_id.data));
-        cJSON_AddItemToObject(json, "userIds", userIds);
-
-        cJSON_AddStringToObject(json, "msgKey", "sampleMarkdown");
-
-        cJSON* msgParam = cJSON_CreateObject();
-        cJSON_AddStringToObject(msgParam, "markdown", merged_content ? merged_content : msg->content.data);
-        cJSON_AddStringToObject(msgParam, "title", "Primagen");
-        char* param_str = cJSON_PrintUnformatted(msgParam);
-        cJSON_AddStringToObject(json, "msgParam", param_str);
-        free(param_str);
-        cJSON_Delete(msgParam);
-
-        char* json_str = cJSON_PrintUnformatted(json);
-
-        struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
-        if (!c) {
-            log_error("[DingTalk] Send failed: connection error");
-            free(json_str);
-            cJSON_Delete(json);
-            free(merged_content);
-            mg_mgr_free(&mgr);
-            free(chunk.memory);
-            free(webhook_buf);
-            return;
-        }
-
-        struct mg_str host = mg_url_host(url);
-
-        struct mg_tls_opts opts = {0};
-        opts.ca = mg_str("");
-        opts.name = host;
-        opts.skip_verification = true;
-        if (mg_url_is_ssl(url)) {
-            mg_tls_init(c, &opts);
-        }
-
-        mg_printf(c,
-            "POST %s HTTP/1.0\r\n"
-            "Host: %.*s\r\n"
-            "x-acs-dingtalk-access-token: %s\r\n"
-            "Content-Type: application/json\r\n"
-            "Content-Length: %d\r\n"
-            "\r\n"
-            "%s",
-            mg_url_uri(url),
-            (int)host.len, host.buf,
-            data->access_token,
-            (int)strlen(json_str),
-            json_str
-        );
-
-        while (!chunk.done) mg_mgr_poll(&mgr, 1000);
-
-        if (chunk.size > 0) {
-            cJSON* resp = cJSON_Parse(chunk.memory);
-            if (resp) {
-                cJSON* code = cJSON_GetObjectItem(resp, "code");
-                if (code && code->valueint == 0) {
-                    log_info("[DingTalk] Sent to %s", msg->chat_id.data);
-                    char* resp_str = cJSON_PrintUnformatted(resp);
-                    log_debug("[DingTalk] Send response: %s", resp_str);
-                    free(resp_str);
-                } else {
-                    log_error("[DingTalk] Send failed: %s", chunk.memory);
-                }
-                cJSON_Delete(resp);
-            }
-        } else {
-            log_error("[DingTalk] Send failed: empty response");
-        }
-
-        cJSON_Delete(json);
-        free(json_str);
-        free(merged_content);
-        mg_mgr_free(&mgr);
-        free(chunk.memory);
-        free(webhook_buf);
     }
+
+    if (!webhook_expired && session_webhook && strncmp(session_webhook, "http", 4) == 0) {
+        sent = dingtalk_send_via_webhook(data, session_webhook, msg->content.data, merged_content);
+    }
+
+    if (!sent && conversation_id && conversation_id[0] != '\0') {
+        log_info("[DingTalk] Webhook unavailable or expired, falling back to groupMessages");
+        sent = dingtalk_send_via_group(data, conversation_id, msg->content.data, merged_content);
+    }
+
+    if (!sent && sender_id && sender_id[0] != '\0') {
+        log_info("[DingTalk] Group send failed, falling back to private message via batchSend");
+        sent = dingtalk_send_via_batch(data, sender_id, msg->content.data, merged_content);
+    }
+
+    if (!sent) {
+        log_error("[DingTalk] All send methods failed for conversation %s",
+                  conversation_id ? conversation_id : msg->chat_id.data);
+    }
+
+    free(merged_content);
+    free(webhook_buf);
+    free(conv_id_buf);
+    free(sender_buf);
 }
 
 static void dingtalk_destroy(Channel* self) {

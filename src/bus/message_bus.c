@@ -6,8 +6,22 @@
 
 enum {
     MESSAGE_KIND_INBOUND = 1,
-    MESSAGE_KIND_OUTBOUND = 2
+    MESSAGE_KIND_OUTBOUND = 2,
+    MESSAGE_KIND_INTERNAL = 3
 };
+
+static void message_free_by_kind(void* msg, int message_kind) {
+    if (!msg) return;
+    if (message_kind == MESSAGE_KIND_INBOUND) {
+        inbound_message_free((InboundMessage*)msg);
+    } else if (message_kind == MESSAGE_KIND_OUTBOUND) {
+        outbound_message_free((OutboundMessage*)msg);
+    } else if (message_kind == MESSAGE_KIND_INTERNAL) {
+        internal_event_free((InternalEvent*)msg);
+    } else {
+        free(msg);
+    }
+}
 
 static bool message_queue_init(MessageQueue* q, int message_kind) {
     q->capacity = 16;
@@ -32,21 +46,26 @@ static void message_queue_free(MessageQueue* q) {
     pthread_mutex_lock(&q->mutex);
     q->closed = true;
     pthread_cond_broadcast(&q->cond);
+
+    struct timespec ts = {0, 10000000};
+    for (int i = 0; i < 100; i++) {
+        if (q->front == q->rear) break;
+        pthread_mutex_unlock(&q->mutex);
+        nanosleep(&ts, NULL);
+        pthread_mutex_lock(&q->mutex);
+    }
+
     while (q->front != q->rear) {
         void* msg = q->items[q->front];
         q->front = (q->front + 1) % q->capacity;
-        if (msg) {
-            if (q->message_kind == MESSAGE_KIND_INBOUND) {
-                inbound_message_free((InboundMessage*)msg);
-            } else if (q->message_kind == MESSAGE_KIND_OUTBOUND) {
-                outbound_message_free((OutboundMessage*)msg);
-            } else {
-                free(msg);
-            }
-        }
+        message_free_by_kind(msg, q->message_kind);
     }
-    pthread_mutex_unlock(&q->mutex);
     free(q->items);
+    q->items = NULL;
+    q->capacity = 0;
+    q->front = 0;
+    q->rear = 0;
+    pthread_mutex_unlock(&q->mutex);
     pthread_mutex_destroy(&q->mutex);
     pthread_cond_destroy(&q->cond);
 }
@@ -62,15 +81,7 @@ static void message_queue_send(MessageQueue* q, void* msg) {
     pthread_mutex_lock(&q->mutex);
     if (q->closed) {
         pthread_mutex_unlock(&q->mutex);
-        if (msg) {
-            if (q->message_kind == MESSAGE_KIND_INBOUND) {
-                inbound_message_free((InboundMessage*)msg);
-            } else if (q->message_kind == MESSAGE_KIND_OUTBOUND) {
-                outbound_message_free((OutboundMessage*)msg);
-            } else {
-                free(msg);
-            }
-        }
+        message_free_by_kind(msg, q->message_kind);
         return;
     }
     size_t next_rear = (q->rear + 1) % q->capacity;
@@ -79,15 +90,7 @@ static void message_queue_send(MessageQueue* q, void* msg) {
         void** new_items = malloc(new_cap * sizeof(void*));
         if (!new_items) {
             pthread_mutex_unlock(&q->mutex);
-            if (msg) {
-                if (q->message_kind == MESSAGE_KIND_INBOUND) {
-                    inbound_message_free((InboundMessage*)msg);
-                } else if (q->message_kind == MESSAGE_KIND_OUTBOUND) {
-                    outbound_message_free((OutboundMessage*)msg);
-                } else {
-                    free(msg);
-                }
-            }
+            message_free_by_kind(msg, q->message_kind);
             return;
         }
 
@@ -176,7 +179,7 @@ MessageBus* message_bus_new() {
         free(bus);
         return NULL;
     }
-    if (!message_queue_init(&bus->internal, 0)) {
+    if (!message_queue_init(&bus->internal, MESSAGE_KIND_INTERNAL)) {
         free(bus->inbound.items);
         pthread_mutex_destroy(&bus->inbound.mutex);
         pthread_cond_destroy(&bus->inbound.cond);
@@ -198,7 +201,6 @@ void message_bus_close(MessageBus* bus) {
 
 void message_bus_free(MessageBus* bus) {
     if (!bus) return;
-    message_bus_close(bus);
     message_queue_free(&bus->inbound);
     message_queue_free(&bus->outbound);
     message_queue_free(&bus->internal);
@@ -234,6 +236,11 @@ void message_bus_send_outbound(MessageBus* bus, OutboundMessage* msg) {
 OutboundMessage* message_bus_receive_outbound(MessageBus* bus) {
     if (!bus) return NULL;
     return (OutboundMessage*)message_queue_receive(&bus->outbound);
+}
+
+OutboundMessage* message_bus_receive_outbound_timed(MessageBus* bus, int timeout_ms) {
+    if (!bus) return NULL;
+    return (OutboundMessage*)message_queue_receive_timed(&bus->outbound, timeout_ms);
 }
 
 bool message_bus_is_outbound_closed(MessageBus* bus) {

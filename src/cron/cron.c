@@ -90,11 +90,12 @@ static bool cron_field_matches(int value, int min_val, int max_val, const char* 
         char buf[32];
         strncpy(buf, field, sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
-        char* token = strtok(buf, ",");
+        char* saveptr = NULL;
+        char* token = strtok_r(buf, ",", &saveptr);
         while (token) {
             int v = atoi(token);
             if (v == value) return true;
-            token = strtok(NULL, ",");
+            token = strtok_r(NULL, ",", &saveptr);
         }
         return false;
     }
@@ -248,6 +249,9 @@ static CronJob copy_job(const CronJob* src) {
     dst.deliver = src->deliver;
     dst.next_run = src->next_run;
     dst.schedule = src->schedule ? strdup(src->schedule) : NULL;
+    dst.retry_count = src->retry_count;
+    dst.max_retries = src->max_retries > 0 ? src->max_retries : 3;
+    dst.last_status = src->last_status;
     return dst;
 }
 
@@ -386,45 +390,79 @@ static void* cron_worker(void* arg) {
         
         while (current) {
             if (current->job.next_run <= now) {
-                if (service->callback) {
-                    void* user_data = service->callback_user_data;
+                CronCallback callback_fn = service->callback;
+                void* cb_user_data = service->callback_user_data;
+                CronJob job_snapshot = copy_job(&current->job);
+                char* node_id = current->job.id ? strdup(current->job.id) : NULL;
+
+                if (callback_fn) {
                     pthread_mutex_unlock(&service->mutex);
-                    service->callback(&current->job, user_data);
+                    callback_fn(&job_snapshot, cb_user_data);
                     pthread_mutex_lock(&service->mutex);
+                }
+
+                JobNode* found = NULL;
+                JobNode* found_prev = NULL;
+                JobNode* search = service->jobs;
+                while (search) {
+                    if (node_id && search->job.id && strcmp(search->job.id, node_id) == 0) {
+                        found = search;
+                        found_prev = prev;
+                        break;
+                    }
+                    found_prev = search;
+                    search = search->next;
+                }
+                free(node_id);
+
+                if (!found) {
+                    current = service->jobs;
+                    prev = NULL;
+                    free_job(&job_snapshot);
+                    continue;
                 }
 
                 bool remove = false;
                 time_t next_run = 0;
-                CronScheduleType schedule_type = cron_schedule_next_run(current->job.schedule, now, &next_run);
+                CronScheduleType schedule_type = cron_schedule_next_run(found->job.schedule, now, &next_run);
                 if (schedule_type == CRON_SCHEDULE_RECURRING) {
-                    current->job.next_run = next_run;
+                    found->job.next_run = next_run;
+                    found->job.retry_count = 0;
+                    found->job.last_status = 0;
                     modified = true;
                 } else if (schedule_type == CRON_SCHEDULE_ONE_TIME) {
                     remove = true;
                 } else {
-                    if (current->job.schedule) {
-                        log_error("[Cron] Invalid schedule in runtime, removing job: %s", current->job.schedule);
+                    if (found->job.schedule) {
+                        log_error("[Cron] Invalid schedule in runtime, removing job: %s", found->job.schedule);
                     }
                     remove = true;
                 }
 
                 if (remove) {
-                    JobNode* to_free = current;
-                    if (prev) {
-                        prev->next = current->next;
-                        current = prev->next;
+                    JobNode* to_free = found;
+                    if (found_prev) {
+                        found_prev->next = found->next;
+                        current = found_prev->next;
                     } else {
-                        service->jobs = current->next;
+                        service->jobs = found->next;
                         current = service->jobs;
                     }
+                    prev = found_prev;
                     free_job(&to_free->job);
                     free(to_free);
                     modified = true;
-                    continue; // Skip prev update
+                    free_job(&job_snapshot);
+                    continue;
                 }
+
+                current = found->next;
+                prev = found;
+                free_job(&job_snapshot);
+                continue;
             }
             prev = current;
-            if (current) current = current->next;
+            current = current->next;
         }
         
         if (modified) {
@@ -554,7 +592,7 @@ char* cron_service_add_job(CronService* service, const CronJob* job) {
     // Generate ID if missing
     if (!node->job.id) {
         char id[32];
-        snprintf(id, sizeof(id), "job_%ld", time(NULL));
+        snprintf(id, sizeof(id), "job_%ld_%d", time(NULL), rand() % 10000);
         node->job.id = strdup(id);
     }
 

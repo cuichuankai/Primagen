@@ -26,7 +26,7 @@ else
     ifeq ($(BUILD_TYPE),release)
         CFLAGS = $(BASE_CFLAGS) -O2 -DNDEBUG -DMG_ENABLE_LOG=0
     else
-        CFLAGS = $(BASE_CFLAGS) -g -O0
+        CFLAGS = $(BASE_CFLAGS) -g -O0 -DMG_ENABLE_LOG=0
     endif
     LDFLAGS = -ldl
 endif
@@ -58,6 +58,9 @@ OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/context/context_builder.o \
       $(OBJDIR)/bus/message_bus.o \
       $(OBJDIR)/agent/agent_loop.o \
+      $(OBJDIR)/agent/command_dispatcher.o \
+      $(OBJDIR)/agent/tool_router.o \
+      $(OBJDIR)/agent/session_orchestrator.o \
       $(OBJDIR)/providers/llm_provider.o \
       $(OBJDIR)/subagent/subagent.o \
       $(OBJDIR)/cron/cron.o \

@@ -174,13 +174,13 @@ static void discord_send(Channel* self, OutboundMessage* msg) {
 
     struct mg_str host = mg_url_host(url);
     mg_printf(c,
-        "POST %s HTTP/1.0\n"
-        "Host: %.*s\n"
-        "Authorization: Bot %s\n"
-        "Content-Type: application/json\n"
-        "User-Agent: Primagen/1.0\n"
-        "Content-Length: %d\n"
-        "\n"
+        "POST %s HTTP/1.0\r\n"
+        "Host: %.*s\r\n"
+        "Authorization: Bot %s\r\n"
+        "Content-Type: application/json\r\n"
+        "User-Agent: Primagen/1.0\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
         "%s",
         mg_url_uri(url),
         (int)host.len, host.buf,

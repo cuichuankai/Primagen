@@ -1,25 +1,61 @@
 #include "context_builder.h"
 #include "../include/common.h"
 #include "../include/skills.h"
+#include "../include/utils.h"
+#include "../include/message.h"
 #include <time.h>
 #include <sys/stat.h>
+
+static size_t estimate_session_tokens(Session* session) {
+    if (!session) return 0;
+    size_t total = 0;
+    for (size_t i = 0; i < session->messages.count; i++) {
+        Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
+        if (!msg || msg->role == ROLE_TOOL) continue;
+        total += estimate_tokens(msg->content.data);
+    }
+    return total;
+}
+
+static void apply_sliding_window(Session* session, size_t max_tokens) {
+    if (!session || max_tokens == 0) return;
+    
+    size_t current_tokens = estimate_session_tokens(session);
+    if (current_tokens <= max_tokens) return;
+    
+    while (session->messages.count > 2 && current_tokens > max_tokens) {
+        Message* oldest = *(Message**)dynamic_array_get(&session->messages, 0);
+        if (oldest) {
+            current_tokens -= estimate_tokens(oldest->content.data);
+            message_free(oldest);
+        }
+        memmove((char*)session->messages.items, 
+                (char*)session->messages.items + session->messages.item_size,
+                (session->messages.count - 1) * session->messages.item_size);
+        session->messages.count--;
+    }
+}
+
+// apply_sliding_window is used when session history is passed to context builder
+__attribute__((used)) static void apply_sliding_window_wrapper(Session* s, size_t m) {
+    apply_sliding_window(s, m);
+}
 
 /* Build runtime context metadata */
 static char* build_runtime_context(const char* channel, const char* chat_id) {
     time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
 
     char time_buf[64];
-    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M (%A)", tm_info);
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M (%A)", &tm_info);
 
-    // Get timezone
     char tz_buf[32];
-    strftime(tz_buf, sizeof(tz_buf), "%Z", tm_info);
+    strftime(tz_buf, sizeof(tz_buf), "%Z", &tm_info);
     if (tz_buf[0] == '\0') {
         strcpy(tz_buf, "UTC");
     }
 
-    // Calculate buffer size
     size_t len = 512;
     if (channel) len += strlen(channel) + 20;
     if (chat_id) len += strlen(chat_id) + 20;
@@ -53,7 +89,16 @@ ContextBuilder* context_builder_new(const char* workspace) {
     cb->cached_skills_summary = NULL;
     cb->memory_mtime = 0;
     cb->skills_mtime = 0;
+    cb->context_window = DEFAULT_CONTEXT_WINDOW;
+    cb->max_history_tokens = DEFAULT_CONTEXT_WINDOW - CONTEXT_RESERVE_TOKENS;
     return cb;
+}
+
+void context_builder_set_context_window(ContextBuilder* cb, size_t window_tokens) {
+    if (!cb) return;
+    cb->context_window = window_tokens;
+    cb->max_history_tokens = window_tokens > CONTEXT_RESERVE_TOKENS ? 
+                             window_tokens - CONTEXT_RESERVE_TOKENS : window_tokens / 2;
 }
 
 void context_builder_free(ContextBuilder* cb) {

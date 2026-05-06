@@ -18,16 +18,6 @@ typedef struct ToolExecutionRequest {
     struct ToolExecutionRequest* next;
 } ToolExecutionRequest;
 
-// Tool execution result
-typedef struct ToolExecutionResult {
-    char* tool_name;
-    char* result;
-    Error err;
-    void* callback_context;
-    void (*callback)(void* context, const char* tool_name, const char* result, Error err);
-} ToolExecutionResult;
-
-// Thread pool worker
 typedef struct {
     pthread_t thread;
     struct ToolExecutor* executor;
