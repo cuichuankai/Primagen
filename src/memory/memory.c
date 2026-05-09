@@ -92,7 +92,7 @@ void memory_free(Memory* mem) {
 }
 
 Error memory_load(Memory* mem, const char* workspace_path) {
-    char path[512];
+    char path[FILE_PATH_MAX];
     FILE* f;
     
     if (!mem || !workspace_path) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
@@ -161,7 +161,7 @@ Error memory_load(Memory* mem, const char* workspace_path) {
 Error memory_save(Memory* mem, const char* workspace_path) {
     if (!mem || !workspace_path) return error_new(ERR_INVALID_PARAM, "Invalid arguments");
     pthread_mutex_lock(&mem->mutex);
-    char path[512];
+    char path[FILE_PATH_MAX];
     FILE* f;
     
     // Ensure memory directory exists
@@ -212,7 +212,7 @@ Error memory_append_history(Memory* mem, const char* workspace_path, const char*
     }
 
     pthread_mutex_lock(&mem->mutex);
-    char path[512];
+    char path[FILE_PATH_MAX];
     snprintf(path, sizeof(path), "%s/memory", workspace_path);
     mkdir(path, 0755);
 
@@ -352,10 +352,10 @@ Error memory_consolidate(Memory* mem, const char* workspace_path) {
         free(old_part);
     }
     mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
-    char mem_copy[512];
+    char mem_copy[FILE_PATH_MAX];
     snprintf(mem_copy, sizeof(mem_copy), "%s/memory", workspace_path);
     mkdir(mem_copy, 0755);
-    char memory_file[512];
+    char memory_file[FILE_PATH_MAX];
     snprintf(memory_file, sizeof(memory_file), "%s/memory/MEMORY.md", workspace_path);
     FILE* f1 = fopen(memory_file, "w");
     if (!f1) {
@@ -364,7 +364,8 @@ Error memory_consolidate(Memory* mem, const char* workspace_path) {
     }
     fwrite(mem->memory_md.data, 1, mem->memory_md.len, f1);
     fclose(f1);
-    char history_file[512];
+
+    char history_file[FILE_PATH_MAX];
     snprintf(history_file, sizeof(history_file), "%s/memory/HISTORY.md", workspace_path);
     FILE* f2 = fopen(history_file, "w");
     if (!f2) {

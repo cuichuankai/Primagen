@@ -26,7 +26,7 @@ typedef struct {
 
 typedef struct ActiveTask {
     char id[32];
-    char session_key[256];
+    char session_key[SESSION_KEY_MAX];
     SessionContext ctx;
     pthread_t thread;
     bool cancelled;
@@ -46,7 +46,7 @@ typedef struct {
 
     pthread_mutex_t task_mutex;
     ActiveTaskNode* active_tasks;
-    char current_session_key[256];
+    char current_session_key[SESSION_KEY_MAX];
 } SessionOrchestrator;
 
 typedef struct {

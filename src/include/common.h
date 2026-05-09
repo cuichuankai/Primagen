@@ -9,6 +9,17 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <limits.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 1024
+#endif
+
+#define SESSION_KEY_MAX  512
+#define FILE_PATH_MAX    PATH_MAX
+#define ERROR_MSG_MAX    1024
+#define REQUEST_BUF_MAX  4096
 
 // Basic data types
 typedef struct {
@@ -79,5 +90,9 @@ void dynamic_array_add(DynamicArray* arr, void* item);
 
 Error error_new(ErrorCode code, const char* message);
 void error_print(const Error* err);
+
+// Safe memory allocation wrappers - abort on OOM
+void* xmalloc(size_t size);
+char* xstrdup(const char* s);
 
 #endif // COMMON_H

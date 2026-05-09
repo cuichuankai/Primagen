@@ -171,3 +171,27 @@ void error_print(const Error* err) {
     if (!err) return;
     fprintf(stderr, "Error %d: %s\n", err->code, err->message);
 }
+
+void* xmalloc(size_t size) {
+    void* p = malloc(size);
+    if (!p) {
+        fprintf(stderr, "FATAL: Out of memory (requested %zu bytes)\n", size);
+        abort();
+    }
+    return p;
+}
+
+char* xstrdup(const char* s) {
+    if (!s) {
+        fprintf(stderr, "FATAL: xstrdup called with NULL\n");
+        abort();
+    }
+    size_t len = strlen(s);
+    char* p = malloc(len + 1);
+    if (!p) {
+        fprintf(stderr, "FATAL: Out of memory in xstrdup (len=%zu)\n", len);
+        abort();
+    }
+    memcpy(p, s, len + 1);
+    return p;
+}

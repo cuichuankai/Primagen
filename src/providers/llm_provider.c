@@ -720,107 +720,14 @@ void llm_provider_call_async(const char* system_prompt, Session* session, ToolRe
 }
 
 Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, String* response, ToolCall** tool_calls, size_t* tool_calls_count) {
-    struct mg_mgr mgr;
-    struct MemoryStruct chunk = {0};
-    chunk.capacity = 4096;
-    chunk.memory = malloc(chunk.capacity);
-    chunk.memory[0] = '\0';
-    
-    mg_mgr_init(&mgr);
-    llm_provider_configure_mgr_dns(&mgr, config);
-    
-    const char* api_key = get_api_key(config);
-    if (strlen(api_key) == 0) {
-        mg_mgr_free(&mgr);
-        free(chunk.memory);
-        return error_new(ERR_INVALID_PARAM, "API Key not set (config or OPENAI_API_KEY)");
+    LLMResponse llm_response;
+    Error err = llm_provider_call_extended(system_prompt, session, tools, config, &llm_response);
+    if (err.code != ERR_NONE) {
+        return err;
     }
-
-    char *json_str = build_llm_request_json(system_prompt, session, tools, config, false);
-    log_debug("[LLM] Request payload size: %zu bytes", strlen(json_str));
-    
-    char* url = build_api_url(config);
-    if (!url) {
-        free(json_str);
-        mg_mgr_free(&mgr);
-        free(chunk.memory);
-        return error_new(ERR_NETWORK, "OOM building URL");
-    }
-    
-    struct mg_connection *c = mg_http_connect(&mgr, url, fn, &chunk);
-    if (!c) {
-        free(url);
-        free(json_str);
-        mg_mgr_free(&mgr);
-        free(chunk.memory);
-        return error_new(ERR_NETWORK, "Failed to connect to LLM provider");
-    }
-    
-    struct mg_str host = mg_url_host(url);
-    struct mg_tls_opts opts = {0};
-    opts.ca = mg_str("");
-    opts.name = host;
-    opts.skip_verification = should_skip_tls_verification() ? 1 : 0;
-    if (mg_url_is_ssl(url)) {
-        mg_tls_init(c, &opts);
-    }
-
-    mg_printf(c, 
-        "POST %s HTTP/1.0\r\n"
-        "Host: %.*s\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: %d\r\n"
-        "Authorization: Bearer %s\r\n"
-        "\r\n"
-        "%s",
-        mg_url_uri(url), 
-        (int)host.len, host.buf,
-        (int) strlen(json_str), 
-        api_key,
-        json_str
-    );
-    log_debug("[LLM] Request sent url=%s body_len=%zu", url, strlen(json_str));
-    {
-        uint64_t start_ms = mg_millis();
-        uint64_t last_log_ms = start_ms;
-        while (!chunk.done && (mg_millis() - start_ms) < 120000) {
-            mg_mgr_poll(&mgr, 1000);
-            if (mg_millis() - last_log_ms >= 5000) {
-                log_debug("[LLM] waiting response... elapsed=%llums, size=%zu, tls_hs=%d, closing=%d",
-                          (unsigned long long) (mg_millis() - start_ms), chunk.size,
-                          c->is_tls_hs, c->is_closing);
-                last_log_ms = mg_millis();
-            }
-        }
-        if (!chunk.done) {
-            snprintf(chunk.last_error, sizeof(chunk.last_error), "timeout after %llums",
-                     (unsigned long long) (mg_millis() - start_ms));
-            log_error("[LLM] request timeout");
-        }
-    }
-    
-    free(url);
-    free(json_str);
-    mg_mgr_free(&mgr);
-    
-    log_debug("LLM Response Payload(size=%zu,error=%s): %s", chunk.size,
-              chunk.last_error[0] ? chunk.last_error : "none", chunk.memory);
-
-    ParsedLLMResponse parsed = parse_llm_response_json(chunk.memory, chunk.http_status, chunk.last_error);
-    free(chunk.memory);
-    
-    if (parsed.error.code != ERR_NONE) {
-        free_parsed_response(&parsed);
-        return parsed.error;
-    }
-    
-    *response = parsed.content;
-    *tool_calls = parsed.tool_calls;
-    *tool_calls_count = parsed.tool_calls_count;
-    parsed.tool_calls = NULL;
-    parsed.tool_calls_count = 0;
-    memset(&parsed.content, 0, sizeof(parsed.content));
-    
+    *response = llm_response.content;
+    *tool_calls = llm_response.tool_calls;
+    *tool_calls_count = llm_response.tool_calls_count;
     return error_new(ERR_NONE, "");
 }
 

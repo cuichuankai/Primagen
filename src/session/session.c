@@ -91,6 +91,8 @@ static Session* session_manager_create_unlocked(SessionManager* mgr, const char*
     session->created_at = time(NULL);
     session->updated_at = time(NULL);
     session->last_consolidated = 0;
+    session->last_saved_count = 0;
+    session->needs_full_save = true;
     session->ref_count = 1;
     pthread_mutex_init(&session->mutex, NULL);
     
@@ -122,7 +124,7 @@ SessionManager* session_manager_new(const char* workspace_path) {
     pthread_mutex_init(&mgr->mutex, NULL);
     pthread_rwlock_init(&mgr->rwlock, NULL);
     
-    char path[512];
+    char path[FILE_PATH_MAX];
     snprintf(path, sizeof(path), "%s/sessions", workspace_path);
     struct stat st;
     if (stat(path, &st) != 0) {
@@ -187,91 +189,127 @@ Session* session_manager_create(SessionManager* mgr, const char* key) {
     return session;
 }
 
-Error session_manager_save(SessionManager* mgr, Session* session) {
-    if (!mgr || !session) return error_new(ERR_INVALID_PARAM, "Invalid parameters");
+static void serialize_message_to_fp(FILE* f, Message* msg) {
+    cJSON* msg_obj = cJSON_CreateObject();
+    if (msg->role == ROLE_USER) cJSON_AddStringToObject(msg_obj, "role", "user");
+    else if (msg->role == ROLE_ASSISTANT) cJSON_AddStringToObject(msg_obj, "role", "assistant");
+    else cJSON_AddStringToObject(msg_obj, "role", "tool");
+    if (msg->content.len > 0) {
+        cJSON_AddStringToObject(msg_obj, "content", msg->content.data);
+    }
+    cJSON_AddStringToObject(msg_obj, "timestamp", msg->timestamp.data);
 
-    char filepath[512];
-    if (!build_session_file_path(mgr, session->key.data, filepath, sizeof(filepath))) {
-        return error_new(ERR_FILE, "Session filepath too long");
+    if (msg->role == ROLE_ASSISTANT && msg->tool_calls_count > 0) {
+        cJSON* tc_array = cJSON_CreateArray();
+        for (size_t j = 0; j < msg->tool_calls_count; j++) {
+            cJSON* tc_obj = cJSON_CreateObject();
+            cJSON_AddStringToObject(tc_obj, "id", msg->tool_calls[j].id.data);
+            cJSON_AddStringToObject(tc_obj, "name", msg->tool_calls[j].name.data);
+            cJSON_AddStringToObject(tc_obj, "arguments", msg->tool_calls[j].arguments.data);
+            cJSON_AddItemToArray(tc_array, tc_obj);
+        }
+        cJSON_AddItemToObject(msg_obj, "tool_calls", tc_array);
     }
 
-    char tmp_filepath[520];
-    snprintf(tmp_filepath, sizeof(tmp_filepath), "%s.tmp", filepath);
+    if (msg->role == ROLE_TOOL) {
+        if (msg->tool_call_id.len > 0) {
+            cJSON_AddStringToObject(msg_obj, "tool_call_id", msg->tool_call_id.data);
+        }
+        if (msg->name.len > 0) {
+            cJSON_AddStringToObject(msg_obj, "name", msg->name.data);
+        }
+    }
 
-    FILE* f = fopen(tmp_filepath, "w");
-    if (!f) return error_new(ERR_FILE, "Cannot open session file for writing");
+    char* msg_json = cJSON_PrintUnformatted(msg_obj);
+    if (msg_json) {
+        fprintf(f, "%s\n", msg_json);
+        free(msg_json);
+    }
+    cJSON_Delete(msg_obj);
+}
 
+static void serialize_metadata_to_fp(FILE* f, Session* session, size_t save_count) {
     cJSON* meta = cJSON_CreateObject();
     cJSON_AddStringToObject(meta, "_type", "metadata");
     cJSON_AddStringToObject(meta, "key", session->key.data);
     cJSON_AddNumberToObject(meta, "created_at", (double)session->created_at);
     cJSON_AddNumberToObject(meta, "updated_at", (double)session->updated_at);
-    cJSON_AddNumberToObject(meta, "last_consolidated", (double)session->messages.count);
+    cJSON_AddNumberToObject(meta, "last_consolidated", (double)save_count);
     char* meta_json = cJSON_PrintUnformatted(meta);
     if (meta_json) {
         fprintf(f, "%s\n", meta_json);
         free(meta_json);
     }
     cJSON_Delete(meta);
+}
+
+static bool file_exists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+Error session_manager_save(SessionManager* mgr, Session* session) {
+    if (!mgr || !session) return error_new(ERR_INVALID_PARAM, "Invalid parameters");
+
+    char filepath[FILE_PATH_MAX];
+    if (!build_session_file_path(mgr, session->key.data, filepath, sizeof(filepath))) {
+        return error_new(ERR_FILE, "Session filepath too long");
+    }
 
     pthread_mutex_lock(&session->mutex);
-    for (size_t i = 0; i < session->messages.count; i++) {
-        Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
+    size_t total_count = session->messages.count;
+    size_t saved_count = session->last_saved_count;
+    bool needs_full = session->needs_full_save || !file_exists(filepath) || saved_count > total_count;
 
-        if (msg->role == ROLE_TOOL) continue;
-        if (msg->role == ROLE_ASSISTANT && msg->content.len == 0) continue;
+    if (needs_full) {
+        pthread_mutex_unlock(&session->mutex);
+        char tmp_filepath[FILE_PATH_MAX + 8];
+        snprintf(tmp_filepath, sizeof(tmp_filepath), "%s.tmp", filepath);
 
-        cJSON* msg_obj = cJSON_CreateObject();
-        if (msg->role == ROLE_USER) cJSON_AddStringToObject(msg_obj, "role", "user");
-        else if (msg->role == ROLE_ASSISTANT) cJSON_AddStringToObject(msg_obj, "role", "assistant");
-        else cJSON_AddStringToObject(msg_obj, "role", "tool");
-        if (msg->content.len > 0) {
-            cJSON_AddStringToObject(msg_obj, "content", msg->content.data);
+        FILE* f = fopen(tmp_filepath, "w");
+        if (!f) return error_new(ERR_FILE, "Cannot open session file for writing");
+
+        pthread_mutex_lock(&session->mutex);
+        serialize_metadata_to_fp(f, session, total_count);
+        for (size_t i = 0; i < total_count; i++) {
+            Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
+            if (msg->role == ROLE_TOOL) continue;
+            if (msg->role == ROLE_ASSISTANT && msg->content.len == 0) continue;
+            serialize_message_to_fp(f, msg);
         }
-        cJSON_AddStringToObject(msg_obj, "timestamp", msg->timestamp.data);
+        session->last_saved_count = total_count;
+        session->last_consolidated = total_count;
+        session->needs_full_save = false;
+        pthread_mutex_unlock(&session->mutex);
+        fclose(f);
 
-        if (msg->role == ROLE_ASSISTANT && msg->tool_calls_count > 0) {
-            cJSON* tc_array = cJSON_CreateArray();
-            for (size_t j = 0; j < msg->tool_calls_count; j++) {
-                cJSON* tc_obj = cJSON_CreateObject();
-                cJSON_AddStringToObject(tc_obj, "id", msg->tool_calls[j].id.data);
-                cJSON_AddStringToObject(tc_obj, "name", msg->tool_calls[j].name.data);
-                cJSON_AddStringToObject(tc_obj, "arguments", msg->tool_calls[j].arguments.data);
-                cJSON_AddItemToArray(tc_array, tc_obj);
-            }
-            cJSON_AddItemToObject(msg_obj, "tool_calls", tc_array);
+        if (rename(tmp_filepath, filepath) != 0) {
+            unlink(tmp_filepath);
+            return error_new(ERR_FILE, "Failed to commit session file");
+        }
+    } else {
+        FILE* f = fopen(filepath, "a");
+        if (!f) {
+            pthread_mutex_unlock(&session->mutex);
+            return error_new(ERR_FILE, "Cannot open session file for appending");
         }
 
-        if (msg->role == ROLE_TOOL) {
-            if (msg->tool_call_id.len > 0) {
-                cJSON_AddStringToObject(msg_obj, "tool_call_id", msg->tool_call_id.data);
-            }
-            if (msg->name.len > 0) {
-                cJSON_AddStringToObject(msg_obj, "name", msg->name.data);
-            }
+        for (size_t i = saved_count; i < total_count; i++) {
+            Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
+            if (msg->role == ROLE_TOOL) continue;
+            if (msg->role == ROLE_ASSISTANT && msg->content.len == 0) continue;
+            serialize_message_to_fp(f, msg);
         }
-
-        char* msg_json = cJSON_PrintUnformatted(msg_obj);
-        if (msg_json) {
-            fprintf(f, "%s\n", msg_json);
-            free(msg_json);
-        }
-        cJSON_Delete(msg_obj);
-    }
-    session->last_consolidated = session->messages.count;
-    pthread_mutex_unlock(&session->mutex);
-    fclose(f);
-
-    if (rename(tmp_filepath, filepath) != 0) {
-        unlink(tmp_filepath);
-        return error_new(ERR_FILE, "Failed to commit session file");
+        session->last_saved_count = total_count;
+        pthread_mutex_unlock(&session->mutex);
+        fclose(f);
     }
 
     return error_new(ERR_NONE, "");
 }
 
 Error session_manager_load(SessionManager* mgr, const char* key, Session** session_out) {
-    char filepath[512];
+    char filepath[FILE_PATH_MAX];
     if (!build_session_file_path(mgr, key, filepath, sizeof(filepath))) {
         return error_new(ERR_FILE, "Session filepath too long");
     }
@@ -385,6 +423,11 @@ Error session_manager_load(SessionManager* mgr, const char* key, Session** sessi
         session->last_consolidated = session->messages.count;
         pthread_mutex_unlock(&session->mutex);
     }
+
+    pthread_mutex_lock(&session->mutex);
+    session->last_saved_count = session->messages.count;
+    session->needs_full_save = false;
+    pthread_mutex_unlock(&session->mutex);
 
     *session_out = session;
     return error_new(ERR_NONE, "");

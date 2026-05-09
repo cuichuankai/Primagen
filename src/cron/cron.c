@@ -22,6 +22,7 @@ struct CronService {
     bool running;
     pthread_t worker_thread;
     pthread_mutex_t mutex;
+    pthread_cond_t cond;
     JobNode* jobs;
 };
 
@@ -38,6 +39,11 @@ static bool cron_service_is_running(CronService* service) {
     running = service->running;
     pthread_mutex_unlock(&service->mutex);
     return running;
+}
+
+static void cron_service_signal(CronService* service) {
+    if (!service) return;
+    pthread_cond_broadcast(&service->cond);
 }
 
 static bool parse_daily_schedule(const char* schedule, int* hour, int* minute) {
@@ -471,7 +477,27 @@ static void* cron_worker(void* arg) {
         
         pthread_mutex_unlock(&service->mutex);
 
-        sleep(1); 
+        {
+            pthread_mutex_lock(&service->mutex);
+            time_t now = time(NULL);
+            time_t next_time = LONG_MAX;
+            JobNode* n = service->jobs;
+            while (n) {
+                if (n->job.next_run > 0 && n->job.next_run < next_time) {
+                    next_time = n->job.next_run;
+                }
+                n = n->next;
+            }
+            time_t wait_sec = (next_time <= now) ? 0 : (next_time - now);
+            if (wait_sec > 60) wait_sec = 60;
+            if (wait_sec > 0) {
+                struct timespec ts;
+                ts.tv_sec = now + wait_sec;
+                ts.tv_nsec = 0;
+                pthread_cond_timedwait(&service->cond, &service->mutex, &ts);
+            }
+            pthread_mutex_unlock(&service->mutex);
+        }
     }
 
     return NULL;
@@ -487,6 +513,7 @@ CronService* cron_service_create(const char* store_path) {
     service->jobs = NULL;
 
     pthread_mutex_init(&service->mutex, NULL);
+    pthread_cond_init(&service->cond, NULL);
     
     // Load jobs
     load_jobs(service);
@@ -509,6 +536,7 @@ void cron_service_destroy(CronService* service) {
 
     free(service->store_path);
     pthread_mutex_destroy(&service->mutex);
+    pthread_cond_destroy(&service->cond);
     free(service);
 }
 
@@ -539,6 +567,7 @@ void cron_service_stop(CronService* service) {
     service->running = false;
     pthread_t worker = service->worker_thread;
     pthread_mutex_unlock(&service->mutex);
+    cron_service_signal(service);
     if (!was_running) return;
     if (pthread_equal(pthread_self(), worker)) return;
     pthread_join(worker, NULL);
@@ -579,6 +608,7 @@ char* cron_service_add_job(CronService* service, const CronJob* job) {
                 }
 
                 save_jobs(service);
+                cron_service_signal(service);
                 pthread_mutex_unlock(&service->mutex);
                 return strdup(current->job.id);
             }
@@ -613,6 +643,7 @@ char* cron_service_add_job(CronService* service, const CronJob* job) {
 
     save_jobs(service); // Save after adding
 
+    cron_service_signal(service);
     pthread_mutex_unlock(&service->mutex);
     return result_id;
 }
@@ -637,6 +668,7 @@ bool cron_service_remove_job(CronService* service, const char* job_id) {
             
             save_jobs(service); // Save after removing
             
+            cron_service_signal(service);
             pthread_mutex_unlock(&service->mutex);
             return true;
         }

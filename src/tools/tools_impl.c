@@ -224,7 +224,7 @@ static char* shell_escape_single_quotes(const char* input) {
 
 // Helper to create directories recursively
 static void ensure_dir(const char* path) {
-    char tmp[512];
+    char tmp[FILE_PATH_MAX];
     char *p = NULL;
     size_t len;
 

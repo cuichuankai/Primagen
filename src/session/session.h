@@ -29,6 +29,8 @@ struct Session {
     time_t created_at;
     time_t updated_at;
     size_t last_consolidated;
+    size_t last_saved_count;
+    bool needs_full_save;
     pthread_mutex_t mutex;
     int ref_count;
 };

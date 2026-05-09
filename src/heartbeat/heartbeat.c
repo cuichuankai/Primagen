@@ -26,7 +26,7 @@ struct HeartbeatService {
 static char* read_heartbeat_file(const char* workspace) {
     if (!workspace) return NULL;
 
-    char path[512];
+    char path[FILE_PATH_MAX];
     snprintf(path, sizeof(path), "%s/HEARTBEAT.md", workspace);
 
     FILE* f = fopen(path, "r");

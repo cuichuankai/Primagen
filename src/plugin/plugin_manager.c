@@ -39,7 +39,9 @@ static void string_list_add(StringList* list, const char* path) {
         list->files = new_files;
         list->capacity = new_capacity;
     }
-    list->files[list->count++] = strdup(path);
+    char* dup = strdup(path);
+    if (!dup) return;
+    list->files[list->count++] = dup;
 }
 
 StringList* scan_directory(const char* dir_path, const char* extension) {

@@ -35,7 +35,7 @@ static void dynamic_array_clear_impl(DynamicArray* arr) {
 }
 
 static void send_error_response(AgentLoop* loop, const char* channel, const char* chat_id, const char* error_msg) {
-    char full_msg[512];
+    char full_msg[ERROR_MSG_MAX];
     snprintf(full_msg, sizeof(full_msg), "Sorry, I encountered an error: %s", error_msg);
     OutboundMessage* outbound = outbound_message_new(channel, chat_id, full_msg);
     message_bus_send_outbound(loop->bus, outbound);
@@ -103,6 +103,7 @@ static void maybe_auto_consolidate_memory(AgentLoop* loop, Session* session, con
     }
 
     session->last_consolidated = session->messages.count;
+    session->needs_full_save = true;  // Force full rewrite after consolidation
     Error save_err = session_manager_save(loop->session_mgr, session);
     if (save_err.code != ERR_NONE) {
         log_error("[AgentLoop] Failed to persist session consolidation cursor: %s", save_err.message);
@@ -187,7 +188,15 @@ void agent_loop_free(AgentLoop* loop) {
     if (!loop) return;
 
     if (agent_loop_is_running(loop) || loop->processing_thread_started) {
-        agent_loop_stop(loop);
+        // Signal stop: set running=false, close bus, broadcast cond
+        // The lock is only held briefly — NOT across pthread_join
+        atomic_store(&loop->running, false);
+        pthread_mutex_lock(&loop->inbox_mutex);
+        message_bus_close(loop->bus);
+        pthread_cond_broadcast(&loop->inbox_cond);
+        pthread_mutex_unlock(&loop->inbox_mutex);
+        log_debug("[AgentLoop] Stop requested");
+
         if (loop->processing_thread_started && !pthread_equal(pthread_self(), loop->processing_thread)) {
             pthread_join(loop->processing_thread, NULL);
             loop->processing_thread_started = false;
@@ -399,7 +408,7 @@ void refresh_tool_routes(AgentLoop* loop, const char* channel, const char* chat_
 
 typedef struct {
     AgentLoop* loop;
-    char session_key[256];
+    char session_key[SESSION_KEY_MAX];
 } AsyncContext;
 
 static void handle_llm_callback(Error err, const char* response, ToolCall* tool_calls, size_t tool_calls_count, void* user_data) {
@@ -462,7 +471,7 @@ static void tool_executor_callback(Error err, const char* result, void* user_dat
 
 typedef struct {
     AgentLoop* loop;
-    char session_key[256];
+    char session_key[SESSION_KEY_MAX];
     char tool_call_id[128];
     char tool_name[128];
 } ToolAsyncContext;
@@ -474,6 +483,85 @@ static void tool_executor_callback(Error err, const char* result, void* user_dat
     InternalEvent* event = internal_event_new_tool_result(ctx->session_key, ctx->tool_call_id, ctx->tool_name, result, err);
     message_bus_send_internal(ctx->loop->bus, event);
     free(ctx);
+}
+
+static void handle_llm_text_response(AgentLoop* loop, InternalEvent* event, Session* session, TaskSnapshot* snap, char* clean_content, bool clean_content_owned) {
+    const char* assistant_content = (clean_content && strlen(clean_content) > 0) ? clean_content : event->llm_response.data;
+    if (assistant_content && strlen(assistant_content) > 0) {
+        Message* assistant_msg = message_new(ROLE_ASSISTANT, assistant_content);
+        session_add_message(session, assistant_msg);
+        session_manager_save(loop->session_mgr, session);
+    }
+
+    const char* final_out = (assistant_content && strlen(assistant_content) > 0) ? assistant_content : "";
+    OutboundMessage* outbound = (final_out && strlen(final_out) > 0)
+        ? outbound_message_new(snap->channel, snap->chat_id, final_out)
+        : outbound_message_new(snap->channel, snap->chat_id, "");
+    message_bus_send_outbound(loop->bus, outbound);
+
+    if (clean_content_owned) free(clean_content);
+    remove_active_task(loop, snap->task_id);
+}
+
+static void handle_llm_tool_calls(AgentLoop* loop, InternalEvent* event, Session* session, TaskSnapshot* snap, char* clean_content, bool clean_content_owned) {
+    for (size_t i = 0; i < event->tool_calls_count; i++) {
+        if (tool_registry_get(loop->tool_registry, event->tool_calls[i].name.data) == NULL &&
+            strcmp(event->tool_calls[i].name.data, "skill") != 0) {
+            char skill_args[256];
+            char original_name[128];
+            snprintf(original_name, sizeof(original_name), "%s", event->tool_calls[i].name.data);
+            snprintf(skill_args, sizeof(skill_args), "{\"action\":\"load\",\"name\":\"%s\"}", original_name);
+            string_free(&event->tool_calls[i].name);
+            event->tool_calls[i].name = string_new("skill");
+            string_free(&event->tool_calls[i].arguments);
+            event->tool_calls[i].arguments = string_new(skill_args);
+            log_info("[AgentLoop] Rewriting unresolved tool '%s' to skill load", original_name);
+        }
+    }
+
+    if (clean_content && strlen(clean_content) > 0) {
+        OutboundMessage* progress = outbound_message_new(snap->channel, snap->chat_id, clean_content);
+        message_bus_send_outbound(loop->bus, progress);
+    }
+
+    Message* assistant_msg = message_new(ROLE_ASSISTANT, clean_content ? clean_content : event->llm_response.data);
+    for (size_t i = 0; i < event->tool_calls_count; i++) {
+        message_add_tool_call(assistant_msg, event->tool_calls[i].id.data, event->tool_calls[i].name.data, event->tool_calls[i].arguments.data);
+    }
+    session_add_message(session, assistant_msg);
+    session_manager_save(loop->session_mgr, session);
+
+    if (clean_content_owned) free(clean_content);
+
+    session_orchestrator_update_task_state(loop->session_orchestrator, event->session_key.data, SESSION_STATE_WAITING_TOOL);
+    session_orchestrator_update_task_pending_tools(loop->session_orchestrator, event->session_key.data, (int)event->tool_calls_count);
+
+    refresh_tool_routes(loop, snap->channel, snap->chat_id);
+
+    for (size_t i = 0; i < event->tool_calls_count; i++) {
+        ToolAsyncContext* tctx = malloc(sizeof(ToolAsyncContext));
+        if (!tctx) {
+            log_error("[AgentLoop] Failed to allocate ToolAsyncContext for tool %s", event->tool_calls[i].name.data);
+            InternalEvent* err_event = internal_event_new_tool_result(
+                event->session_key.data,
+                event->tool_calls[i].id.data,
+                event->tool_calls[i].name.data,
+                "Internal error: out of memory",
+                error_new(ERR_MEMORY, "Failed to allocate tool context")
+            );
+            message_bus_send_internal(loop->bus, err_event);
+            continue;
+        }
+        tctx->loop = loop;
+        strncpy(tctx->session_key, event->session_key.data, sizeof(tctx->session_key) - 1);
+        tctx->session_key[sizeof(tctx->session_key) - 1] = '\0';
+        strncpy(tctx->tool_call_id, event->tool_calls[i].id.data, sizeof(tctx->tool_call_id) - 1);
+        tctx->tool_call_id[sizeof(tctx->tool_call_id) - 1] = '\0';
+        strncpy(tctx->tool_name, event->tool_calls[i].name.data, sizeof(tctx->tool_name) - 1);
+        tctx->tool_name[sizeof(tctx->tool_name) - 1] = '\0';
+
+        tool_executor_submit_async(loop->tool_executor, event->tool_calls[i].name.data, event->tool_calls[i].arguments.data, tool_executor_callback, tctx);
+    }
 }
 
 static void handle_event_llm_result(AgentLoop* loop, InternalEvent* event) {
@@ -495,7 +583,7 @@ static void handle_event_llm_result(AgentLoop* loop, InternalEvent* event) {
     
     if (event->llm_error.code != ERR_NONE) {
         log_error("[AgentLoop] LLM call error: %s", event->llm_error.message);
-        char full_msg[512];
+        char full_msg[ERROR_MSG_MAX];
         snprintf(full_msg, sizeof(full_msg), "Sorry, I encountered an error: %s", event->llm_error.message);
         Message* assistant_msg = message_new(ROLE_ASSISTANT, full_msg);
         session_add_message(session, assistant_msg);
@@ -511,84 +599,9 @@ static void handle_event_llm_result(AgentLoop* loop, InternalEvent* event) {
     bool clean_content_owned = (clean_content != NULL && clean_content != event->llm_response.data);
 
     if (event->tool_calls_count == 0) {
-        const char* assistant_content = (clean_content && strlen(clean_content) > 0) ? clean_content : event->llm_response.data;
-        if (assistant_content && strlen(assistant_content) > 0) {
-            Message* assistant_msg = message_new(ROLE_ASSISTANT, assistant_content);
-            session_add_message(session, assistant_msg);
-            session_manager_save(loop->session_mgr, session);
-        }
-        
-        const char* final_out = (assistant_content && strlen(assistant_content) > 0) ? assistant_content : "";
-        if (final_out && strlen(final_out) > 0) {
-            OutboundMessage* outbound = outbound_message_new(snap.channel, snap.chat_id, final_out);
-            message_bus_send_outbound(loop->bus, outbound);
-        } else {
-            OutboundMessage* outbound = outbound_message_new(snap.channel, snap.chat_id, "");
-            message_bus_send_outbound(loop->bus, outbound);
-        }
-        
-        if (clean_content_owned) free(clean_content);
-        
-        remove_active_task(loop, snap.task_id);
+        handle_llm_text_response(loop, event, session, &snap, clean_content, clean_content_owned);
     } else {
-        for (size_t i = 0; i < event->tool_calls_count; i++) {
-            if (tool_registry_get(loop->tool_registry, event->tool_calls[i].name.data) == NULL &&
-                strcmp(event->tool_calls[i].name.data, "skill") != 0) {
-                char skill_args[256];
-                char original_name[128];
-                snprintf(original_name, sizeof(original_name), "%s", event->tool_calls[i].name.data);
-                snprintf(skill_args, sizeof(skill_args), "{\"action\":\"load\",\"name\":\"%s\"}", original_name);
-                string_free(&event->tool_calls[i].name);
-                event->tool_calls[i].name = string_new("skill");
-                string_free(&event->tool_calls[i].arguments);
-                event->tool_calls[i].arguments = string_new(skill_args);
-                log_info("[AgentLoop] Rewriting unresolved tool '%s' to skill load", original_name);
-            }
-        }
-
-        if (clean_content && strlen(clean_content) > 0) {
-            OutboundMessage* progress = outbound_message_new(snap.channel, snap.chat_id, clean_content);
-            message_bus_send_outbound(loop->bus, progress);
-        }
-
-        Message* assistant_msg = message_new(ROLE_ASSISTANT, clean_content ? clean_content : event->llm_response.data);
-        for (size_t i = 0; i < event->tool_calls_count; i++) {
-            message_add_tool_call(assistant_msg, event->tool_calls[i].id.data, event->tool_calls[i].name.data, event->tool_calls[i].arguments.data);
-        }
-        session_add_message(session, assistant_msg);
-        session_manager_save(loop->session_mgr, session);
-
-        if (clean_content_owned) free(clean_content);
-
-        session_orchestrator_update_task_state(loop->session_orchestrator, event->session_key.data, SESSION_STATE_WAITING_TOOL);
-        session_orchestrator_update_task_pending_tools(loop->session_orchestrator, event->session_key.data, (int)event->tool_calls_count);
-        
-        refresh_tool_routes(loop, snap.channel, snap.chat_id);
-        
-        for (size_t i = 0; i < event->tool_calls_count; i++) {
-            ToolAsyncContext* tctx = malloc(sizeof(ToolAsyncContext));
-            if (!tctx) {
-                log_error("[AgentLoop] Failed to allocate ToolAsyncContext for tool %s", event->tool_calls[i].name.data);
-                InternalEvent* err_event = internal_event_new_tool_result(
-                    event->session_key.data,
-                    event->tool_calls[i].id.data,
-                    event->tool_calls[i].name.data,
-                    "Internal error: out of memory",
-                    error_new(ERR_MEMORY, "Failed to allocate tool context")
-                );
-                message_bus_send_internal(loop->bus, err_event);
-                continue;
-            }
-            tctx->loop = loop;
-            strncpy(tctx->session_key, event->session_key.data, sizeof(tctx->session_key) - 1);
-            tctx->session_key[sizeof(tctx->session_key) - 1] = '\0';
-            strncpy(tctx->tool_call_id, event->tool_calls[i].id.data, sizeof(tctx->tool_call_id) - 1);
-            tctx->tool_call_id[sizeof(tctx->tool_call_id) - 1] = '\0';
-            strncpy(tctx->tool_name, event->tool_calls[i].name.data, sizeof(tctx->tool_name) - 1);
-            tctx->tool_name[sizeof(tctx->tool_name) - 1] = '\0';
-            
-            tool_executor_submit_async(loop->tool_executor, event->tool_calls[i].name.data, event->tool_calls[i].arguments.data, tool_executor_callback, tctx);
-        }
+        handle_llm_tool_calls(loop, event, session, &snap, clean_content, clean_content_owned);
     }
 }
 

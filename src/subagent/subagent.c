@@ -28,7 +28,7 @@ static void generate_subagent_task_id(char* buf, size_t size) {
 // Active subagent task tracking
 typedef struct SubagentTaskNode {
     char task_id[32];
-    char session_key[256];  // "channel:chat_id"
+    char session_key[SESSION_KEY_MAX];  // "channel:chat_id"
     char* origin_channel;
     char* origin_chat_id;
     AgentLoop* loop;
