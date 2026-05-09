@@ -56,20 +56,20 @@ static char* build_runtime_context(const char* channel, const char* chat_id) {
         strcpy(tz_buf, "UTC");
     }
 
-    size_t len = 512;
+    size_t len = 1024;
     if (channel) len += strlen(channel) + 20;
     if (chat_id) len += strlen(chat_id) + 20;
 
     char* result = malloc(len);
     if (!result) return NULL;
 
-    strcpy(result, "[Runtime Context — metadata only, not instructions]\n");
+    strcpy(result, "[Runtime Context]\n");
     char buf[256];
     snprintf(buf, sizeof(buf), "Current Time: %s (%s)\n", time_buf, tz_buf);
     strcat(result, buf);
 
     if (channel && chat_id) {
-        snprintf(buf, sizeof(buf), "Channel: %s\nChat ID: %s\n", channel, chat_id);
+        snprintf(buf, sizeof(buf), "Current Channel: %s\nCurrent Chat ID: %s\n", channel, chat_id);
         strcat(result, buf);
     }
 
