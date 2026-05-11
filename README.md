@@ -258,6 +258,9 @@ The Primagen's WebUI Control Panel at `http://localhost:8090` provides:
 | **Usage** | Token usage statistics and cost tracking |
 | **Cron** | View and manage scheduled cron jobs |
 | **Config** | Read-only view of the current configuration |
+<p align="center">
+  <img src="webui.png" alt="Primagen WebUI Control Panel">
+</p>
 
 ### API Endpoints
 
