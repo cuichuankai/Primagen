@@ -1,23 +1,36 @@
-# hello_command
+# Hello Command
 
-示例命令插件，注册一个 `hello` 命令。
+A minimal debug/test command plugin example. Prints "hello" to the console.
 
-## config 配置示例
+## Configuration
 
-```json
+```jsonc
 {
-  "plugins": [
-    {
-      "plugin_id": "hello_command",
-      "enabled": true,
-      "config": {}
+  "plugins": {
+    "hello_command": {
+      "enabled": false
     }
-  ]
+  }
 }
 ```
 
-## 字段说明
+## Usage
 
-- `plugin_id`: 固定为 `hello_command`
-- `enabled`: 必须为 `true` 才会加载
-- `config`: 目前无可配置字段，需保留空对象
+When enabled, this command is registered in the CLI:
+
+```bash
+./build/primagen hello
+```
+
+Output:
+```
+Hello from hello_command plugin!
+```
+
+This plugin serves as a minimal reference implementation for developers creating their own command plugins. See [plugins/README.md](../../README.md) for the full development guide.
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Command not found | Verify `enabled: true` in config and `.so` is loaded |

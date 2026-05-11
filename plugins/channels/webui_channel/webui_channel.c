@@ -34,6 +34,7 @@ typedef struct {
     Config* cfg;
     PluginConfig* plugin_cfg;
     LoadedPlugin* plugin;
+    PluginManager* plugin_mgr;
     pthread_t server_thread;
     pthread_mutex_t lock;
     bool running;
@@ -53,7 +54,7 @@ static const char* WEBUI_HTML =
 "<html data-theme='light'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>Primagen Admin</title>"
 "<style>"
-"*{box-sizing:border-box}:root{--primary:#5645d4;--primary-pressed:#4534b3;--primary-deep:#3a2a99;--on-primary:#ffffff;--brand-navy:#0a1530;--brand-navy-deep:#070f24;--brand-navy-mid:#1a2a52;--brand-pink:#ff64c8;--brand-pink-deep:#a02e6d;--brand-orange:#dd5b00;--brand-orange-deep:#793400;--brand-purple:#7b3ff2;--brand-purple-light:#d6b6f6;--brand-purple-deep:#391c57;--brand-teal:#2a9d99;--brand-green:#1aae39;--brand-yellow:#f5d75e;--brand-brown:#523410;--card-tint-peach:#ffe8d4;--card-tint-rose:#fde0ec;--card-tint-mint:#d9f3e1;--card-tint-lavender:#e6e0f5;--card-tint-sky:#dcecfa;--card-tint-yellow:#fef7d6;--card-tint-yellow-bold:#f9e79f;--card-tint-cream:#f8f5e8;--card-tint-gray:#f0eeec;--canvas:#ffffff;--surface:#f6f5f4;--surface-soft:#fafaf9;--hairline:#e5e3df;--hairline-soft:#ede9e4;--hairline-strong:#c8c4be;--ink-deep:#000000;--ink:#1a1a1a;--charcoal:#37352f;--slate:#5d5b54;--steel:#787671;--stone:#a4a097;--muted:#bbb8b1;--on-dark:#ffffff;--on-dark-muted:#a4a097;--success:#1aae39;--warning:#dd5b00;--error:#e03131;--link:#0075de;--r-xs:4px;--r-sm:6px;--r-md:8px;--r-lg:12px;--r-xl:16px;--r-xxl:20px;--r-full:9999px;--shadow-1:rgba(15,15,15,.04) 0 1px 2px 0;--shadow-2:rgba(15,15,15,.08) 0 4px 12px 0;--shadow-mockup:rgba(15,15,15,.20) 0 24px 48px -8px;--shadow-modal:rgba(15,15,15,.16) 0 16px 48px -8px;--bg:#f6f5f4;--bg-grad:#fafaf9;--panel:#ffffff;--panel-2:#f6f5f4;--text:#37352f;--muted:#787671;--line:#e5e3df;--line-strong:#c8c4be;--glow:rgba(86,69,212,.18);--shadow:0 4px 12px rgba(15,15,15,.08);--font:'Notion Sans','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif}html[data-theme='dark']{--brand-navy:#0a1530;--brand-navy-deep:#070f24;--bg:#070f24;--bg-grad:#0a1530;--panel:#0f1d30;--panel-2:#152238;--text:#e2e8f0;--muted:#8b9dc3;--line:#1e3050;--line-strong:#2a4a6e;--canvas:#0a1530;--surface:#0f1d30;--surface-soft:#0c1828;--hairline:#1e3050;--hairline-soft:#253d5e;--hairline-strong:#2a4a6e;--ink-deep:#ffffff;--ink:#e2e8f0;--charcoal:#cbd5e1;--slate:#94a3b8;--steel:#8b9dc3;--stone:#7c8db0;--primary:#7c6ff7;--primary-pressed:#6a5ce6;--primary-soft:#2a3558;--accent-soft:#1a3a2a;--card-tint-peach:#3d2618;--card-tint-rose:#3d1a2a;--card-tint-mint:#162e1c;--card-tint-lavender:#221a3d;--card-tint-sky:#162238;--card-tint-yellow:#332d14;--card-tint-cream:#2a2822;--card-tint-yellow-bold:#3d3218;--on-dark-muted:#7c8db0;--glow:rgba(124,111,247,.22);--shadow:0 4px 16px rgba(0,0,0,.40);--shadow-1:rgba(0,0,0,.20) 0 1px 2px 0;--shadow-2:rgba(0,0,0,.35) 0 4px 12px 0;--shadow-mockup:rgba(0,0,0,.55) 0 24px 48px -8px;--shadow-modal:rgba(0,0,0,.50) 0 16px 48px -8px}body{font-family:var(--font);margin:0;background:var(--bg);color:var(--text);position:relative;overflow:hidden}.promo-banner{background:var(--surface);color:var(--ink);font-size:13px;font-weight:500;text-align:center;padding:8px 16px;border-bottom:1px solid var(--hairline);position:relative;z-index:2;letter-spacing:.1px}.promo-banner a{color:var(--link);text-decoration:none;font-weight:600}.promo-banner a:hover{text-decoration:underline}"
+"*{box-sizing:border-box}:root{--primary:#5645d4;--primary-pressed:#4534b3;--primary-deep:#3a2a99;--on-primary:#ffffff;--brand-navy:#0a1530;--brand-navy-deep:#070f24;--brand-navy-mid:#1a2a52;--brand-pink:#ff64c8;--brand-pink-deep:#a02e6d;--brand-orange:#dd5b00;--brand-orange-deep:#793400;--brand-purple:#7b3ff2;--brand-purple-light:#d6b6f6;--brand-purple-deep:#391c57;--brand-teal:#2a9d99;--brand-green:#1aae39;--brand-yellow:#f5d75e;--brand-brown:#523410;--card-tint-peach:#ffe8d4;--card-tint-rose:#fde0ec;--card-tint-mint:#d9f3e1;--card-tint-lavender:#e6e0f5;--card-tint-sky:#dcecfa;--card-tint-yellow:#fef7d6;--card-tint-yellow-bold:#f9e79f;--card-tint-cream:#f8f5e8;--card-tint-gray:#f0eeec;--canvas:#ffffff;--surface:#f6f5f4;--surface-soft:#fafaf9;--hairline:#e5e3df;--hairline-soft:#ede9e4;--hairline-strong:#c8c4be;--ink-deep:#000000;--ink:#1a1a1a;--charcoal:#37352f;--slate:#5d5b54;--steel:#787671;--stone:#a4a097;--muted:#bbb8b1;--on-dark:#ffffff;--on-dark-muted:#a4a097;--success:#1aae39;--warning:#dd5b00;--error:#e03131;--link:#0075de;--r-xs:4px;--r-sm:6px;--r-md:8px;--r-lg:12px;--r-xl:16px;--r-xxl:20px;--r-full:9999px;--shadow-1:rgba(15,15,15,.04) 0 1px 2px 0;--shadow-2:rgba(15,15,15,.08) 0 4px 12px 0;--shadow-mockup:rgba(15,15,15,.20) 0 24px 48px -8px;--shadow-modal:rgba(15,15,15,.16) 0 16px 48px -8px;--bg:#f6f5f4;--bg-grad:#fafaf9;--panel:#ffffff;--panel-2:#f6f5f4;--text:#37352f;--muted:#787671;--line:#e5e3df;--line-strong:#c8c4be;--glow:rgba(86,69,212,.18);--shadow:0 4px 12px rgba(15,15,15,.08);--font:'Notion Sans','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif}html[data-theme='dark']{--brand-navy:#0a1530;--brand-navy-deep:#070f24;--bg:#070f24;--bg-grad:#0a1530;--panel:#0f1d30;--panel-2:#152238;--text:#e2e8f0;--muted:#8b9dc3;--line:#1e3050;--line-strong:#2a4a6e;--canvas:#0a1530;--surface:#0f1d30;--surface-soft:#0c1828;--hairline:#1e3050;--hairline-soft:#253d5e;--hairline-strong:#2a4a6e;--ink-deep:#ffffff;--ink:#e2e8f0;--charcoal:#cbd5e1;--slate:#94a3b8;--steel:#8b9dc3;--stone:#7c8db0;--primary:#7c6ff7;--primary-pressed:#6a5ce6;--primary-soft:#2a3558;--accent-soft:#1a3a2a;--card-tint-peach:#3d2618;--card-tint-rose:#3d1a2a;--card-tint-mint:#162e1c;--card-tint-lavender:#221a3d;--card-tint-sky:#162238;--card-tint-yellow:#332d14;--card-tint-cream:#2a2822;--card-tint-yellow-bold:#3d3218;--on-dark-muted:#7c8db0;--glow:rgba(124,111,247,.22);--shadow:0 4px 16px rgba(0,0,0,.40);--shadow-1:rgba(0,0,0,.20) 0 1px 2px 0;--shadow-2:rgba(0,0,0,.35) 0 4px 12px 0;--shadow-mockup:rgba(0,0,0,.55) 0 24px 48px -8px;--shadow-modal:rgba(0,0,0,.50) 0 16px 48px -8px}body{font-family:var(--font);margin:0;background:var(--bg);color:var(--text);position:relative;overflow:hidden}"
 ".layout{display:flex;height:calc(100vh - 36px);position:relative;z-index:1}.sidebar{width:240px;background:var(--panel);border-right:1px solid var(--hairline);display:flex;flex-direction:column;transition:width .2s ease;position:relative}"
 ".sidebar.collapsed{width:68px}.brand{display:flex;align-items:center;justify-content:space-between;padding:14px 14px;border-bottom:1px solid var(--hairline);height:60px}.brand-main{display:flex;align-items:center;gap:10px}.logo{width:30px;height:30px;border-radius:var(--r-sm);background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;box-shadow:0 2px 8px rgba(86,69,212,.25)}"
 ".brand-text{font-size:17px;font-weight:600;color:var(--text);white-space:nowrap;letter-spacing:-.2px}.sidebar.collapsed .brand-text{display:none}.menu{padding:8px 6px;overflow:auto}"
@@ -82,7 +83,6 @@ static const char* WEBUI_HTML =
 "@media(max-width:980px){.sidebar{position:fixed;z-index:30;height:100vh;left:0;top:0;transform:translateX(0)}.sidebar.mobile-hidden{transform:translateX(-100%)}.menu-btn{display:inline-flex}}html[data-theme='dark'] .topbar{background:rgba(15,29,48,.92);border-bottom:1px solid var(--hairline);box-shadow:0 1px 0 var(--hairline)}html[data-theme='dark'] .quick-actions button{background:rgba(255,255,255,.08);color:#fff;border-color:rgba(255,255,255,.12)}html[data-theme='dark'] .quick-actions button:hover{background:rgba(255,255,255,.18)}html[data-theme='dark'] .tag{background:#3d2610;color:#f5a67f;border-color:#5c3818}html[data-theme='dark'] .path{background:var(--panel);border-color:var(--hairline)}html[data-theme='dark'] .menu-btn,html[data-theme='dark'] .theme-btn{background:var(--panel);border-color:var(--hairline);color:var(--text)}html[data-theme='dark'] .theme-btn:hover{border-color:var(--primary);box-shadow:0 0 0 3px rgba(124,111,247,.18)}"
 "</style>"
 "</head><body>"
-"<div class='promo-banner'>Primagen Operations Center — 统一监控、控制与配置入口 &nbsp;|&nbsp; <a href='#/chat'>进入工作台</a></div>"
 "<div class='layout'>"
 "<aside id='sidebar' class='sidebar'>"
 "<div class='brand'><div class='brand-main'><div class='logo'>P</div><div class='brand-text'>Primagen</div></div><button id='sidebarToggle' class='icon-btn' aria-label='toggle sidebar'><span id='sidebarToggleIcon' class='icon'></span></button></div>"
@@ -298,14 +298,50 @@ static void cleanup_old_replies(WebUIChannelData* data) {
 static void resolve_config_path(WebUIChannelData* data) {
     if (!data) return;
     data->config_path[0] = '\0';
+
+    if (data->plugin_mgr && data->plugin_mgr->external_dir) {
+        const char* ext_dir = data->plugin_mgr->external_dir;
+        size_t ext_len = strlen(ext_dir);
+        const char* suffix = "/plugins";
+        size_t suffix_len = strlen(suffix);
+        if (ext_len >= suffix_len &&
+            strcmp(ext_dir + ext_len - suffix_len, suffix) == 0) {
+            size_t base_len = ext_len - suffix_len;
+            const char* config_suffix = "/config.json";
+            if (base_len + strlen(config_suffix) + 1 < sizeof(data->config_path)) {
+                memcpy(data->config_path, ext_dir, base_len);
+                data->config_path[base_len] = '\0';
+                strcat(data->config_path, config_suffix);
+                log_debug("[WebUI] Resolved config_path from plugin_mgr: %s", data->config_path);
+                return;
+            }
+        }
+    }
+
     if (!data->plugin || !data->plugin->path) return;
-    const char* marker = strstr(data->plugin->path, "/.primagen/plugins/");
-    if (!marker) return;
-    size_t prefix_len = (size_t)(marker - data->plugin->path);
-    if (prefix_len + strlen("/.primagen/config.json") + 1 >= sizeof(data->config_path)) return;
-    memcpy(data->config_path, data->plugin->path, prefix_len);
-    data->config_path[prefix_len] = '\0';
-    strcat(data->config_path, "/.primagen/config.json");
+    const char* path = data->plugin->path;
+    const char* marker = strstr(path, "/.primagen/plugins/");
+    if (marker) {
+        size_t prefix_len = (size_t)(marker - path);
+        if (prefix_len + strlen("/.primagen/config.json") + 1 < sizeof(data->config_path)) {
+            memcpy(data->config_path, path, prefix_len);
+            data->config_path[prefix_len] = '\0';
+            strcat(data->config_path, "/.primagen/config.json");
+            log_debug("[WebUI] Resolved config_path from plugin path (abs): %s", data->config_path);
+            return;
+        }
+    }
+    if (strncmp(path, ".primagen/plugins/", strlen(".primagen/plugins/")) == 0) {
+        const char* config_suffix = "config.json";
+        if (strlen(config_suffix) + 1 < sizeof(data->config_path)) {
+            memcpy(data->config_path, ".primagen/", strlen(".primagen/"));
+            data->config_path[strlen(".primagen/")] = '\0';
+            strcat(data->config_path, config_suffix);
+            log_debug("[WebUI] Resolved config_path from plugin path (rel): %s", data->config_path);
+            return;
+        }
+    }
+    log_warn("[WebUI] Failed to resolve config_path from plugin path: %s", path ? path : "NULL");
 }
 
 static void send_json(struct mg_connection* c, int status, const char* json) {
@@ -1308,6 +1344,34 @@ static void handle_settings_docs(struct mg_connection* c, WebUIChannelData* data
     send_items_response(c, items);
 }
 
+static char* find_so_path(const char* dir, const char* plugin_id) {
+    if (!dir || !plugin_id) return NULL;
+    DIR* d = opendir(dir);
+    if (!d) return NULL;
+    struct dirent* entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        char full_path[FILE_PATH_MAX];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir, entry->d_name);
+        struct stat st;
+        if (lstat(full_path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            char* found = find_so_path(full_path, plugin_id);
+            if (found) { closedir(d); return found; }
+        } else if (S_ISREG(st.st_mode)) {
+            size_t namelen = strlen(entry->d_name);
+            size_t idlen = strlen(plugin_id);
+            if (namelen == idlen + 3 && strncmp(entry->d_name, plugin_id, idlen) == 0 &&
+                strcmp(entry->d_name + idlen, ".so") == 0) {
+                closedir(d);
+                return strdup(full_path);
+            }
+        }
+    }
+    closedir(d);
+    return NULL;
+}
+
 static void handle_control_plugin_enable(struct mg_connection* c, struct mg_http_message* hm, WebUIChannelData* data) {
     if (!data || !data->cfg) {
         send_json(c, 500, "{\"error\":\"invalid_state\"}");
@@ -1355,8 +1419,54 @@ static void handle_control_plugin_enable(struct mg_connection* c, struct mg_http
         send_json(c, 404, "{\"error\":\"plugin_not_found\"}");
         return;
     }
+
     bool saved = false;
     if (data->config_path[0] != '\0') saved = config_save_to_file(data->cfg, data->config_path);
+    log_info("[WebUI] Plugin %s %s (saved=%d)", plugin_id->valuestring, enabled_value ? "enabled" : "disabled", saved);
+
+    if (data->plugin_mgr && enabled_value) {
+        LoadedPlugin* existing = plugin_manager_find_plugin(data->plugin_mgr, plugin_id->valuestring);
+        if (!existing) {
+            char* so_path = find_so_path(data->plugin_mgr->external_dir, plugin_id->valuestring);
+            if (so_path) {
+                int ret = plugin_manager_load_plugin(data->plugin_mgr, so_path);
+                if (ret == 0) {
+                    LoadedPlugin* loaded = plugin_manager_find_plugin(data->plugin_mgr, plugin_id->valuestring);
+                    if (loaded && loaded->type == PLUGIN_CHANNEL && data->plugin_mgr->channels) {
+                        for (size_t i = 0; i < data->plugin_mgr->channels->count; i++) {
+                            Channel* ch = *(Channel**)dynamic_array_get(data->plugin_mgr->channels, i);
+                            if (ch && ch->plugin_ref == loaded) {
+                                if (ch->start) ch->start(ch);
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    log_warn("[WebUI] Failed to load plugin %s", plugin_id->valuestring);
+                }
+                free(so_path);
+            } else {
+                log_warn("[WebUI] .so file not found for plugin %s", plugin_id->valuestring);
+            }
+        }
+    } else if (data->plugin_mgr && !enabled_value) {
+        LoadedPlugin* existing = plugin_manager_find_plugin(data->plugin_mgr, plugin_id->valuestring);
+        if (existing) {
+            if (existing->type == PLUGIN_CHANNEL && data->plugin_mgr->channels) {
+                for (size_t i = 0; i < data->plugin_mgr->channels->count; i++) {
+                    Channel** ch_ptr = (Channel**)dynamic_array_get(data->plugin_mgr->channels, i);
+                    if (*ch_ptr && (*ch_ptr)->plugin_ref == existing) {
+                        Channel* ch = *ch_ptr;
+                        if (ch->stop) ch->stop(ch);
+                        if (ch->destroy) ch->destroy(ch);
+                        *ch_ptr = NULL;
+                        break;
+                    }
+                }
+            }
+            plugin_manager_unload_plugin(data->plugin_mgr, existing);
+        }
+    }
     cJSON_Delete(req);
     cJSON* resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "ok", true);
@@ -1542,6 +1652,7 @@ static bool webui_init(Channel* self, Config* cfg, MessageBus* bus) {
     data->bus = bus;
     data->cfg = cfg;
     data->plugin = g_plugin_instance;
+    data->plugin_mgr = self->plugin_mgr;
     data->plugin_cfg = config_get_plugin_config(cfg, "webui_channel");
     data->port = 16714;
     if (data->plugin_cfg && data->plugin_cfg->config) {

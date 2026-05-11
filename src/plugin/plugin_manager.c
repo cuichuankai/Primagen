@@ -610,6 +610,8 @@ int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
         return -1;
     }
 
+    channel->plugin_mgr = manager;
+
     // Lock to protect access to manager->config, manager->bus, manager->channels
     pthread_mutex_lock(&manager->lock);
 

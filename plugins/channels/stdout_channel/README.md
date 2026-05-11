@@ -1,23 +1,40 @@
-# stdout_channel
+# Stdout Channel
 
-用于将消息直接输出到标准输出。
+Output-only channel that writes agent replies to stdout. Useful for scripting, piping, and headless automation.
 
-## config 配置示例
+## Configuration
 
-```json
+```jsonc
 {
-  "plugins": [
-    {
-      "plugin_id": "stdout_channel",
-      "enabled": true,
-      "config": {}
+  "channels": {
+    "stdout": {
+      "enabled": false
     }
-  ]
+  }
 }
 ```
 
-## 字段说明
+## Usage
 
-- `plugin_id`: 固定为 `stdout_channel`
-- `enabled`: 必须为 `true` 才会加载
-- `config`: 目前无可配置字段，需保留空对象
+When enabled, all agent reply messages are piped to stdout in JSON format. Each line is a JSON object:
+
+```json
+{"channel":"stdout","chat_id":"default","message":"Hello, how can I help?"}
+```
+
+### Scripting Example
+
+```bash
+# Pipe agent output to a log file
+./build/primagen agent 2>/dev/null | grep '"message"' > agent_log.jsonl
+
+# Process with jq
+./build/primagen agent | jq '.message'
+```
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| No output | Verify `enabled: true` in config; check other channels aren't consuming replies |
+| Output mixed with logs | Agent logs go to stderr; stdout channel output goes to stdout — use `2>/dev/null` for clean output |

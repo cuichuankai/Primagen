@@ -1,32 +1,52 @@
-# web_tools
+# Web Tools
 
-提供 `web_search` 与 `web_fetch` 两个工具。
+Provides web search and web fetch capabilities to the agent.
 
-## config 配置示例
+## Tools
 
-```json
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `web_search` | Search the web via a search API | `query` (required), `num_results` (optional) |
+| `web_fetch` | Fetch and extract text content from a URL | `url` (required), `raw` (optional boolean) |
+
+## Configuration
+
+```jsonc
 {
-  "dns": {
-    "dns4": "udp://223.5.5.5:53",
-    "dnsTimeoutMs": 10000
-  },
-  "plugins": [
-    {
-      "plugin_id": "web_tools",
-      "enabled": true,
+  "plugins": {
+    "web_tools": {
+      "enabled": false,
       "config": {
-        "search_enabled": true,
-        "search_api_key": "your_search_api_key"
+        "search_api": "duckduckgo",
+        "search_api_key": "",
+        "proxy": "",
+        "timeout": 30,
+        "max_results": 5
       }
     }
-  ]
+  }
 }
 ```
 
-## 字段说明
+| Field | Description |
+|-------|-------------|
+| `search_api` | Search backend: `duckduckgo` (free), `serpapi`, `brave` |
+| `search_api_key` | API key for paid search backends |
+| `proxy` | HTTP/HTTPS proxy URL (e.g., `http://127.0.0.1:8080`) |
+| `timeout` | Request timeout in seconds (default: 30) |
+| `max_results` | Maximum search results returned (default: 5) |
 
-- `plugin_id`: 固定为 `web_tools`
-- `enabled`: 必须为 `true` 才会加载
-- `config.search_enabled`: 是否开启 `web_search`
-- `config.search_api_key`: 搜索 API Key
-- `dns.*`: 全局 DNS，可选；不配置时使用 Mongoose 默认 DNS
+## Environment Variables
+
+```
+PRIMAGEN_TOOLS_WEB_PROXY=http://127.0.0.1:8080
+PRIMAGEN_TOOLS_WEB_SEARCH_API_KEY=sk-xxxxxxxxxxxxxxxx
+```
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Search returns no results | Verify network access; try setting a `proxy` if behind firewall |
+| Rate limited | DuckDuckGo has rate limits; switch to a paid API backend |
+| Fetch fails with timeout | Increase `timeout`; check URL accessibility |

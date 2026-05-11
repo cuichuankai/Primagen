@@ -1,23 +1,40 @@
-# echo_tool
+# Echo Tool
 
-示例工具插件，提供 `echo` 工具。
+A debug/test tool that echoes back the input parameters. Useful for verifying the tool invocation pipeline and as a minimal example for plugin development.
 
-## config 配置示例
+## Tool Definition
 
-```json
+- **Name**: `echo`
+- **Parameters**: `message` (string, required)
+- **Returns**: The input `message` as-is
+
+## Configuration
+
+```jsonc
 {
-  "plugins": [
-    {
-      "plugin_id": "echo_tool",
-      "enabled": true,
-      "config": {}
+  "plugins": {
+    "echo_tool": {
+      "enabled": false
     }
-  ]
+  }
 }
 ```
 
-## 字段说明
+## Usage
 
-- `plugin_id`: 固定为 `echo_tool`
-- `enabled`: 必须为 `true` 才会加载
-- `config`: 目前无可配置字段，需保留空对象
+The agent can invoke this tool:
+```json
+{"message": "Hello, world!"}
+```
+
+Returns:
+```json
+{"echo": "Hello, world!"}
+```
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Tool not available | Verify `enabled: true` in config and `.so` is loaded; check WebUI → Plugins → Tools |
+| `message` parameter missing | The `message` field is required; check JSON schema |

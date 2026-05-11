@@ -1,30 +1,40 @@
-# telegram_channel
+# Telegram Channel
 
-用于接入 Telegram 收发消息。
+Telegram bot channel. Receives messages via Telegram Bot API and sends agent replies.
 
-## config 配置示例
+## Configuration
 
-```json
+```jsonc
 {
-  "dns": {
-    "dns4": "udp://223.5.5.5:53",
-    "dnsTimeoutMs": 10000
-  },
-  "plugins": [
-    {
-      "plugin_id": "telegram_channel",
-      "enabled": true,
-      "config": {
-        "token": "123456:telegram_bot_token"
-      }
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "bot_token": "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
     }
-  ]
+  }
 }
 ```
 
-## 字段说明
+| Field | Description |
+|-------|-------------|
+| `bot_token` | Telegram Bot API token from @BotFather |
 
-- `plugin_id`: 固定为 `telegram_channel`
-- `enabled`: 必须为 `true` 才会加载
-- `config.token`: Telegram Bot Token
-- `dns.*`: 全局 DNS，可选；不配置时使用 Mongoose 默认 DNS
+## Setup
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) on Telegram
+2. Copy the bot token
+3. Enable `telegram` channel in config and set `bot_token`
+
+## Features
+
+- Text message replies
+- Support for bot commands (`/help`, `/clear`, etc.)
+- Long message splitting for messages exceeding Telegram limits
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Bot not responding | Verify bot token is correct; check network connectivity |
+| Long messages truncated | Messages are auto-split by the channel if too long |
+| Rate limiting | Telegram has rate limits (~30 msg/s); reduce sending frequency |

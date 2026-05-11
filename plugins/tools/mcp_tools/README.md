@@ -1,43 +1,27 @@
-# mcp_tools
+# MCP Tools
 
-`mcp_tools` is a tool plugin that connects Primagen to MCP servers and registers remote MCP capabilities into the tool registry at runtime.
+MCP (Model Context Protocol) client plugin. Connects to external MCP servers to discover and use their tools.
 
-## Path
+## Tool Definition
 
-- Source: `plugins/tools/mcp_tools/`
-- Build output: `build/.primagen/plugins/tools/mcp_tools.so`
-- Runtime install: `.primagen/plugins/tools/mcp_tools.so`
-
-## Build
-
-```bash
-cd plugins/tools/mcp_tools
-make
-```
-
-Build all tool plugins from repository root:
-
-```bash
-make -C plugins tools
-```
+- **Name**: `mcp`
+- **Description**: Call an MCP server tool by name with JSON arguments
 
 ## Configuration
 
-Configure this plugin in `.primagen/config.json`:
-
-```json
+```jsonc
 {
-  "plugins": [
-    {
-      "plugin_id": "mcp_tools",
-      "enabled": true,
+  "plugins": {
+    "mcp_tools": {
+      "enabled": false,
       "config": {
         "servers": [
           {
-            "id": "filesystem",
+            "id": "my-mcp-server",
             "transport": "stdio",
             "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/workspace"]
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            "env": {}
           },
           {
             "id": "remote_tools",
@@ -65,22 +49,47 @@ Configure this plugin in `.primagen/config.json`:
         ]
       }
     }
-  ]
+  }
 }
 ```
 
-## Server Fields
+| Field | Description |
+|-------|-------------|
+| `id` | Unique identifier for the MCP server instance |
+| `transport` | Transport protocol for connecting to the server instance |
+| `command` | Command to spawn the MCP server |
+| `args` | Arguments for the command |
+| `env` | Environment variables for the server process |
+| `url` | URL for the server instance |
+| `request_url` | URL for the server instance to send requests |
+| `headers` | HTTP headers for the server instance to send requests with |
 
-- `id`: unique MCP server identifier.
-- `transport`: `stdio`, `websocket`, `sse`, or `streamable_http`.
-- `command`: required for `stdio`.
-- `args`: optional for `stdio`; for `sse` and `streamable_http`, used as extra request args.
-- `url`: required for `websocket`, `sse`, `streamable_http`.
-- `request_url`: optional for `sse` and `streamable_http`; defaults to `url`.
-- `headers`: optional object for custom HTTP headers on `sse` and `streamable_http`.
+## Usage
+
+The agent discovers tools from connected MCP servers and calls them:
+
+```json
+{
+  "server": "my-mcp-server",
+  "tool": "read_file",
+  "arguments": {
+    "path": "/tmp/test.txt"
+  }
+}
+```
+
+Each MCP server's tools are registered under its server name to avoid conflicts.
 
 ## Notes
 
 - `mcp_tools` registers MCP tools with `mcp_` name prefix.
 - The plugin also registers `mcp_list_resources`, `mcp_read_resource`, and `mcp_list_prompts`.
 - Reserved headers such as `Host` and `Content-Length` cannot be overridden.
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Server fails to start | Verify `command` and `args` are correct; test manually first |
+| MCP tools not discovered | Check `agent.log` for server connection errors |
+| Tool call returns error | Verify tool name and arguments match the server's schema |

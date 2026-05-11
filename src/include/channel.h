@@ -22,6 +22,7 @@ struct Channel {
     void (*destroy)(Channel* self);
     void* user_data;
     void* plugin_ref;  // Reference to loaded plugin (for cleanup)
+    struct PluginManager* plugin_mgr;  // Reference to PluginManager for runtime enable/disable
 };
 
 // Channel factory function type
