@@ -30,15 +30,17 @@
 CHANNELS_DIR = channels
 TOOLS_DIR = tools
 COMMANDS_DIR = commands
+LLM_DIR = llm
 
 # Collect all plugin subdirectories
 CHANNEL_PLUGINS := $(wildcard $(CHANNELS_DIR)/*)
 TOOL_PLUGINS := $(wildcard $(TOOLS_DIR)/*)
 COMMAND_PLUGINS := $(wildcard $(COMMANDS_DIR)/*)
+LLM_PLUGINS := $(wildcard $(LLM_DIR)/*)
 
 # Mark all phony targets
-.PHONY: all clean install rebuild tools channels commands android help native install-native
-.PHONY: $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS)
+.PHONY: all clean install rebuild tools channels commands llm android help native install-native
+.PHONY: $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS) $(LLM_PLUGINS)
 
 # Default target - build all plugins
 all: native
@@ -51,7 +53,7 @@ all: native
 # Native builds
 # =============================================================================
 
-native: channels tools commands
+native: channels tools commands llm
 
 channels: $(CHANNEL_PLUGINS)
 
@@ -59,8 +61,10 @@ tools: $(TOOL_PLUGINS)
 
 commands: $(COMMAND_PLUGINS)
 
+llm: $(LLM_PLUGINS)
+
 # Build individual plugins (use subshell for cd)
-$(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS):
+$(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS) $(LLM_PLUGINS):
 	@echo ""
 	@echo "--- Building plugin: $@ ---"
 	@(cd $@ && $(MAKE) --no-print-directory)
@@ -71,7 +75,7 @@ $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS):
 
 android: check-android-ndk
 	@echo "Building all plugins for Android..."
-	@for plugin in $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS); do \
+	@for plugin in $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS) $(LLM_PLUGINS); do \
 		echo "--- Building Android plugin: $$plugin ---"; \
 		(cd $$plugin && $(MAKE) --no-print-directory android ANDROID_NDK=$(ANDROID_NDK)) || true; \
 	done
@@ -95,7 +99,7 @@ endif
 install: native
 	@echo ""
 	@echo "Installing plugins..."
-	@for plugin in $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS); do \
+	@for plugin in $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS) $(LLM_PLUGINS); do \
 		(cd $$plugin && $(MAKE) --no-print-directory install) || true; \
 	done
 	@echo ""
@@ -107,7 +111,7 @@ install: native
 
 clean:
 	@echo "Cleaning all plugins..."
-	@for plugin in $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS); do \
+	@for plugin in $(CHANNEL_PLUGINS) $(TOOL_PLUGINS) $(COMMAND_PLUGINS) $(LLM_PLUGINS); do \
 		(cd $$plugin && $(MAKE) --no-print-directory clean) || true; \
 	done
 	@echo "All plugins cleaned."
@@ -128,6 +132,7 @@ help:
 	@echo "  channels      - Build channel plugins only"
 	@echo "  tools         - Build tool plugins only"
 	@echo "  commands      - Build command plugins only"
+	@echo "  llm           - Build LLM provider plugins"
 	@echo "  install       - Build and install all plugins"
 	@echo "  clean         - Remove all built artifacts"
 	@echo "  rebuild       - Clean and rebuild all plugins"
@@ -140,7 +145,8 @@ help:
 	@echo "  build/.primagen/plugins/"
 	@echo "  ├── channels/   - Channel plugin .so files"
 	@echo "  ├── tools/      - Tool plugin .so files"
-	@echo "  └── commands/   - Command plugin .so files"
+	@echo "  ├── commands/   - Command plugin .so files"
+	@echo "  └── llm/        - LLM provider plugin .so files"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make                                    # Build all native plugins"

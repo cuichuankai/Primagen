@@ -62,6 +62,7 @@ OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/agent/tool_router.o \
       $(OBJDIR)/agent/session_orchestrator.o \
       $(OBJDIR)/providers/llm_provider.o \
+      $(OBJDIR)/providers/openai_provider.o \
       $(OBJDIR)/subagent/subagent.o \
       $(OBJDIR)/cron/cron.o \
       $(OBJDIR)/heartbeat/heartbeat.o \

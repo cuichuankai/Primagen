@@ -2,6 +2,7 @@
 build/
 # Runtime directories
 .primagen/
+tmp/
 
 *.o
 *.so
@@ -16,7 +17,14 @@ build/
 **/*.dylib
 
 # Test artifacts
-tests/
+tests/test_llm_provider_registry
+tests/test_config_provider
+tests/test_ft_integration
+tests/test_runtime_fixes
+tests/run_*
+tests/ut_*
+!tests/ut_test.h
+tests/*.dSYM/
 unit_tests
 *.out
 

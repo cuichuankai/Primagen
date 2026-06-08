@@ -32,6 +32,18 @@ typedef struct {
 
 void tool_context_set_route(ToolContext* ctx, const char* channel, const char* chat_id);
 void tool_context_destroy(void* user_data);
+ToolContext* tool_context_clone_with_route(ToolContext* ctx, const char* channel, const char* chat_id);
+
+/* Allocates a new ToolContext, initializes all fields, sets the magic
+ * stamp, and prepares the route mutex. Returns NULL on OOM. */
+ToolContext* tool_context_new(MessageBus* bus,
+                              SubagentManager* subagent_mgr,
+                              CronService* cron_service,
+                              SkillsLoader* skills_loader,
+                              Memory* memory,
+                              Config* config,
+                              PluginManager* plugin_mgr,
+                              const char* workspace);
 
 // FileSystem tools
 Error tool_read_file(void* user_data, const char* args_json, String* result);

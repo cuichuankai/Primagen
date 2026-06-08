@@ -14,6 +14,12 @@
  *
  * Never acquire in reverse order. If Session.mutex is held,
  * do not attempt to acquire SessionManager.rwlock.
+ *
+ * Lifetime: a Session lives in the manager's hash table for the entire
+ * lifetime of the manager. session_ref() / session_unref() track external
+ * references but do NOT free the session. Free happens in
+ * session_manager_free(). This avoids the get/unref race where a concurrent
+ * get() could return a pointer the unref path was about to free.
  */
 
 typedef struct Session Session;
@@ -50,6 +56,7 @@ Session* session_manager_create(SessionManager* mgr, const char* key);
 Error session_manager_save(SessionManager* mgr, Session* session);
 Error session_manager_load(SessionManager* mgr, const char* key, Session** session);
 void session_add_message(Session* session, Message* msg);
+void session_rollback_messages(Session* session, size_t to_count);
 Session* session_ref(Session* session);
 void session_unref(Session* session);
 

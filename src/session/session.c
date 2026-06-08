@@ -166,6 +166,8 @@ void session_manager_free(SessionManager* mgr) {
 
 Session* session_manager_get(SessionManager* mgr, const char* key) {
     if (!mgr || !key) return NULL;
+    /* rdlock is sufficient: session_unref no longer frees (sessions are
+     * freed by session_manager_free), so a borrow is race-free. */
     pthread_rwlock_rdlock(&mgr->rwlock);
     uint32_t bucket = session_key_hash_fast(key);
     SessionEntry* entry = mgr->buckets[bucket];
@@ -194,9 +196,7 @@ static void serialize_message_to_fp(FILE* f, Message* msg) {
     if (msg->role == ROLE_USER) cJSON_AddStringToObject(msg_obj, "role", "user");
     else if (msg->role == ROLE_ASSISTANT) cJSON_AddStringToObject(msg_obj, "role", "assistant");
     else cJSON_AddStringToObject(msg_obj, "role", "tool");
-    if (msg->content.len > 0) {
-        cJSON_AddStringToObject(msg_obj, "content", msg->content.data);
-    }
+    cJSON_AddStringToObject(msg_obj, "content", msg->content.data ? msg->content.data : "");
     cJSON_AddStringToObject(msg_obj, "timestamp", msg->timestamp.data);
 
     if (msg->role == ROLE_ASSISTANT && msg->tool_calls_count > 0) {
@@ -273,8 +273,6 @@ Error session_manager_save(SessionManager* mgr, Session* session) {
         serialize_metadata_to_fp(f, session, total_count);
         for (size_t i = 0; i < total_count; i++) {
             Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
-            if (msg->role == ROLE_TOOL) continue;
-            if (msg->role == ROLE_ASSISTANT && msg->content.len == 0) continue;
             serialize_message_to_fp(f, msg);
         }
         session->last_saved_count = total_count;
@@ -296,8 +294,6 @@ Error session_manager_save(SessionManager* mgr, Session* session) {
 
         for (size_t i = saved_count; i < total_count; i++) {
             Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
-            if (msg->role == ROLE_TOOL) continue;
-            if (msg->role == ROLE_ASSISTANT && msg->content.len == 0) continue;
             serialize_message_to_fp(f, msg);
         }
         session->last_saved_count = total_count;
@@ -440,6 +436,28 @@ void session_add_message(Session* session, Message* msg) {
     pthread_mutex_unlock(&session->mutex);
 }
 
+void session_rollback_messages(Session* session, size_t to_count) {
+    if (!session) return;
+    pthread_mutex_lock(&session->mutex);
+    if (to_count >= session->messages.count) {
+        pthread_mutex_unlock(&session->mutex);
+        return;
+    }
+    for (size_t i = to_count; i < session->messages.count; i++) {
+        Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
+        if (msg) message_free(msg);
+    }
+    session->messages.count = to_count;
+    if (session->last_saved_count > to_count) {
+        session->last_saved_count = to_count;
+    }
+    if (session->last_consolidated > to_count) {
+        session->last_consolidated = to_count;
+    }
+    session->updated_at = time(NULL);
+    pthread_mutex_unlock(&session->mutex);
+}
+
 Session* session_ref(Session* session) {
     if (!session) return NULL;
     pthread_mutex_lock(&session->mutex);
@@ -451,18 +469,9 @@ Session* session_ref(Session* session) {
 void session_unref(Session* session) {
     if (!session) return;
     pthread_mutex_lock(&session->mutex);
+    /* Sessions are kept alive in the manager's hash table; we just decrement.
+     * The actual free happens in session_manager_free. Callers that want
+     * strict lifecycle control should call session_manager_remove (TODO). */
     session->ref_count--;
-    if (session->ref_count <= 0) {
-        pthread_mutex_unlock(&session->mutex);
-        string_free(&session->key);
-        for (size_t j = 0; j < session->messages.count; j++) {
-            Message* msg = *(Message**)dynamic_array_get(&session->messages, j);
-            message_free(msg);
-        }
-        dynamic_array_free(&session->messages);
-        pthread_mutex_destroy(&session->mutex);
-        free(session);
-        return;
-    }
     pthread_mutex_unlock(&session->mutex);
 }

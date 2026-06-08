@@ -13,7 +13,7 @@
 #include <stdio.h>
 #include <time.h>
 
-extern void add_active_task(AgentLoop* loop, const char* task_id, const char* session_key, pthread_t thread, InboundMessage* msg);
+/* add_active_task is declared in agent_loop.h */
 extern void refresh_tool_routes(AgentLoop* loop, const char* channel, const char* chat_id);
 extern void trigger_llm_async(AgentLoop* loop, Session* session, const char* session_key, const char* channel, const char* chat_id);
 
@@ -390,7 +390,7 @@ static bool handle_skill_fallback_command(AgentLoop* loop, InboundMessage* inbou
 
             char task_id[32];
             snprintf(task_id, sizeof(task_id), "task_%ld_%d", time(NULL), (int)(random() % 10000));
-            add_active_task(loop, task_id, key, pthread_self(), inbound);
+            add_active_task(loop, task_id, key, pthread_self(), inbound, session->messages.count);
             session_orchestrator_update_task_state(loop->session_orchestrator, key, SESSION_STATE_WAITING_LLM);
             session_orchestrator_increment_task_turn(loop->session_orchestrator, key);
             trigger_llm_async(loop, session, key, inbound->channel.data, inbound->chat_id.data);

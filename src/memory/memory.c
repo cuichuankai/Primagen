@@ -7,13 +7,32 @@
 
 #define DEFAULT_MAX_TOKENS 4000  // Maximum tokens before consolidation
 #define CONSOLIDATION_THRESHOLD 0.8  // Consolidate when 80% full
+/* Hard cap on memory.md and history.md to prevent unbounded growth.
+ * ~512 KiB is plenty for typical agent use; consolidation is triggered
+ * well before this on normal traffic. */
+#define MEMORY_HARD_CAP_BYTES (512 * 1024)
+#define HISTORY_HARD_CAP_BYTES (1024 * 1024)
 
 static void append_history_buffer_unlocked(Memory* mem, const char* entry) {
-    char* new_data = malloc(mem->history_md.len + strlen(entry) + 2);
+    if (!mem || !entry) return;
+    size_t entry_len = strlen(entry);
+    size_t need = mem->history_md.len + entry_len + 2;  // +2 for '\n' and NUL
+    if (need > HISTORY_HARD_CAP_BYTES) {
+        log_warn("[Memory] history.md would exceed hard cap (%zu bytes); dropping entry", need);
+        return;
+    }
+    char* new_data = malloc(need);
     if (!new_data) return;
-    strcpy(new_data, mem->history_md.data);
-    strcat(new_data, entry);
-    strcat(new_data, "\n");
+    /* Build with two memcpys + NUL — no strcat chains. */
+    size_t off = 0;
+    if (mem->history_md.len > 0) {
+        memcpy(new_data, mem->history_md.data, mem->history_md.len);
+        off = mem->history_md.len;
+    }
+    memcpy(new_data + off, entry, entry_len);
+    off += entry_len;
+    new_data[off++] = '\n';
+    new_data[off] = '\0';
     string_free(&mem->history_md);
     mem->history_md = string_new(new_data);
     free(new_data);
@@ -34,7 +53,7 @@ static void add_fact_unlocked(Memory* mem, const char* fact) {
     if (!mem || !fact || fact[0] == '\0') return;
     if (fact_exists_unlocked(mem, fact)) return;
     const char* section = "## Important Notes";
-    char* pos = strstr(mem->memory_md.data, section);
+    char* pos = strstr(mem->memory_md.data ? mem->memory_md.data : "", section);
     size_t insert_idx = mem->memory_md.len;
     if (pos) {
         pos += strlen(section);
@@ -45,20 +64,29 @@ static void add_fact_unlocked(Memory* mem, const char* fact) {
     }
     size_t fact_len = strlen(fact);
     bool need_newline = (insert_idx > 0 && mem->memory_md.data[insert_idx - 1] != '\n');
-    size_t new_total_len = mem->memory_md.len + fact_len + 64;
-    char* new_data = malloc(new_total_len);
+    size_t need = mem->memory_md.len + fact_len + (need_newline ? 4 : 3);  // \n + "- " + fact + \n + NUL
+    if (need > MEMORY_HARD_CAP_BYTES) {
+        log_warn("[Memory] memory.md would exceed hard cap (%zu bytes); dropping fact", need);
+        return;
+    }
+    char* new_data = malloc(need);
     if (!new_data) return;
+    size_t off = 0;
     if (insert_idx > 0) {
         memcpy(new_data, mem->memory_md.data, insert_idx);
+        off = insert_idx;
     }
-    new_data[insert_idx] = '\0';
-    if (need_newline) strcat(new_data, "\n");
-    strcat(new_data, "- ");
-    strcat(new_data, fact);
-    strcat(new_data, "\n");
+    if (need_newline) new_data[off++] = '\n';
+    new_data[off++] = '-';
+    new_data[off++] = ' ';
+    memcpy(new_data + off, fact, fact_len);
+    off += fact_len;
+    new_data[off++] = '\n';
     if (insert_idx < mem->memory_md.len) {
-        strcat(new_data, mem->memory_md.data + insert_idx);
+        memcpy(new_data + off, mem->memory_md.data + insert_idx, mem->memory_md.len - insert_idx);
+        off += mem->memory_md.len - insert_idx;
     }
+    new_data[off] = '\0';
     string_free(&mem->memory_md);
     mem->memory_md = string_new(new_data);
     free(new_data);
@@ -318,13 +346,22 @@ Error memory_consolidate(Memory* mem, const char* workspace_path) {
     if (cut_pos > data) {
         const char* marker = "\n\n[Previous history consolidated to save space]\n";
         size_t marker_len = strlen(marker);
-        size_t remaining_len = len - (cut_pos - data);
-
-        char* new_history = malloc(marker_len + remaining_len + 1);
+        size_t remaining_len = len - (size_t)(cut_pos - data);
+        size_t total = marker_len + remaining_len + 1;
+        if (total > HISTORY_HARD_CAP_BYTES) {
+            log_warn("[Memory] consolidation would produce %zu bytes; clamping", total);
+            total = HISTORY_HARD_CAP_BYTES;
+        }
+        char* new_history = malloc(total);
         if (new_history) {
-            strcpy(new_history, marker);
-            strcat(new_history, cut_pos);
-
+            size_t off = 0;
+            memcpy(new_history, marker, marker_len);
+            off = marker_len;
+            if (remaining_len > 0) {
+                memcpy(new_history + off, cut_pos, remaining_len);
+                off += remaining_len;
+            }
+            new_history[off] = '\0';
             string_free(&mem->history_md);
             mem->history_md = string_new(new_history);
             free(new_history);

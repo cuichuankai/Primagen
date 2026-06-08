@@ -6,12 +6,13 @@
 #include "../bus/message_bus.h"
 #include "../tools/tool.h"
 #include "../context/context_builder.h"
+#include "../providers/llm_provider.h"
 
 typedef struct SubagentManager SubagentManager;
 
 typedef struct {
-    const char* task;
-    const char* label;
+    char* task;
+    char* label;
     const char* origin_channel;
     const char* origin_chat_id;
 } SubagentSpawnRequest;
@@ -19,14 +20,14 @@ typedef struct {
 typedef struct {
     MessageBus* bus;
     Config* config;
-    void* provider;
+    LLMProvider* provider;
     char* workspace;
     ToolRegistry* tool_registry;
     ContextBuilder* ctx_builder;
 } SubagentSharedContext;
 
 SubagentSharedContext* subagent_shared_context_create(
-    void* provider,
+    LLMProvider* provider,
     const char* workspace,
     void* bus,
     Config* config

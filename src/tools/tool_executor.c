@@ -46,8 +46,13 @@ static void* tool_executor_worker(void* arg) {
 
         // Execute the tool
         String result = string_new("");
-        Error err = tool_registry_execute(executor->tool_reg, request->tool_name,
-                                          request->arguments, &result);
+        Error err = tool_registry_execute_with_user_data(
+            executor->tool_reg,
+            request->tool_name,
+            request->arguments,
+            request->tool_user_data_override,
+            &result
+        );
 
         // Call callback
         if (request->callback) {
@@ -56,6 +61,9 @@ static void* tool_executor_worker(void* arg) {
 
         // Cleanup
         string_free(&result);
+        if (request->tool_user_data_override && request->tool_user_data_destroy) {
+            request->tool_user_data_destroy(request->tool_user_data_override);
+        }
         free(request->tool_name);
         free(request->arguments);
         free(request);
@@ -128,6 +136,9 @@ void tool_executor_destroy(ToolExecutor* executor) {
     ToolExecutionRequest* request = executor->request_queue;
     while (request) {
         ToolExecutionRequest* next = request->next;
+        if (request->tool_user_data_override && request->tool_user_data_destroy) {
+            request->tool_user_data_destroy(request->tool_user_data_override);
+        }
         free(request->tool_name);
         free(request->arguments);
         free(request);
@@ -146,6 +157,14 @@ void tool_executor_destroy(ToolExecutor* executor) {
 int tool_executor_submit(ToolExecutor* executor, const char* tool_name,
                          const char* arguments, void* context,
                          void (*callback)(void* context, const char* tool_name, const char* result, Error err)) {
+    return tool_executor_submit_with_user_data(executor, tool_name, arguments, NULL, NULL, context, callback);
+}
+
+int tool_executor_submit_with_user_data(ToolExecutor* executor, const char* tool_name,
+                                        const char* arguments, void* tool_user_data,
+                                        ToolUserDataDestroyFunc tool_user_data_destroy,
+                                        void* context,
+                                        void (*callback)(void* context, const char* tool_name, const char* result, Error err)) {
     if (!executor || !tool_name) return -1;
 
     ToolExecutionRequest* request = calloc(1, sizeof(ToolExecutionRequest));
@@ -159,6 +178,8 @@ int tool_executor_submit(ToolExecutor* executor, const char* tool_name,
         free(request);
         return -1;
     }
+    request->tool_user_data_override = tool_user_data;
+    request->tool_user_data_destroy = tool_user_data_destroy;
     request->context = context;
     request->callback = callback;
     request->next = NULL;
@@ -242,16 +263,24 @@ static void async_callback_wrapper(void* context, const char* tool_name, const c
 }
 
 void tool_executor_submit_async(ToolExecutor* executor, const char* tool_name, const char* args_json, ToolAsyncCallback callback, void* user_data) {
+    tool_executor_submit_async_with_user_data(executor, tool_name, args_json, NULL, NULL, callback, user_data);
+}
+
+void tool_executor_submit_async_with_user_data(ToolExecutor* executor, const char* tool_name, const char* args_json,
+                                               void* tool_user_data, ToolUserDataDestroyFunc tool_user_data_destroy,
+                                               ToolAsyncCallback callback, void* user_data) {
     AsyncCallbackWrapperCtx* ctx = malloc(sizeof(AsyncCallbackWrapperCtx));
     if (!ctx) {
+        if (tool_user_data && tool_user_data_destroy) tool_user_data_destroy(tool_user_data);
         if (callback) callback(error_new(ERR_MEMORY, "OOM allocating async context"), NULL, user_data);
         return;
     }
     ctx->original_callback = callback;
     ctx->original_user_data = user_data;
-    int ret = tool_executor_submit(executor, tool_name, args_json, ctx, async_callback_wrapper);
+    int ret = tool_executor_submit_with_user_data(executor, tool_name, args_json, tool_user_data, tool_user_data_destroy, ctx, async_callback_wrapper);
     if (ret != 0) {
         free(ctx);
+        if (tool_user_data && tool_user_data_destroy) tool_user_data_destroy(tool_user_data);
         if (callback) callback(error_new(ERR_TOOL, "Failed to submit tool execution"), NULL, user_data);
     }
 }

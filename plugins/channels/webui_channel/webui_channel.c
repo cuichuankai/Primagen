@@ -449,13 +449,14 @@ static void handle_get_config(struct mg_connection* c, WebUIChannelData* data) {
     cJSON* agent = cJSON_CreateObject();
     cJSON* log = cJSON_CreateObject();
     cJSON* webui = cJSON_CreateObject();
-    cJSON_AddStringToObject(agent, "model", data->cfg->agent.model ? data->cfg->agent.model : "");
-    cJSON_AddStringToObject(agent, "apiBase", data->cfg->agent.api_base ? data->cfg->agent.api_base : "");
-    cJSON_AddNumberToObject(agent, "temperature", data->cfg->agent.temperature);
-    cJSON_AddNumberToObject(agent, "max_tokens", data->cfg->agent.max_tokens);
+    ProviderConfig* pc = config_get_active_provider(data->cfg);
+    cJSON_AddStringToObject(agent, "model", (pc && pc->model) ? pc->model : "");
+    cJSON_AddStringToObject(agent, "apiBase", (pc && pc->api_base) ? pc->api_base : "");
+    cJSON_AddNumberToObject(agent, "temperature", pc ? pc->temperature : 0.1);
+    cJSON_AddNumberToObject(agent, "max_tokens", pc ? pc->max_tokens : 4096);
     cJSON_AddNumberToObject(agent, "max_tool_iterations", data->cfg->agent.max_tool_iterations);
     cJSON_AddNumberToObject(agent, "memory_window", data->cfg->agent.memory_window);
-    cJSON_AddStringToObject(agent, "reasoning_effort", data->cfg->agent.reasoning_effort ? data->cfg->agent.reasoning_effort : "");
+    cJSON_AddStringToObject(agent, "reasoning_effort", (pc && pc->reasoning_effort) ? pc->reasoning_effort : "medium");
     cJSON_AddStringToObject(log, "level", data->cfg->log.level ? data->cfg->log.level : "INFO");
     cJSON_AddBoolToObject(log, "consoleOutput", data->cfg->log.console_output);
     cJSON_AddNumberToObject(webui, "port", data->port);
@@ -489,20 +490,29 @@ static void handle_update_config(struct mg_connection* c, struct mg_http_message
         return;
     }
     cJSON* item = NULL;
+    ProviderConfig* pc = config_get_active_provider(data->cfg);
+    if (!pc) {
+        pc = config_add_provider(data->cfg, "default");
+    }
+    if (!pc) {
+        send_json(c, 500, "{\"error\":\"provider_failed\"}");
+        cJSON_Delete(req);
+        return;
+    }
     item = cJSON_GetObjectItem(req, "model");
-    if (cJSON_IsString(item)) update_string(&data->cfg->agent.model, item);
+    if (cJSON_IsString(item)) update_string(&pc->model, item);
     item = cJSON_GetObjectItem(req, "apiBase");
-    if (cJSON_IsString(item)) update_string(&data->cfg->agent.api_base, item);
+    if (cJSON_IsString(item)) update_string(&pc->api_base, item);
     item = cJSON_GetObjectItem(req, "temperature");
-    if (cJSON_IsNumber(item)) data->cfg->agent.temperature = item->valuedouble;
+    if (cJSON_IsNumber(item)) pc->temperature = item->valuedouble;
     item = cJSON_GetObjectItem(req, "max_tokens");
-    if (cJSON_IsNumber(item)) data->cfg->agent.max_tokens = item->valueint;
+    if (cJSON_IsNumber(item)) pc->max_tokens = item->valueint;
     item = cJSON_GetObjectItem(req, "max_tool_iterations");
     if (cJSON_IsNumber(item)) data->cfg->agent.max_tool_iterations = item->valueint;
     item = cJSON_GetObjectItem(req, "memory_window");
     if (cJSON_IsNumber(item)) data->cfg->agent.memory_window = item->valueint;
     item = cJSON_GetObjectItem(req, "reasoning_effort");
-    if (cJSON_IsString(item)) update_string(&data->cfg->agent.reasoning_effort, item);
+    if (cJSON_IsString(item)) update_string(&pc->reasoning_effort, item);
     item = cJSON_GetObjectItem(req, "log_level");
     if (cJSON_IsString(item)) update_string(&data->cfg->log.level, item);
     item = cJSON_GetObjectItem(req, "console_output");
@@ -1271,7 +1281,8 @@ static void handle_control_usage(struct mg_connection* c, WebUIChannelData* data
     cJSON_AddItemToArray(items, a);
     cJSON* b = cJSON_CreateObject();
     cJSON_AddStringToObject(b, "name", "model");
-    cJSON_AddStringToObject(b, "value", (data && data->cfg && data->cfg->agent.model) ? data->cfg->agent.model : "");
+    ProviderConfig* pc = (data && data->cfg) ? config_get_active_provider(data->cfg) : NULL;
+    cJSON_AddStringToObject(b, "value", (pc && pc->model) ? pc->model : "");
     cJSON_AddItemToArray(items, b);
     cJSON* d = cJSON_CreateObject();
     cJSON_AddStringToObject(d, "name", "webui_port");
@@ -1450,7 +1461,7 @@ static void handle_control_plugin_enable(struct mg_connection* c, struct mg_http
             }
         }
     } else if (data->plugin_mgr && !enabled_value) {
-        LoadedPlugin* existing = plugin_manager_find_plugin(data->plugin_mgr, plugin_id->valuestring);
+        LoadedPlugin* existing = plugin_manager_get_loaded_plugin(data->plugin_mgr, plugin_id->valuestring);
         if (existing) {
             if (existing->type == PLUGIN_CHANNEL && data->plugin_mgr->channels) {
                 for (size_t i = 0; i < data->plugin_mgr->channels->count; i++) {

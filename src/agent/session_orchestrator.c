@@ -211,6 +211,8 @@ TaskSnapshot session_orchestrator_get_task(SessionOrchestrator* orchestrator, co
             snap.turn = current->task->ctx.turn;
             snap.pending_tool_count = current->task->pending_tool_count;
             snap.cancelled = current->task->cancelled;
+            snap.no_session_record = current->task->ctx.no_session_record;
+            snap.session_msg_count_before = current->task->ctx.session_msg_count_before;
             snap.valid = true;
             pthread_mutex_unlock(&orchestrator->task_mutex);
             return snap;
@@ -244,6 +246,8 @@ TaskSnapshot session_orchestrator_snapshot_task(SessionOrchestrator* orchestrato
             snap.turn = current->task->ctx.turn;
             snap.pending_tool_count = current->task->pending_tool_count;
             snap.valid = true;
+            snap.no_session_record = current->task->ctx.no_session_record;
+            snap.session_msg_count_before = current->task->ctx.session_msg_count_before;
             pthread_mutex_unlock(&orchestrator->task_mutex);
             return snap;
         }

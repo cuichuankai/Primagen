@@ -44,27 +44,37 @@ void string_append(String* s, const char* str) {
     if (str_len > SIZE_MAX - s->len - 1) return;
     size_t new_len = s->len + str_len;
     if (new_len + 1 > s->capacity) {
-        size_t new_cap = s->capacity;
+        size_t new_cap = s->capacity > 0 ? s->capacity : 16;
         while (new_cap < new_len + 1) {
             new_cap = new_cap * 2;
             if (new_cap < 16) new_cap = 16;
         }
-        char* new_data = realloc(s->data, new_cap);
-        if (!new_data) {
-            new_data = malloc(new_cap);
+        if (s->data == NULL || s->len == 0) {
+            /* Cold path: string was never allocated (post-OOM string_new).
+             * Just malloc fresh and skip the memcpy of old data. */
+            char* new_data = malloc(new_cap);
             if (!new_data) return;
-            memcpy(new_data, s->data, s->len);
-            new_data[s->len] = '\0';
-            free(s->data);
             s->data = new_data;
             s->capacity = new_cap;
         } else {
-            s->data = new_data;
+            char* new_data = realloc(s->data, new_cap);
+            if (!new_data) {
+                new_data = malloc(new_cap);
+                if (!new_data) return;
+                memcpy(new_data, s->data, s->len);
+                new_data[s->len] = '\0';
+                free(s->data);
+                s->data = new_data;
+            } else {
+                s->data = new_data;
+            }
             s->capacity = new_cap;
         }
     }
-    strcpy(s->data + s->len, str);
+    if (!s->data) return;
+    memcpy(s->data + s->len, str, str_len);
     s->len = new_len;
+    s->data[s->len] = '\0';
 }
 
 int string_equals(const String* a, const String* b) {

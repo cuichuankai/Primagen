@@ -69,10 +69,27 @@ int cmd_onboard(const char* config_path, const char* workspace_path) {
             fprintf(fp, "- You have access to various tools (cron, memory, exec, skill, etc.).\n");
             fprintf(fp, "- When user asks for something that matches a tool's purpose, CALL THAT TOOL.\n");
             fprintf(fp, "- Actually call the tool - don't just talk about it.\n\n");
+            fprintf(fp, "## Cron / Reminder Instructions\n\n");
+            fprintf(fp, "When the user asks you to set a reminder, schedule a task, or says anything like \"remind me in N minutes\", \"remind me every day at X\", you MUST call the `cron` tool. Text-only acknowledgment is NEVER sufficient.\n\n");
+            fprintf(fp, "1. **Always Call cron Tool**: Saying \"I've set a reminder for you\" or \"OK, I'll remind you\" WITHOUT calling the `cron` tool means NO reminder will be sent. You MUST call the tool.\n");
+            fprintf(fp, "2. **Convert Time Expressions**: Parse the user's time expression and convert to cron schedule format:\n");
+            fprintf(fp, "   - \"N minutes/seconds later\" -> `@in N*60` or `@in N`\n");
+            fprintf(fp, "   - \"Every day at X\" -> `0 X * * *`\n");
+            fprintf(fp, "   - \"Every hour\" -> `@every 3600`\n");
+            fprintf(fp, "3. **Cron Tool Examples**:\n");
+            fprintf(fp, "   - User says \"remind me to drink water in 1 minute\" -> Call `cron(name=\"drink-water\", payload=\"Remind the user to drink water\", schedule=\"@in 60\")`\n");
+            fprintf(fp, "   - User says \"remind me to have a meeting every day at 8am\" -> Call `cron(name=\"morning-meeting\", payload=\"Remind the user to have a meeting\", schedule=\"0 8 * * *\")`\n\n");
+            fprintf(fp, "**CRITICAL**: Claiming you set a reminder WITHOUT calling the `cron` tool means the user will NEVER receive the reminder. You MUST call the tool.\n\n");
             fprintf(fp, "## Core Memory Instructions\n\n");
             fprintf(fp, "You represent a long-term companion. To maintain continuity across sessions, you MUST proactively manage your memory.\n\n");
-            fprintf(fp, "1.  **Save Facts**: When the user provides important personal information (name, preferences, project details), IMMEDIATELY use the `memory` tool to save it.\n");
+            fprintf(fp, "1.  **Save Facts**: When the user provides important personal information (names, nicknames, relationships, preferences, project details), IMMEDIATELY use the `memory` tool to save it. Do NOT just acknowledge in text - you MUST call the `memory` tool.\n");
             fprintf(fp, "2.  **Consolidate History**: If a conversation covers important decisions or events, use the `memory` tool with `history_entry` to save a summary.\n");
+            fprintf(fp, "3.  **Remember Requests**: When the user explicitly asks you to \"remember\", \"save\", \"note\" something, you MUST call the `memory` tool with `memory_update` to persist the fact. Text-only acknowledgment is NOT sufficient.\n");
+            fprintf(fp, "4.  **Memory Tool Examples**:\n");
+            fprintf(fp, "    - User says \"remember his name is Long\" -> Call `memory(history_entry=\"[timestamp] User asked to remember: his name is Long\", memory_update=\"<updated MEMORY.md with new fact>\")`\n");
+            fprintf(fp, "    - User says \"my preference is X\" -> Call `memory(history_entry=\"[timestamp] User preference: X\", memory_update=\"<updated>\")`\n");
+            fprintf(fp, "    - User shares personal info -> Call `memory(history_entry=\"[timestamp] User info: ...\", memory_update=\"<updated>\")`\n\n");
+            fprintf(fp, "**CRITICAL**: Saying \"I've remembered that\" or \"Noted\" in text WITHOUT calling the `memory` tool means the information will be LOST after this session. You MUST call the tool.\n");
             fclose(fp);
             printf("[dim]Created AGENTS.md[/dim]\n");
         }
@@ -216,7 +233,9 @@ int cmd_status(Config* cfg, const char* config_path, const char* workspace_path)
     printf("Config:    %s (%s)\n", config_path, file_exists(config_path) ? "Exists" : "Missing");
     printf("Workspace: %s (%s)\n", workspace_path, file_exists(workspace_path) ? "Exists" : "Missing");
 
-    printf("Model:     %s\n", cfg->agent.model);
+    ProviderConfig* active_pc = config_get_active_provider(cfg);
+    printf("Provider:  %s\n", cfg->agent.provider);
+    printf("Model:     %s\n", active_pc ? active_pc->model : "(none)");
     printf("Heartbeat: %s (%ds)\n", cfg->heartbeat.enabled ? "Enabled" : "Disabled", cfg->heartbeat.interval_s);
 
     return 0;

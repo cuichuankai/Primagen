@@ -36,9 +36,7 @@ cron(name="morning-coffee", payload="Drink coffee", schedule="30 9 * * *")
 
 ## Important
 
-- **Do NOT proactively remind** about tasks you see in conversation history.
-- Scheduled tasks are handled automatically by the cron service.
-- If you see a past reminder in history (e.g., "30 秒后提醒我喝水"), **do not repeat it**.
-- Only send reminders when:
-  - The cron service triggers them (automatic)
-  - The user explicitly asks you to remind them NOW
+- **MUST call the cron tool** when user asks to set a reminder. Text-only acknowledgment is NEVER sufficient — the reminder will NOT be set unless you call the tool.
+- **Do NOT proactively remind** about tasks you see in conversation history. Only send reminder messages when the cron service triggers them automatically.
+- If you see a past reminder in conversation history that has already been delivered, **do not repeat it**.
+- When a NEW reminder request comes in, always call the cron tool regardless of any past reminders in history.

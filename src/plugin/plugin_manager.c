@@ -1,5 +1,6 @@
 #include "plugin_manager.h"
 #include "../include/logger.h"
+#include "../providers/llm_provider.h"
 #include <dlfcn.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -14,6 +15,13 @@
 // Cleanup a loaded plugin (called internally by plugin_manager_free)
 static void plugin_manager_cleanup_plugin(LoadedPlugin* plugin) {
     if (!plugin) return;
+
+    if (plugin->type == PLUGIN_LLM_PROVIDER) {
+        LLMProviderRegistry* registry = llm_provider_get_registry();
+        if (registry) {
+            llm_provider_registry_unregister_by_plugin(registry, plugin);
+        }
+    }
 
     // Call plugin's cleanup function if it has one
     if (plugin->cleanup) {
@@ -328,6 +336,8 @@ int plugin_manager_load_plugin(PluginManager* manager, const char* path) {
                 // Set default enabled state based on plugin type
                 if (plugin->type == PLUGIN_TOOL) {
                     plugin_config->enabled = true;
+                } else if (plugin->type == PLUGIN_LLM_PROVIDER) {
+                    plugin_config->enabled = true;
                 } else {
                     plugin_config->enabled = false;
                 }
@@ -357,6 +367,13 @@ void plugin_manager_unload_plugin(PluginManager* manager, LoadedPlugin* plugin) 
     if (!manager || !plugin) return;
 
     pthread_mutex_lock(&manager->lock);
+
+    if (plugin->type == PLUGIN_LLM_PROVIDER) {
+        LLMProviderRegistry* registry = llm_provider_get_registry();
+        if (registry) {
+            llm_provider_registry_unregister_by_plugin(registry, plugin);
+        }
+    }
 
     // Call cleanup
     if (plugin->cleanup) {
@@ -415,6 +432,13 @@ int plugin_manager_reload_plugin(PluginManager* manager, const char* plugin_id) 
 
     log_debug("[PluginManager] Reloading plugin: %s", plugin->name);
 
+    if (plugin->type == PLUGIN_LLM_PROVIDER) {
+        LLMProviderRegistry* registry = llm_provider_get_registry();
+        if (registry) {
+            llm_provider_registry_unregister_by_plugin(registry, plugin);
+        }
+    }
+
     // Call cleanup
     cleanup_fn = plugin->cleanup;
     if (cleanup_fn) {
@@ -452,7 +476,7 @@ int plugin_manager_reload_plugin(PluginManager* manager, const char* plugin_id) 
     pthread_mutex_unlock(&manager->lock);
 
     if (init_fn) {
-        int ret = init_fn(manager, NULL);
+        int ret = init_fn(manager, plugin);
         if (ret != 0) {
             log_error("[PluginManager] Plugin re-init failed: %s", path ? path : "(unknown)");
             pthread_mutex_lock(&manager->lock);
@@ -470,6 +494,20 @@ int plugin_manager_reload_plugin(PluginManager* manager, const char* plugin_id) 
 
     log_debug("[PluginManager] Plugin reloaded: %s", plugin->name);
     return 0;
+}
+
+LoadedPlugin* plugin_manager_get_loaded_plugin(PluginManager* manager, const char* plugin_id) {
+    if (!manager || !plugin_id) return NULL;
+
+    pthread_mutex_lock(&manager->lock);
+    for (LoadedPlugin* p = manager->plugins; p; p = p->next) {
+        if (strcmp(p->id, plugin_id) == 0 || strcmp(p->name, plugin_id) == 0) {
+            pthread_mutex_unlock(&manager->lock);
+            return p;
+        }
+    }
+    pthread_mutex_unlock(&manager->lock);
+    return NULL;
 }
 
 LoadedPlugin* plugin_manager_find_plugin(PluginManager* manager, const char* plugin_id) {
@@ -715,4 +753,56 @@ const char** plugin_manager_get_channels(PluginManager* manager, size_t* out_cou
     *out_count = count;
     pthread_mutex_unlock(&manager->lock);
     return result;
+}
+
+int plugin_register_llm_provider(PluginManager* manager, LoadedPlugin* plugin,
+                                  const char* name, const LLMProviderInterface* iface) {
+    if (!manager || !name || !iface) {
+        log_error("[Plugin] Invalid parameters for LLM provider registration");
+        return -1;
+    }
+
+    const char* provider_name = name;
+
+    PluginConfig* pc = config_get_plugin_config(manager->config, name);
+    if (pc && pc->config) {
+        cJSON* name_item = cJSON_GetObjectItem(pc->config, "name");
+        if (cJSON_IsString(name_item) && name_item->valuestring && name_item->valuestring[0]) {
+            provider_name = name_item->valuestring;
+        }
+    }
+
+    LLMProvider* provider = llm_provider_new(iface, provider_name);
+    if (!provider) {
+        log_error("[Plugin] Failed to create LLM provider: %s", name);
+        return -1;
+    }
+    provider->plugin_ref = plugin;
+
+    if (iface->init) {
+        Error err = iface->init(provider, manager->config);
+        if (err.code != ERR_NONE) {
+            log_error("[Plugin] Failed to init LLM provider %s: %s", provider_name, err.message);
+            llm_provider_free(provider);
+            return -1;
+        }
+    }
+
+    LLMProviderRegistry* registry = llm_provider_get_registry();
+    if (!registry) {
+        log_error("[Plugin] LLM provider registry not available");
+        if (iface->shutdown) iface->shutdown(provider);
+        llm_provider_free(provider);
+        return -1;
+    }
+
+    if (llm_provider_registry_register(registry, provider) != 0) {
+        log_error("[Plugin] Failed to register LLM provider %s in registry", provider_name);
+        if (iface->shutdown) iface->shutdown(provider);
+        llm_provider_free(provider);
+        return -1;
+    }
+
+    log_info("[Plugin] Registered LLM provider: %s (name=%s) from %s", iface->name, provider_name, plugin ? plugin->name : "builtin");
+    return 0;
 }

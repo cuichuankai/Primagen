@@ -13,6 +13,8 @@
 typedef struct ToolExecutionRequest {
     char* tool_name;
     char* arguments;
+    void* tool_user_data_override;
+    ToolUserDataDestroyFunc tool_user_data_destroy;
     void* context;  // User data for callback
     void (*callback)(void* context, const char* tool_name, const char* result, Error err);
     struct ToolExecutionRequest* next;
@@ -73,9 +75,17 @@ void tool_executor_destroy(ToolExecutor* executor);
 int tool_executor_submit(ToolExecutor* executor, const char* tool_name,
                          const char* arguments, void* context,
                          void (*callback)(void* context, const char* tool_name, const char* result, Error err));
+int tool_executor_submit_with_user_data(ToolExecutor* executor, const char* tool_name,
+                                        const char* arguments, void* tool_user_data,
+                                        ToolUserDataDestroyFunc tool_user_data_destroy,
+                                        void* context,
+                                        void (*callback)(void* context, const char* tool_name, const char* result, Error err));
 
 typedef void (*ToolAsyncCallback)(Error err, const char* result, void* user_data);
 void tool_executor_submit_async(ToolExecutor* executor, const char* tool_name, const char* args_json, ToolAsyncCallback callback, void* user_data);
+void tool_executor_submit_async_with_user_data(ToolExecutor* executor, const char* tool_name, const char* args_json,
+                                               void* tool_user_data, ToolUserDataDestroyFunc tool_user_data_destroy,
+                                               ToolAsyncCallback callback, void* user_data);
 
 /**
  * Execute a tool synchronously with timeout (blocking)

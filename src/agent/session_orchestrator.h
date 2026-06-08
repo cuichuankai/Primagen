@@ -22,6 +22,8 @@ typedef struct {
     char channel[64];
     char chat_id[512];
     char latest_user_content[1024];
+    bool no_session_record;
+    size_t session_msg_count_before;
 } SessionContext;
 
 typedef struct ActiveTask {
@@ -58,6 +60,8 @@ typedef struct {
     int pending_tool_count;
     bool valid;
     bool cancelled;
+    bool no_session_record;
+    size_t session_msg_count_before;
 } TaskSnapshot;
 
 SessionOrchestrator* session_orchestrator_new(struct AgentLoop* loop, SessionManager* session_mgr);

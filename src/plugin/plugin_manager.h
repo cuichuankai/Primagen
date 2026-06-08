@@ -76,6 +76,9 @@ int plugin_register_channel(PluginManager* manager, LoadedPlugin* plugin,
 int plugin_register_command(PluginManager* manager, LoadedPlugin* plugin,
                             const char* name, const char* desc, CommandFunc handler);
 
+int plugin_register_llm_provider(PluginManager* manager, LoadedPlugin* plugin,
+                                  const char* name, const LLMProviderInterface* iface);
+
 /**
  * Get the list of registered commands
  * @param manager The plugin manager

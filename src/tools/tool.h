@@ -39,5 +39,6 @@ Error tool_registry_register_plugin_tool(ToolRegistry* reg, const char* name, co
                                           void* user_data, void* plugin_ref);
 Tool* tool_registry_get(ToolRegistry* reg, const char* name);
 Error tool_registry_execute(ToolRegistry* reg, const char* name, const char* args_json, String* result);
+Error tool_registry_execute_with_user_data(ToolRegistry* reg, const char* name, const char* args_json, void* user_data, String* result);
 
 #endif // TOOL_H

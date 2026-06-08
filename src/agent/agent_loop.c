@@ -6,6 +6,7 @@
 #include "../tools/builtin_tools_def.h"
 #include "../include/utils.h"
 #include "../plugin/plugin_manager.h"
+#include "../providers/llm_provider.h"
 #include "../vendor/cJSON/cJSON.h"
 #include <string.h>
 #include <stdio.h>
@@ -28,11 +29,6 @@ typedef struct {
 /* =============================================================================
    Helper Functions
    ============================================================================= */
-
-static void dynamic_array_clear_impl(DynamicArray* arr) {
-    if (!arr) return;
-    arr->count = 0;
-}
 
 static void send_error_response(AgentLoop* loop, const char* channel, const char* chat_id, const char* error_msg) {
     char full_msg[ERROR_MSG_MAX];
@@ -161,7 +157,7 @@ AgentLoop* agent_loop_new(SessionManager* session_mgr, ContextBuilder* ctx_build
     }
 
     atomic_store(&loop->running, false);
-    loop->llm_call = NULL;
+    loop->provider = NULL;
     loop->inbox_head = NULL;
     loop->inbox_tail = NULL;
     loop->processing_thread_started = false;
@@ -241,16 +237,24 @@ void agent_loop_free(AgentLoop* loop) {
     free(loop);
 }
 
-void agent_loop_set_llm_provider_async(AgentLoop* loop, LLMProviderAsync provider) {
+void agent_loop_set_llm_provider(AgentLoop* loop, LLMProvider* provider) {
     if (!loop) return;
-    loop->llm_call_async = provider;
-    log_debug("[AgentLoop] Async LLM provider set");
+    loop->provider = provider;
+    log_debug("[AgentLoop] LLM provider set: %s", provider && provider->iface ? provider->iface->name : "NULL");
+}
+
+/* Async-signal-safe: only flips an atomic flag. Safe to call from a
+ * signal handler (no locks, no malloc, no I/O). */
+void agent_loop_request_stop(AgentLoop* loop) {
+    if (!loop) return;
+    atomic_store(&loop->running, false);
 }
 
 void agent_loop_stop(AgentLoop* loop) {
     if (!loop) return;
     atomic_store(&loop->running, false);
-    
+
+    /* Everything below must NOT run in a signal handler context. */
     pthread_mutex_lock(&loop->inbox_mutex);
     message_bus_close(loop->bus);
     pthread_cond_broadcast(&loop->inbox_cond);
@@ -352,7 +356,7 @@ static void* agent_loop_processing_worker(void* arg);
    Task Tracking
    ============================================================================= */
 
-void add_active_task(AgentLoop* loop, const char* task_id, const char* session_key, pthread_t thread, InboundMessage* msg) {
+void add_active_task(AgentLoop* loop, const char* task_id, const char* session_key, pthread_t thread, InboundMessage* msg, size_t session_msg_count_before) {
     if (!loop || !loop->session_orchestrator) return;
     
     ActiveTask* task = calloc(1, sizeof(ActiveTask));
@@ -377,6 +381,8 @@ void add_active_task(AgentLoop* loop, const char* task_id, const char* session_k
         task->ctx.chat_id[sizeof(task->ctx.chat_id) - 1] = '\0';
         strncpy(task->ctx.latest_user_content, msg->content.data, sizeof(task->ctx.latest_user_content) - 1);
         task->ctx.latest_user_content[sizeof(task->ctx.latest_user_content) - 1] = '\0';
+        task->ctx.no_session_record = msg->no_session_record;
+        task->ctx.session_msg_count_before = session_msg_count_before;
     }
     
     session_orchestrator_add_task(loop->session_orchestrator, task);
@@ -384,8 +390,32 @@ void add_active_task(AgentLoop* loop, const char* task_id, const char* session_k
 
 static void remove_active_task(AgentLoop* loop, const char* task_id) {
     if (!loop || !loop->session_orchestrator) return;
-    
-    // Remove task from session orchestrator
+
+    bool no_session_record = false;
+    size_t session_msg_count_before = 0;
+    char session_key[SESSION_KEY_MAX] = {0};
+
+    pthread_mutex_lock(&loop->session_orchestrator->task_mutex);
+    ActiveTaskNode* current = loop->session_orchestrator->active_tasks;
+    while (current) {
+        if (current->task && strcmp(current->task->id, task_id) == 0) {
+            no_session_record = current->task->ctx.no_session_record;
+            session_msg_count_before = current->task->ctx.session_msg_count_before;
+            strncpy(session_key, current->task->session_key, sizeof(session_key) - 1);
+            break;
+        }
+        current = current->next;
+    }
+    pthread_mutex_unlock(&loop->session_orchestrator->task_mutex);
+
+    if (no_session_record && session_key[0] != '\0') {
+        Session* session = session_manager_get(loop->session_mgr, session_key);
+        if (session) {
+            session_rollback_messages(session, session_msg_count_before);
+            log_debug("[AgentLoop] Rolled back session for no-record task: %s", task_id);
+        }
+    }
+
     session_orchestrator_remove_task(loop->session_orchestrator, task_id);
 }
 
@@ -448,11 +478,11 @@ void trigger_llm_async(AgentLoop* loop, Session* session, const char* session_ke
     { struct timeval tv; gettimeofday(&tv, NULL); llm_start_ms = (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000; }
     log_debug("[AgentLoop] Calling LLM async provider...");
     
-    if (loop->llm_call_async) {
-        loop->llm_call_async(system_prompt.data, session, loop->tool_registry, loop->config, handle_llm_callback, ctx);
+    if (loop->provider && loop->provider->iface && loop->provider->iface->call_async) {
+        loop->provider->iface->call_async(loop->provider, system_prompt.data, session, loop->tool_registry, loop->config, handle_llm_callback, ctx);
     } else {
-        log_error("[AgentLoop] No async LLM provider configured");
-        handle_llm_callback(error_new(ERR_INVALID_PARAM, "No async LLM provider configured"), NULL, NULL, 0, ctx);
+        log_error("[AgentLoop] No LLM provider configured");
+        handle_llm_callback(error_new(ERR_INVALID_PARAM, "No LLM provider configured"), NULL, NULL, 0, ctx);
     }
 
     uint64_t llm_end_ms = 0;
@@ -490,7 +520,9 @@ static void handle_llm_text_response(AgentLoop* loop, InternalEvent* event, Sess
     if (assistant_content && strlen(assistant_content) > 0) {
         Message* assistant_msg = message_new(ROLE_ASSISTANT, assistant_content);
         session_add_message(session, assistant_msg);
-        session_manager_save(loop->session_mgr, session);
+        if (!snap->no_session_record) {
+            session_manager_save(loop->session_mgr, session);
+        }
     }
 
     const char* final_out = (assistant_content && strlen(assistant_content) > 0) ? assistant_content : "";
@@ -529,7 +561,9 @@ static void handle_llm_tool_calls(AgentLoop* loop, InternalEvent* event, Session
         message_add_tool_call(assistant_msg, event->tool_calls[i].id.data, event->tool_calls[i].name.data, event->tool_calls[i].arguments.data);
     }
     session_add_message(session, assistant_msg);
-    session_manager_save(loop->session_mgr, session);
+    if (!snap->no_session_record) {
+        session_manager_save(loop->session_mgr, session);
+    }
 
     if (clean_content_owned) free(clean_content);
 
@@ -560,7 +594,26 @@ static void handle_llm_tool_calls(AgentLoop* loop, InternalEvent* event, Session
         strncpy(tctx->tool_name, event->tool_calls[i].name.data, sizeof(tctx->tool_name) - 1);
         tctx->tool_name[sizeof(tctx->tool_name) - 1] = '\0';
 
-        tool_executor_submit_async(loop->tool_executor, event->tool_calls[i].name.data, event->tool_calls[i].arguments.data, tool_executor_callback, tctx);
+        Tool* tool = tool_registry_get(loop->tool_registry, event->tool_calls[i].name.data);
+        void* route_ctx = NULL;
+        ToolUserDataDestroyFunc route_ctx_destroy = NULL;
+        if (tool && tool->user_data && tool->plugin_ref == NULL) {
+            ToolContext* base_ctx = (ToolContext*)tool->user_data;
+            if (base_ctx->magic == TOOL_CONTEXT_MAGIC) {
+                route_ctx = tool_context_clone_with_route(base_ctx, snap->channel, snap->chat_id);
+                route_ctx_destroy = tool_context_destroy;
+            }
+        }
+
+        tool_executor_submit_async_with_user_data(
+            loop->tool_executor,
+            event->tool_calls[i].name.data,
+            event->tool_calls[i].arguments.data,
+            route_ctx,
+            route_ctx_destroy,
+            tool_executor_callback,
+            tctx
+        );
     }
 }
 
@@ -587,7 +640,9 @@ static void handle_event_llm_result(AgentLoop* loop, InternalEvent* event) {
         snprintf(full_msg, sizeof(full_msg), "Sorry, I encountered an error: %s", event->llm_error.message);
         Message* assistant_msg = message_new(ROLE_ASSISTANT, full_msg);
         session_add_message(session, assistant_msg);
-        session_manager_save(loop->session_mgr, session);
+        if (!snap.no_session_record) {
+            session_manager_save(loop->session_mgr, session);
+        }
         OutboundMessage* outbound = outbound_message_new(snap.channel, snap.chat_id, full_msg);
         message_bus_send_outbound(loop->bus, outbound);
         
@@ -643,7 +698,9 @@ static void handle_event_tool_result(AgentLoop* loop, InternalEvent* event) {
     tool_msg->name = string_copy(&event->tool_name);
     session_add_message(session, tool_msg);
     string_free(&result);
-    session_manager_save(loop->session_mgr, session);
+    if (!snap.no_session_record) {
+        session_manager_save(loop->session_mgr, session);
+    }
 
     int remaining = session_orchestrator_decrement_task_pending_tools(loop->session_orchestrator, event->session_key.data);
     if (remaining > 0) {
@@ -669,16 +726,6 @@ static void process_message_async(AgentLoop* loop, InboundMessage* inbound, Sess
     snprintf(key, sizeof(key), "%s:%s", inbound->channel.data, inbound->chat_id.data);
 
     session_orchestrator_set_current_session_key(loop->session_orchestrator, key);
-
-    refresh_tool_routes(loop, inbound->channel.data, inbound->chat_id.data);
-
-    TaskSnapshot snap = session_orchestrator_snapshot_task(loop->session_orchestrator, key);
-    if (!snap.valid) return;
-
-    if (snap.state != SESSION_STATE_IDLE) {
-        log_warn("[AgentLoop] Session %s is busy", key);
-        return;
-    }
 
     log_debug("[AgentLoop] Processing message for session: %s", key);
     
@@ -732,6 +779,18 @@ static void process_inbound_message(AgentLoop* loop, InboundMessage* inbound) {
         return;
     }
 
+    TaskSnapshot existing = session_orchestrator_snapshot_task(loop->session_orchestrator, key);
+    if (existing.valid && existing.state != SESSION_STATE_IDLE) {
+        log_warn("[AgentLoop] Session %s is busy", key);
+        OutboundMessage* outbound = outbound_message_new(
+            inbound->channel.data,
+            inbound->chat_id.data,
+            "Session is busy processing the previous request. Please wait for it to finish."
+        );
+        message_bus_send_outbound(loop->bus, outbound);
+        return;
+    }
+
     char* formatted_content = NULL;
     if (inbound->sender_name.data && inbound->sender_name.len > 0) {
         size_t len = inbound->sender_name.len + inbound->content.len + 8;
@@ -741,6 +800,8 @@ static void process_inbound_message(AgentLoop* loop, InboundMessage* inbound) {
         }
     }
     const char* msg_content = formatted_content ? formatted_content : inbound->content.data;
+
+    size_t session_msg_count_before = session->messages.count;
 
     Message* user_msg = message_new(ROLE_USER, msg_content);
     session_add_message(session, user_msg);
@@ -753,7 +814,7 @@ static void process_inbound_message(AgentLoop* loop, InboundMessage* inbound) {
     unsigned int rand_val = rand_r(&seed) % 1000000;
     snprintf(task_id, sizeof(task_id), "task_%ld_%u", (long)ts.tv_sec, rand_val);
     pthread_t current_thread = pthread_self();
-    add_active_task(loop, task_id, key, current_thread, inbound);
+    add_active_task(loop, task_id, key, current_thread, inbound, session_msg_count_before);
     process_message_async(loop, inbound, session);
 
     if (formatted_content) free(formatted_content);
@@ -826,8 +887,8 @@ static void* agent_loop_processing_worker(void* arg) {
     AgentLoop* loop = (AgentLoop*)arg;
     log_debug("[AgentLoop] Processing worker started");
     while (true) {
-        // First check internal events (higher priority)
-        InternalEvent* event = message_bus_receive_internal_timed(loop->bus, 0);
+        // Check internal events with small timeout to reduce busy-wait
+        InternalEvent* event = message_bus_receive_internal_timed(loop->bus, 10);
         if (event) {
             if (event->type == EVENT_LLM_RESULT) {
                 handle_event_llm_result(loop, event);
@@ -841,17 +902,6 @@ static void* agent_loop_processing_worker(void* arg) {
         InboundMessage* inbound = dequeue_inbound_task(loop);
         if (!inbound) {
             if (!agent_loop_is_running(loop)) break;
-            
-            // Wait for events if queue is empty
-            event = message_bus_receive_internal_timed(loop->bus, 50);
-            if (event) {
-                if (event->type == EVENT_LLM_RESULT) {
-                    handle_event_llm_result(loop, event);
-                } else if (event->type == EVENT_TOOL_RESULT) {
-                    handle_event_tool_result(loop, event);
-                }
-                internal_event_free(event);
-            }
             continue;
         }
         process_inbound_message(loop, inbound);
@@ -889,7 +939,11 @@ void agent_loop_run(AgentLoop* loop) {
         enqueue_inbound_task(loop, inbound);
     }
 
+    /* When exit is initiated by a signal handler (which can only set the
+     * running flag), we need to close the bus and broadcast the cond from
+     * this thread to unblock the processing worker. */
     pthread_mutex_lock(&loop->inbox_mutex);
+    message_bus_close(loop->bus);
     pthread_cond_broadcast(&loop->inbox_cond);
     pthread_mutex_unlock(&loop->inbox_mutex);
     pthread_join(loop->processing_thread, NULL);

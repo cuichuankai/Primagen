@@ -31,12 +31,16 @@
 static _Atomic(AgentLoop*) g_loop = NULL;
 static volatile sig_atomic_t g_shutdown_requested = 0;
 
+/* Signal handler: must be async-signal-safe. We only:
+ *   - set a sig_atomic_t flag (always safe)
+ *   - call agent_loop_request_stop which only does atomic_store
+ * We do NOT call message_bus_close or pthread_cond_broadcast here. */
 static void handle_signal(int sig) {
     (void)sig;
     g_shutdown_requested = 1;
     AgentLoop* loop = atomic_load(&g_loop);
     if (loop) {
-        agent_loop_stop(loop);
+        agent_loop_request_stop(loop);
     }
 }
 
@@ -53,6 +57,7 @@ void cron_callback(CronJob* job, void* user_data) {
         job->payload_message ? job->payload_message : "Cron trigger",
         NULL
     );
+    msg->no_session_record = true;
     message_bus_send_inbound(bus, msg);
 }
 
@@ -113,8 +118,8 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
 int main(int argc, char* argv[]) {
     srand((unsigned int)time(NULL));
     /* Default paths */
-    char* config_path = strdup(".primagen/config.json");
-    char* workspace_path = strdup(".primagen");
+    char* config_path = xstrdup(".primagen/config.json");
+    char* workspace_path = xstrdup(".primagen");
     char* initial_message = NULL;
 
     /* Command parsing - handle commands before getopt because getopt might get confused */
@@ -143,15 +148,15 @@ int main(int argc, char* argv[]) {
         switch (opt) {
             case 'c':
                 free(config_path);
-                config_path = strdup(optarg);
+                config_path = xstrdup(optarg);
                 break;
             case 'w':
                 free(workspace_path);
-                workspace_path = strdup(optarg);
+                workspace_path = xstrdup(optarg);
                 break;
             case 'm':
                 free(initial_message);
-                initial_message = strdup(optarg);
+                initial_message = xstrdup(optarg);
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -311,11 +316,23 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         log_error("[System] Failed to create PluginManager");
     }
 
-    /* Initialize Subagent Manager */
-    log_debug("[System] Creating SubagentManager...");
-    llm_provider_async_init();
+    /* Initialize LLM Provider Registry (auto-registers built-in OpenAI provider) */
+    log_debug("[System] Initializing LLM Provider Registry...");
+    LLMProviderRegistry* registry = llm_provider_get_registry();
+
+    if (plugin_mgr) {
+        log_debug("[Plugin] Loading external plugins...");
+        plugin_manager_load_external(plugin_mgr);
+    }
+
+    if (registry) {
+        if (cfg->agent.provider && strlen(cfg->agent.provider) > 0) {
+            llm_provider_registry_set_active(registry, cfg->agent.provider);
+        }
+    }
+    LLMProvider* active_provider = registry ? llm_provider_registry_get_active(registry) : NULL;
     SubagentSharedContext* subagent_shared = subagent_shared_context_create(
-        (void*)llm_provider_call_async,
+        active_provider,
         workspace_path,
         bus,
         cfg
@@ -336,24 +353,14 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
 
     /* Create Tool Context */
     log_debug("[System] Creating ToolContext...");
-    tool_ctx = malloc(sizeof(ToolContext));
+    tool_ctx = tool_context_new(bus, subagent_mgr, cron_service,
+                                skills_loader, memory, cfg,
+                                plugin_mgr, workspace_path);
     if (!tool_ctx) {
         log_error("[System] Failed to allocate ToolContext");
         rc = 1;
         goto cleanup;
     }
-    tool_ctx->magic = 0x50474E31;
-    tool_ctx->bus = bus;
-    tool_ctx->subagent_mgr = subagent_mgr;
-    tool_ctx->cron_service = cron_service;
-    tool_ctx->skills_loader = skills_loader;
-    tool_ctx->memory = memory;
-    tool_ctx->config = cfg;
-    tool_ctx->plugin_mgr = plugin_mgr;
-    tool_ctx->workspace = workspace_path;
-    pthread_mutex_init(&tool_ctx->route_mutex, NULL);
-    strcpy(tool_ctx->current_channel, "cli");
-    strcpy(tool_ctx->current_chat_id, "current");
 
     /* Register built-in tools with PluginManager */
     log_debug("[System] Registering builtin tools...");
@@ -373,13 +380,11 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         rc = 1;
         goto cleanup;
     }
-    agent_loop_set_llm_provider_async(loop, llm_provider_call_async);
+    agent_loop_set_llm_provider(loop, active_provider);
 
     if (plugin_mgr) {
         plugin_mgr->agent_loop = loop;
         plugin_mgr->session_mgr = session_mgr;
-        log_debug("[Plugin] Loading external plugins...");
-        plugin_manager_load_external(plugin_mgr);
     }
 
     /* Set global loop for signal handler and register signals */
@@ -433,7 +438,7 @@ int run_agent_loop(Config* cfg, const char* workspace_path, const char* initial_
         log_debug("[System] Injecting initial message: %s", initial_message);
         /* Use "cli" channel and "local_user" chat_id */
         InboundMessage* msg = inbound_message_new("cli", "local_user", initial_message, NULL);
-        message_bus_send_inbound(bus, msg);
+        if (msg) message_bus_send_inbound(bus, msg);
     }
 
     /* Main thread waits (Channels run in their own threads or main loop) */
@@ -484,8 +489,6 @@ cleanup:
     if (loop) {
         agent_loop_free(loop);
     }
-
-    llm_provider_async_shutdown();
 
     /* curl_global_cleanup(); - Removed for Mongoose migration */
     logger_cleanup();

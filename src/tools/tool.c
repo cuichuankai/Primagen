@@ -106,3 +106,13 @@ Error tool_registry_execute(ToolRegistry* reg, const char* name, const char* arg
     }
     return tool->execute(tool->user_data, args_json, result);
 }
+
+Error tool_registry_execute_with_user_data(ToolRegistry* reg, const char* name, const char* args_json, void* user_data, String* result) {
+    Tool* tool = tool_registry_get(reg, name);
+    if (!tool) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Tool not found: %s", name ? name : "(null)");
+        return error_new(ERR_TOOL, buf);
+    }
+    return tool->execute(user_data ? user_data : tool->user_data, args_json, result);
+}

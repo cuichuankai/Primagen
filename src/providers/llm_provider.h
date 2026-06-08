@@ -6,6 +6,7 @@
 #include "../tools/tool.h"
 #include "../include/config.h"
 #include "../session/session.h"
+#include <pthread.h>
 
 typedef enum {
     FINISH_REASON_NONE = 0,
@@ -34,23 +35,60 @@ typedef struct {
 
 typedef void (*LLMAsyncCallback)(Error err, const char* response, ToolCall* tool_calls, size_t tool_calls_count, void* user_data);
 
-typedef struct LLMAsyncManager LLMAsyncManager;
+// =============================================================================
+// LLM Provider Plugin Interface
+// =============================================================================
 
-LLMAsyncManager* llm_async_manager_new();
-void llm_async_manager_free(LLMAsyncManager* manager);
-void llm_async_manager_start(LLMAsyncManager* manager);
-void llm_async_manager_stop(LLMAsyncManager* manager);
+typedef struct LLMProvider LLMProvider;
 
-void llm_provider_async_init(void);
-void llm_provider_async_shutdown(void);
-void llm_provider_call_async(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, LLMAsyncCallback callback, void* user_data);
+typedef Error (*LLMProviderInitFunc)(LLMProvider* provider, Config* config);
+typedef void (*LLMProviderShutdownFunc)(LLMProvider* provider);
+typedef Error (*LLMProviderCallFunc)(LLMProvider* provider, const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, String* response, ToolCall** tool_calls, size_t* tool_calls_count);
+typedef Error (*LLMProviderCallExtendedFunc)(LLMProvider* provider, const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, LLMResponse* llm_response);
+typedef void (*LLMProviderCallAsyncFunc)(LLMProvider* provider, const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, LLMAsyncCallback callback, void* user_data);
+typedef Error (*LLMProviderCallStreamingFunc)(LLMProvider* provider, const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, LLMResponse* llm_response, LLMStreamOptions* options);
 
-Error llm_provider_call(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, String* response, ToolCall** tool_calls, size_t* tool_calls_count);
+typedef struct LLMProviderInterface {
+    const char* name;
+    LLMProviderInitFunc init;
+    LLMProviderShutdownFunc shutdown;
+    LLMProviderCallFunc call;
+    LLMProviderCallExtendedFunc call_extended;
+    LLMProviderCallAsyncFunc call_async;
+    LLMProviderCallStreamingFunc call_streaming;
+} LLMProviderInterface;
 
-Error llm_provider_call_extended(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, LLMResponse* llm_response);
+struct LLMProvider {
+    const LLMProviderInterface* iface;
+    char* name;
+    void* state;
+    void* plugin_ref;
+    bool initialized;
+};
 
-Error llm_provider_call_streaming(const char* system_prompt, Session* session, ToolRegistry* tools, Config* config, LLMResponse* llm_response, LLMStreamOptions* options);
+// =============================================================================
+// LLM Provider Registry
+// =============================================================================
 
-void llm_provider_configure_mgr_dns(void* mgr, const Config* config);
+typedef struct LLMProviderRegistry {
+    LLMProvider** providers;
+    size_t count;
+    size_t capacity;
+    LLMProvider* active;
+    pthread_mutex_t lock;
+} LLMProviderRegistry;
+
+LLMProviderRegistry* llm_provider_registry_new(void);
+void llm_provider_registry_free(LLMProviderRegistry* registry);
+int llm_provider_registry_register(LLMProviderRegistry* registry, LLMProvider* provider);
+size_t llm_provider_registry_unregister_by_plugin(LLMProviderRegistry* registry, void* plugin_ref);
+LLMProvider* llm_provider_registry_find(LLMProviderRegistry* registry, const char* id);
+int llm_provider_registry_set_active(LLMProviderRegistry* registry, const char* id);
+LLMProvider* llm_provider_registry_get_active(LLMProviderRegistry* registry);
+
+LLMProviderRegistry* llm_provider_get_registry(void);
+
+LLMProvider* llm_provider_new(const LLMProviderInterface* iface, const char* name);
+void llm_provider_free(LLMProvider* provider);
 
 #endif // LLM_PROVIDER_H

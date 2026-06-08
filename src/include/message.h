@@ -31,6 +31,7 @@ typedef struct {
     String content;
     String sender_name;
     StringArray attachments;
+    bool no_session_record;
 } InboundMessage;
 
 typedef struct {

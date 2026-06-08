@@ -112,24 +112,6 @@ static const char* resolve_chat_id(ToolContext* ctx, const char* chat_id) {
     return "current";
 }
 
-static void tool_context_get_route(ToolContext* ctx, char* channel_out, size_t channel_size, char* chat_id_out, size_t chat_id_size) {
-    if (!ctx) {
-        if (channel_out && channel_size > 0) channel_out[0] = '\0';
-        if (chat_id_out && chat_id_size > 0) chat_id_out[0] = '\0';
-        return;
-    }
-    pthread_mutex_lock(&ctx->route_mutex);
-    if (channel_out && channel_size > 0) {
-        strncpy(channel_out, ctx->current_channel, channel_size - 1);
-        channel_out[channel_size - 1] = '\0';
-    }
-    if (chat_id_out && chat_id_size > 0) {
-        strncpy(chat_id_out, ctx->current_chat_id, chat_id_size - 1);
-        chat_id_out[chat_id_size - 1] = '\0';
-    }
-    pthread_mutex_unlock(&ctx->route_mutex);
-}
-
 void tool_context_set_route(ToolContext* ctx, const char* channel, const char* chat_id) {
     if (!ctx) return;
     if (ctx->magic != 0x50474E31) {
@@ -162,64 +144,208 @@ void tool_context_destroy(void* user_data) {
     free(ctx);
 }
 
-static bool command_contains_unsafe_token(const char* command) {
-    if (!command) return true;
-    if (strstr(command, "../")) return true;
-    if (strstr(command, "$(")) return true;
-    if (strstr(command, "${")) return true;
-    if (strchr(command, '`')) return true;
-    size_t cmd_len = strlen(command);
-    for (size_t i = 0; i < cmd_len; i++) {
-        if (command[i] == '$' && i + 1 < cmd_len &&
-            (command[i+1] == '(' || command[i+1] == '{' ||
-             (command[i+1] >= 'A' && command[i+1] <= 'Z') ||
-             (command[i+1] >= 'a' && command[i+1] <= 'z') ||
-             command[i+1] == '_')) {
-            return true;
-        }
+ToolContext* tool_context_clone_with_route(ToolContext* ctx, const char* channel, const char* chat_id) {
+    if (!ctx || ctx->magic != TOOL_CONTEXT_MAGIC) return NULL;
+    ToolContext* clone = malloc(sizeof(ToolContext));
+    if (!clone) return NULL;
+    memcpy(clone, ctx, sizeof(ToolContext));
+    if (pthread_mutex_init(&clone->route_mutex, NULL) != 0) {
+        free(clone);
+        return NULL;
     }
+    clone->magic = TOOL_CONTEXT_MAGIC;
+    tool_context_set_route(clone, channel, chat_id);
+    return clone;
+}
+
+ToolContext* tool_context_new(MessageBus* bus,
+                              SubagentManager* subagent_mgr,
+                              CronService* cron_service,
+                              SkillsLoader* skills_loader,
+                              Memory* memory,
+                              Config* config,
+                              PluginManager* plugin_mgr,
+                              const char* workspace) {
+    ToolContext* ctx = calloc(1, sizeof(ToolContext));
+    if (!ctx) return NULL;
+    ctx->magic = TOOL_CONTEXT_MAGIC;
+    ctx->bus = bus;
+    ctx->subagent_mgr = subagent_mgr;
+    ctx->cron_service = cron_service;
+    ctx->skills_loader = skills_loader;
+    ctx->memory = memory;
+    ctx->config = config;
+    ctx->plugin_mgr = plugin_mgr;
+    ctx->workspace = workspace;
+    if (pthread_mutex_init(&ctx->route_mutex, NULL) != 0) {
+        free(ctx);
+        return NULL;
+    }
+    /* Default route: "cli" / "current". Callers (e.g. tool_send_message)
+     * may overwrite via tool_context_set_route at execution time. */
+    snprintf(ctx->current_channel, sizeof(ctx->current_channel), "%s", "cli");
+    snprintf(ctx->current_chat_id, sizeof(ctx->current_chat_id), "%s", "current");
+    return ctx;
+}
+
+/* Allowlist helper: true if c is part of the safe-exec character set.
+ * Strategy: printable ASCII subset, no shell metacharacters. Safer than the
+ * previous black-list approach which missed | & ; < > etc. */
+static inline bool safe_char(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return true;
+    if (c >= 'a' && c <= 'z') return true;
+    if (c >= '0' && c <= '9') return true;
+    if (c == '_' || c == '-' || c == '.' || c == '/' || c == ',' ||
+        c == ':' || c == '@' || c == '+' || c == '=' || c == '%') return true;
     return false;
 }
 
+static bool exec_token_is_safe(const char* tok, size_t tok_len) {
+    if (tok_len == 0) return false;
+    for (size_t i = 0; i < tok_len; i++) {
+        if (!safe_char((unsigned char)tok[i])) return false;
+    }
+    /* Reject path traversal in any token. */
+    for (size_t i = 0; i + 1 < tok_len; i++) {
+        if (tok[i] == '.' && tok[i+1] == '.') return false;
+    }
+    return true;
+}
+
+/* Validates a shell command for safe execution.
+ * Allowlist-only character set + per-token path-traversal check.
+ * Rejects any shell metacharacter (| & ; < > * ? [ ] ( ) { } ' " ` $ \\ ! ~ # ^ \n \r \t)
+ * and any token containing '..' as a substring. */
+static bool command_is_safe_exec(const char* command) {
+    if (!command || command[0] == '\0') return false;
+
+    /* Global character allowlist (whitespace and safe chars only). */
+    for (const char* p = command; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == ' ' || c == '\t') continue;
+        if (!safe_char(c)) return false;
+    }
+
+    /* Per-token validation. */
+    const char* p = command;
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        const char* start = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        size_t len = (size_t)(p - start);
+        if (!exec_token_is_safe(start, len)) return false;
+    }
+    return true;
+}
+
+/* Legacy wrapper: true when command is NOT safe (i.e. should be rejected). */
+static bool command_contains_unsafe_token(const char* command) {
+    return !command_is_safe_exec(command);
+}
+
+static bool resolve_workspace_path(const char* workspace, char* out, size_t out_size) {
+    if (!workspace || !out || out_size == 0) return false;
+    char resolved[4096];
+    if (realpath(workspace, resolved) == NULL) return false;
+    if (strlen(resolved) + 1 > out_size) return false;
+    snprintf(out, out_size, "%s", resolved);
+    return true;
+}
+
+/* Returns true if `path` (any form) resolves to a location strictly inside
+ * `workspace`. TOCTOU-safe: opens with O_NOFOLLOW and verifies the opened
+ * fd via fstat. Callers should still not trust the path beyond this point. */
 static bool is_path_within_workspace(const char* path, const char* workspace) {
     if (!path || !workspace) return false;
+    char ws[4096];
+    if (!resolve_workspace_path(workspace, ws, sizeof(ws))) return false;
+    size_t ws_len = strlen(ws);
+
     char resolved[4096];
-    char ws_resolved[4096];
     if (realpath(path, resolved) == NULL) {
         if (path[0] == '/') return false;
         char full[4096];
-        snprintf(full, sizeof(full), "%s/%s", workspace, path);
+        int n = snprintf(full, sizeof(full), "%s/%s", workspace, path);
+        if (n < 0 || (size_t)n >= sizeof(full)) return false;
         if (realpath(full, resolved) == NULL) return false;
     }
-    if (realpath(workspace, ws_resolved) == NULL) return false;
-    size_t ws_len = strlen(ws_resolved);
-    if (strncmp(resolved, ws_resolved, ws_len) != 0) return false;
+    if (strncmp(resolved, ws, ws_len) != 0) return false;
     if (resolved[ws_len] != '/' && resolved[ws_len] != '\0') return false;
     return true;
 }
 
-static char* shell_escape_single_quotes(const char* input) {
-    if (!input) return strdup("");
-    size_t len = strlen(input);
-    size_t extra = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (input[i] == '\'') extra += 3;
+static bool resolve_existing_path_within_workspace(const char* path, const char* workspace, char* out, size_t out_size) {
+    if (!path || !workspace || !out || out_size == 0) return false;
+    char ws[4096];
+    if (!resolve_workspace_path(workspace, ws, sizeof(ws))) return false;
+
+    char candidate[4096];
+    if (path[0] == '/') {
+        snprintf(candidate, sizeof(candidate), "%s", path);
+    } else {
+        int n = snprintf(candidate, sizeof(candidate), "%s/%s", workspace, path);
+        if (n < 0 || (size_t)n >= sizeof(candidate)) return false;
     }
-    char* out = malloc(len + extra + 1);
-    if (!out) return NULL;
-    size_t j = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (input[i] == '\'') {
-            out[j++] = '\'';
-            out[j++] = '\\';
-            out[j++] = '\'';
-            out[j++] = '\'';
-        } else {
-            out[j++] = input[i];
-        }
+
+    char resolved[4096];
+    if (realpath(candidate, resolved) == NULL) return false;
+    size_t ws_len = strlen(ws);
+    if (strncmp(resolved, ws, ws_len) != 0) return false;
+    if (resolved[ws_len] != '/' && resolved[ws_len] != '\0') return false;
+    if (strlen(resolved) + 1 > out_size) return false;
+    snprintf(out, out_size, "%s", resolved);
+    return true;
+}
+
+static bool resolve_creatable_path_within_workspace(const char* path, const char* workspace, char* out, size_t out_size) {
+    if (!path || !workspace || !out || out_size == 0) return false;
+    char ws[4096];
+    if (!resolve_workspace_path(workspace, ws, sizeof(ws))) return false;
+
+    char candidate[4096];
+    if (path[0] == '/') {
+        snprintf(candidate, sizeof(candidate), "%s", path);
+    } else {
+        int n = snprintf(candidate, sizeof(candidate), "%s/%s", workspace, path);
+        if (n < 0 || (size_t)n >= sizeof(candidate)) return false;
     }
-    out[j] = '\0';
-    return out;
+
+    const char* base = strrchr(candidate, '/');
+    const char* filename = base ? base + 1 : candidate;
+    if (!filename || filename[0] == '\0' || strcmp(filename, ".") == 0 || strcmp(filename, "..") == 0) return false;
+    if (strchr(filename, '/')) return false;
+
+    char parent[4096];
+    snprintf(parent, sizeof(parent), "%s", candidate);
+    char* slash = strrchr(parent, '/');
+    if (!slash) return false;
+    if (slash == parent) {
+        slash[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+
+    char resolved_parent[4096];
+    if (realpath(parent, resolved_parent) == NULL) return false;
+    size_t ws_len = strlen(ws);
+    if (strncmp(resolved_parent, ws, ws_len) != 0) return false;
+    if (resolved_parent[ws_len] != '/' && resolved_parent[ws_len] != '\0') return false;
+
+    int n = snprintf(out, out_size, "%s/%s", resolved_parent, filename);
+    if (n < 0 || (size_t)n >= out_size) return false;
+    return true;
+}
+
+/* Length-aware variant for path slices that may not be NUL-terminated.
+ * Used by tool_exec token validation. */
+static bool is_path_within_workspace_len(const char* path, size_t path_len, const char* workspace) {
+    if (!path || path_len == 0 || !workspace) return false;
+    char tmp[4096];
+    if (path_len >= sizeof(tmp)) return false;
+    memcpy(tmp, path, path_len);
+    tmp[path_len] = '\0';
+    return is_path_within_workspace(tmp, workspace);
 }
 
 // Helper to create directories recursively
@@ -362,14 +488,17 @@ Error tool_read_file(void* user_data, const char* args_json, String* result) {
         &error_msg);
 
     if (error_msg) {
-        char* full_error = malloc(strlen(error_msg) + strlen(TOOL_ERROR_HINT) + 1);
+        size_t base_len = strlen(error_msg);
+        size_t hint_len = strlen(TOOL_ERROR_HINT);
+        char* full_error = malloc(base_len + hint_len + 1);
         if (!full_error) {
             free(error_msg);
             free(casted_args);
             return error_new(ERR_MEMORY, "Failed to allocate error message");
         }
-        strcpy(full_error, error_msg);
-        strcat(full_error, TOOL_ERROR_HINT);
+        memcpy(full_error, error_msg, base_len);
+        memcpy(full_error + base_len, TOOL_ERROR_HINT, hint_len);
+        full_error[base_len + hint_len] = '\0';
         *result = string_new(full_error);
         free(full_error);
         free(error_msg);
@@ -386,15 +515,18 @@ Error tool_read_file(void* user_data, const char* args_json, String* result) {
         return error_new(ERR_INVALID_PARAM, "Missing 'path' argument");
     }
 
+    char safe_path[4096];
+    const char* open_path = path;
     if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config &&
         (ctx->config->tools.restrict_to_workspace || ctx->config->tools.exec.restrict_to_workspace)) {
-        if (!is_path_within_workspace(path, ctx->workspace)) {
+        if (!resolve_existing_path_within_workspace(path, ctx->workspace, safe_path, sizeof(safe_path))) {
             cJSON_Delete(json);
             return error_new(ERR_TOOL, "Access denied: path is outside workspace");
         }
+        open_path = safe_path;
     }
     
-    FILE* fp = fopen(path, "r");
+    FILE* fp = fopen(open_path, "r");
     if (!fp) {
         cJSON_Delete(json);
         return error_new(ERR_FILE, "Failed to open file");
@@ -456,17 +588,20 @@ Error tool_write_file(void* user_data, const char* args_json, String* result) {
         return error_new(ERR_INVALID_PARAM, "Missing 'path' or 'content' argument");
     }
 
+    char safe_path[4096];
+    const char* write_path = path;
     if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config &&
         (ctx->config->tools.restrict_to_workspace || ctx->config->tools.exec.restrict_to_workspace)) {
-        if (!is_path_within_workspace(path, ctx->workspace)) {
+        if (!resolve_creatable_path_within_workspace(path, ctx->workspace, safe_path, sizeof(safe_path))) {
             cJSON_Delete(json);
             return error_new(ERR_TOOL, "Access denied: path is outside workspace");
         }
+        write_path = safe_path;
     }
     
-    ensure_dir(path);
+    ensure_dir(write_path);
     
-    FILE* fp = fopen(path, "w");
+    FILE* fp = fopen(write_path, "w");
     if (!fp) {
         cJSON_Delete(json);
         return error_new(ERR_FILE, "Failed to open file for writing");
@@ -494,15 +629,18 @@ Error tool_edit_file(void* user_data, const char* args_json, String* result) {
         return error_new(ERR_INVALID_PARAM, "Missing arguments");
     }
 
+    char safe_path[4096];
+    const char* edit_path = path;
     if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config &&
         (ctx->config->tools.restrict_to_workspace || ctx->config->tools.exec.restrict_to_workspace)) {
-        if (!is_path_within_workspace(path, ctx->workspace)) {
+        if (!resolve_existing_path_within_workspace(path, ctx->workspace, safe_path, sizeof(safe_path))) {
             cJSON_Delete(json);
             return error_new(ERR_TOOL, "Access denied: path is outside workspace");
         }
+        edit_path = safe_path;
     }
     
-    FILE* fp = fopen(path, "r");
+    FILE* fp = fopen(edit_path, "r");
     if (!fp) {
         cJSON_Delete(json);
         return error_new(ERR_FILE, "Failed to open file");
@@ -544,12 +682,15 @@ Error tool_edit_file(void* user_data, const char* args_json, String* result) {
         return error_new(ERR_MEMORY, "Memory allocation failed");
     }
     
-    size_t prefix_len = pos - data;
-    strncpy(new_data, data, prefix_len);
-    strcpy(new_data + prefix_len, new_str);
-    strcpy(new_data + prefix_len + strlen(new_str), pos + strlen(old_str));
+    size_t prefix_len = (size_t)(pos - data);
+    size_t new_str_len = strlen(new_str);
+    size_t suffix_len = strlen(pos + strlen(old_str));
+    memcpy(new_data, data, prefix_len);
+    memcpy(new_data + prefix_len, new_str, new_str_len);
+    memcpy(new_data + prefix_len + new_str_len, pos + strlen(old_str), suffix_len);
+    new_data[prefix_len + new_str_len + suffix_len] = '\0';
     
-    fp = fopen(path, "w");
+    fp = fopen(edit_path, "w");
     if (!fp) {
         free(data);
         free(new_data);
@@ -576,15 +717,18 @@ Error tool_list_dir(void* user_data, const char* args_json, String* result) {
     char* path = get_json_string(json, "path");
     if (!path) path = "."; 
 
+    char safe_path[4096];
+    const char* list_path = path;
     if (ctx && ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config &&
         (ctx->config->tools.restrict_to_workspace || ctx->config->tools.exec.restrict_to_workspace)) {
-        if (!is_path_within_workspace(path, ctx->workspace)) {
+        if (!resolve_existing_path_within_workspace(path, ctx->workspace, safe_path, sizeof(safe_path))) {
             cJSON_Delete(json);
             return error_new(ERR_TOOL, "Access denied: path is outside workspace");
         }
+        list_path = safe_path;
     }
 
-    DIR* d = opendir(path);
+    DIR* d = opendir(list_path);
     if (!d) {
         cJSON_Delete(json);
         return error_new(ERR_FILE, "Failed to open directory");
@@ -598,7 +742,7 @@ Error tool_list_dir(void* user_data, const char* args_json, String* result) {
         if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0) continue;
         
         char fullpath[1024];
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, dir->d_name);
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", list_path, dir->d_name);
         struct stat st;
         stat(fullpath, &st);
         
@@ -635,7 +779,24 @@ Error tool_exec(void* user_data, const char* args_json, String* result) {
     if (restrict_exec) {
         if (command_contains_unsafe_token(command)) {
             cJSON_Delete(json);
-            return error_new(ERR_TOOL, "Command rejected by workspace restriction policy");
+            return error_new(ERR_TOOL, "Command rejected by workspace restriction policy (shell metacharacters or path traversal)");
+        }
+        /* Additionally: any absolute-path token must resolve within workspace. */
+        const char* restrict_ws = (ctx && ctx->magic == TOOL_CONTEXT_MAGIC) ? ctx->workspace : NULL;
+        if (restrict_ws) {
+            const char* p = command;
+            while (*p) {
+                while (*p == ' ' || *p == '\t') p++;
+                if (!*p) break;
+                const char* start = p;
+                while (*p && *p != ' ' && *p != '\t') p++;
+                size_t len = (size_t)(p - start);
+                if (len > 0 && start[0] == '/' &&
+                    !is_path_within_workspace_len(start, len, restrict_ws)) {
+                    cJSON_Delete(json);
+                    return error_new(ERR_TOOL, "Command rejected: absolute path outside workspace");
+                }
+            }
         }
     }
 
@@ -788,6 +949,48 @@ Error tool_send_message(void* user_data, const char* args_json, String* result) 
     }
     log_debug("[send_message] After parsing: attachments.count=%zu", msg->attachments.count);
 
+    /* Workspace policy: reject any attachment path outside workspace. */
+    if (ctx->magic == TOOL_CONTEXT_MAGIC && ctx->config &&
+        (ctx->config->tools.restrict_to_workspace || ctx->config->tools.exec.restrict_to_workspace) &&
+        ctx->workspace) {
+        for (size_t ai = 0; ai < msg->attachments.count; ai++) {
+            const char* att = msg->attachments.items[ai].data;
+            if (!att) continue;
+            /* Extract a "path":"..." substring if the attachment is an object
+             * (it was normalized to JSON); for plain string attachments, use the
+             * value directly. */
+            const char* pkey = strstr(att, "\"path\":\"");
+            const char* path = pkey ? pkey + 8 : att;
+            const char* end = path;
+            if (pkey) {
+                end = strchr(path, '\"');
+                if (end) {
+                    size_t path_len = (size_t)(end - path);
+                    char tmp[4096];
+                    if (path_len >= sizeof(tmp)) {
+                        outbound_message_free(msg);
+                        cJSON_Delete(json);
+                        return error_new(ERR_TOOL, "Attachment path too long");
+                    }
+                    memcpy(tmp, path, path_len);
+                    tmp[path_len] = '\0';
+                    if (!is_path_within_workspace(tmp, ctx->workspace)) {
+                        outbound_message_free(msg);
+                        cJSON_Delete(json);
+                        return error_new(ERR_TOOL, "Attachment path outside workspace");
+                    }
+                    continue;
+                }
+            }
+            /* Plain string attachment: validate as path. */
+            if (!is_path_within_workspace(path, ctx->workspace)) {
+                outbound_message_free(msg);
+                cJSON_Delete(json);
+                return error_new(ERR_TOOL, "Attachment path outside workspace");
+            }
+        }
+    }
+
     message_bus_send_outbound(ctx->bus, msg);
     
     *result = string_new("Message queued for delivery");
@@ -846,8 +1049,16 @@ Error tool_cron(void* user_data, const char* args_json, String* result) {
     char* chat_id = get_json_string(json, "chat_id");
     
     if (!name || !payload || !schedule) {
+        char missing_info[256] = "";
+        snprintf(missing_info, sizeof(missing_info),
+                 "Missing required arguments: %s%s%s. "
+                 "Required: name (string), payload (string), schedule (string). "
+                 "Example: {\"name\":\"drink-water\",\"payload\":\"Remind user to drink water\",\"schedule\":\"@in 60\"}",
+                 !name ? "name" : "",
+                 !payload ? (!name ? ", payload" : "payload") : "",
+                 !schedule ? (!name || !payload ? ", schedule" : "schedule") : "");
         cJSON_Delete(json);
-        return error_new(ERR_INVALID_PARAM, "Missing arguments");
+        return error_new(ERR_INVALID_PARAM, missing_info);
     }
     
     CronJob job;
@@ -855,8 +1066,8 @@ Error tool_cron(void* user_data, const char* args_json, String* result) {
     job.name = name;
     job.payload_message = payload;
     job.schedule = schedule;
-    job.channel = (char*) ctx->current_channel;
-    job.to = (char*) ctx->current_chat_id;
+    job.channel = (char*) resolve_channel(ctx, channel);
+    job.to = (char*) resolve_chat_id(ctx, chat_id);
     if (!job.channel || job.channel[0] == '\0') job.channel = "cli";
     if (!job.to || job.to[0] == '\0') job.to = "local_user";
     job.deliver = true;

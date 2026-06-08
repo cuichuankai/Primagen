@@ -414,8 +414,26 @@ char* skills_loader_load_skills_for_context(SkillsLoader* loader, StringArray* s
 typedef struct {
     char* xml;
     size_t cap;
+    size_t len;
     int count;
 } SkillsSummaryCtx;
+
+/* Append `len` bytes from `s` to ctx->xml, growing capacity if needed.
+ * Tracks length explicitly (no strlen) to keep the loop O(n) total. */
+static bool xml_append(SkillsSummaryCtx* ctx, const char* s, size_t len) {
+    if (!ctx || !s || len == 0) return true;
+    size_t need = ctx->len + len + 1;
+    if (need > ctx->cap) {
+        while (ctx->cap < need) ctx->cap *= 2;
+        char* new_xml = realloc(ctx->xml, ctx->cap);
+        if (!new_xml) return false;
+        ctx->xml = new_xml;
+    }
+    memcpy(ctx->xml + ctx->len, s, len);
+    ctx->len += len;
+    ctx->xml[ctx->len] = '\0';
+    return true;
+}
 
 // Helper: Add a skill to XML summary
 static void add_skill_xml(SkillsSummaryCtx* ctx, const char* name, const char* base_dir) {
@@ -438,42 +456,40 @@ static void add_skill_xml(SkillsSummaryCtx* ctx, const char* name, const char* b
     char* name_esc = escape_xml(name);
     char* desc_esc = escape_xml(desc);
 
-    size_t current_len = strlen(ctx->xml);
-    size_t needed = current_len + 2048;
-    if (needed > ctx->cap) {
-        while (needed > ctx->cap) ctx->cap *= 2;
-        char* new_xml = realloc(ctx->xml, ctx->cap);
-        if (!new_xml) {
-            free(name_esc);
-            free(desc_esc);
-            free(desc);
-            if (missing) free(missing);
-            cJSON_Delete(meta);
-            free(content);
-            return;
-        }
-        ctx->xml = new_xml;
-    }
-
     char chunk[2048];
-    snprintf(chunk, sizeof(chunk),
+    int chunk_len = snprintf(chunk, sizeof(chunk),
         "  <skill available=\"%s\">\n"
         "    <name>%s</name>\n"
         "    <description>%s</description>\n"
         "    <location>%s</location>\n",
         available ? "true" : "false",
         name_esc, desc_esc, skill_path);
-
-    strcat(ctx->xml, chunk);
+    if (chunk_len < 0 || (size_t)chunk_len >= sizeof(chunk)) chunk_len = 0;
+    if (!xml_append(ctx, chunk, (size_t)chunk_len)) goto fail;
 
     if (!available && missing) {
         char* missing_esc = escape_xml(missing);
-        snprintf(chunk, sizeof(chunk), "    <requires>%s</requires>\n", missing_esc);
-        strcat(ctx->xml, chunk);
+        int req_len = snprintf(chunk, sizeof(chunk), "    <requires>%s</requires>\n", missing_esc);
+        if (req_len < 0 || (size_t)req_len >= sizeof(chunk)) req_len = 0;
+        bool ok = xml_append(ctx, chunk, (size_t)req_len);
         free(missing_esc);
+        if (!ok) goto fail;
     }
 
-    strcat(ctx->xml, "  </skill>\n");
+    {
+        const char end_tag[] = "  </skill>\n";
+        if (!xml_append(ctx, end_tag, sizeof(end_tag) - 1)) goto fail;
+    }
+    goto done;
+fail:
+    free(name_esc);
+    free(desc_esc);
+    free(desc);
+    if (missing) free(missing);
+    cJSON_Delete(meta);
+    free(content);
+    return;
+done:
 
     free(name_esc);
     free(desc_esc);
@@ -489,11 +505,14 @@ char* skills_loader_build_skills_summary(SkillsLoader* loader) {
     if (!xml) return strdup("<skills></skills>");
 
     xml[0] = 0;
-    strcat(xml, "<skills>\n");
+    size_t init_len = strlen("<skills>\n");
+    memcpy(xml, "<skills>\n", init_len);
+    xml[init_len] = '\0';
 
     SkillsSummaryCtx ctx;
     ctx.xml = xml;
     ctx.cap = cap;
+    ctx.len = init_len;
     ctx.count = 0;
 
     // First: Workspace skills
@@ -525,9 +544,14 @@ char* skills_loader_build_skills_summary(SkillsLoader* loader) {
         }
     }
 
-    strcat(xml, "</skills>");
+    {
+        const char close_tag[] = "</skills>";
+        if (!xml_append(&ctx, close_tag, sizeof(close_tag) - 1)) {
+            /* On OOM, still return what we have. */
+        }
+    }
     log_debug("Loaded %d skills", ctx.count);
-    return xml;
+    return ctx.xml;
 }
 
 // Helper: Check and add always skill

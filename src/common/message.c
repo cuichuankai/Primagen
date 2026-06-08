@@ -102,6 +102,7 @@ InboundMessage* inbound_message_new(const char* channel, const char* chat_id, co
     msg->content = string_new(content);
     msg->sender_name = sender_name ? string_new(sender_name) : string_new("");
     msg->attachments = string_array_new();
+    msg->no_session_record = false;
     return msg;
 }
 

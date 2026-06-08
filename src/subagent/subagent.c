@@ -69,7 +69,7 @@ static void* subagent_loop_thread(void* arg) {
  * Create shared context for subagents
  */
 SubagentSharedContext* subagent_shared_context_create(
-    void* provider,
+    LLMProvider* provider,
     const char* workspace,
     void* bus,
     Config* config
@@ -100,13 +100,11 @@ SubagentSharedContext* subagent_shared_context_create(
     }
     
     // Register subagent tools
-    ToolContext* tool_ctx = calloc(1, sizeof(ToolContext));
+    ToolContext* tool_ctx = tool_context_new(shared->bus, NULL, NULL, NULL, NULL,
+                                             NULL, NULL, shared->workspace);
     if (tool_ctx) {
-        tool_ctx->magic = TOOL_CONTEXT_MAGIC;
-        tool_ctx->bus = shared->bus;
-        tool_ctx->workspace = shared->workspace;
-        strcpy(tool_ctx->current_channel, "subagent");
-        pthread_mutex_init(&tool_ctx->route_mutex, NULL);
+        snprintf(tool_ctx->current_channel, sizeof(tool_ctx->current_channel), "%s", "subagent");
+        /* route_mutex was already initialized by tool_context_new */
         
         for (size_t i = 0; i < BUILTIN_TOOLS_SUBAGENT_COUNT; i++) {
             ToolContext* tool_ctx_copy = malloc(sizeof(ToolContext));
@@ -145,7 +143,7 @@ void subagent_shared_context_destroy(SubagentSharedContext* shared) {
 /**
  * Add a task to the active tasks list
  */
-static void add_active_task(SubagentManager* manager, SubagentTaskNode* node) {
+static void subagent_add_task(SubagentManager* manager, SubagentTaskNode* node) {
     pthread_mutex_lock(&manager->mutex);
     node->next = manager->active_tasks;
     manager->active_tasks = node;
@@ -156,7 +154,7 @@ static void add_active_task(SubagentManager* manager, SubagentTaskNode* node) {
 /**
  * Remove a task from the active tasks list
  */
-static void remove_active_task(SubagentManager* manager, const char* task_id) {
+static void subagent_remove_task(SubagentManager* manager, const char* task_id) {
     pthread_mutex_lock(&manager->mutex);
     SubagentTaskNode* current = manager->active_tasks;
     SubagentTaskNode* prev = NULL;
@@ -218,14 +216,14 @@ static void* subagent_task_runner(void* arg) {
     // Create tracking node
     SubagentTaskNode* node = malloc(sizeof(SubagentTaskNode));
     if (node) {
-        strcpy(node->task_id, task_data->task_id);
+        snprintf(node->task_id, sizeof(node->task_id), "%s", task_data->task_id);
         snprintf(node->session_key, sizeof(node->session_key), "subagent:%s", task_data->task_id);
         node->origin_channel = strdup(task_data->origin_channel);
         node->origin_chat_id = strdup(task_data->origin_chat_id);
         node->loop = NULL;  // Will be set after agent_loop_new
         node->cancelling = false;
         node->next = NULL;
-        add_active_task(mgr, node);
+        subagent_add_task(mgr, node);
     }
 
     printf("[Subagent %s] Initializing...\n", task_data->task_id);
@@ -240,17 +238,22 @@ static void* subagent_task_runner(void* arg) {
     if (sub_tool_registry && shared->tool_registry) {
         for (size_t i = 0; i < shared->tool_registry->count; i++) {
             Tool* src = &shared->tool_registry->tools[i];
-            ToolContext* tool_ctx_copy = malloc(sizeof(ToolContext));
-            if (!tool_ctx_copy) continue;
-            if (src->user_data) {
-                memcpy(tool_ctx_copy, src->user_data, sizeof(ToolContext));
-                pthread_mutex_init(&tool_ctx_copy->route_mutex, NULL);
-            } else {
-                memset(tool_ctx_copy, 0, sizeof(ToolContext));
-                pthread_mutex_init(&tool_ctx_copy->route_mutex, NULL);
+            void* user_data = src->user_data;
+            void* plugin_ref = src->plugin_ref;
+            ToolUserDataDestroyFunc destroy = NULL;
+
+            if (src->user_data && src->plugin_ref == NULL) {
+                ToolContext* base_ctx = (ToolContext*)src->user_data;
+                if (base_ctx->magic == TOOL_CONTEXT_MAGIC) {
+                    ToolContext* tool_ctx_copy = tool_context_clone_with_route(base_ctx, "subagent", task_data->task_id);
+                    if (!tool_ctx_copy) continue;
+                    user_data = tool_ctx_copy;
+                    plugin_ref = NULL;
+                    destroy = tool_context_destroy;
+                }
             }
             tool_registry_register_full(sub_tool_registry, src->def.name.data, src->def.description.data,
-                src->def.parameters.data, src->execute, tool_ctx_copy, src->user_data ? src->user_data_destroy : NULL, tool_context_destroy);
+                src->def.parameters.data, src->execute, user_data, plugin_ref, destroy);
         }
     }
 
@@ -271,7 +274,7 @@ static void* subagent_task_runner(void* arg) {
     }
 
     // Set Provider async
-    agent_loop_set_llm_provider_async(task_data->loop, (LLMProviderAsync)shared->provider);
+    agent_loop_set_llm_provider(task_data->loop, shared->provider);
 
     // 2. Start Agent Loop Thread
     pthread_t loop_tid;
@@ -382,7 +385,7 @@ static void* subagent_task_runner(void* arg) {
 
     // Remove from active tasks
     if (node) {
-        remove_active_task(mgr, saved_task_id);
+        subagent_remove_task(mgr, saved_task_id);
     }
 
     printf("[Subagent %s] Finished with %d messages\n", saved_task_id, message_count);
@@ -470,7 +473,7 @@ char* subagent_manager_spawn(
     if (!task_data) return NULL;
 
     task_data->manager = manager;
-    strcpy(task_data->task_id, task_id);
+    snprintf(task_data->task_id, sizeof(task_data->task_id), "%s", task_id);
     task_data->task = strdup(request->task);
     task_data->label = request->label ? strdup(request->label) : strndup(request->task, 30);
     task_data->origin_channel = strdup(request->origin_channel);

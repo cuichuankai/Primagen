@@ -19,7 +19,8 @@ typedef enum {
     PLUGIN_TOOL,
     PLUGIN_CHANNEL,
     PLUGIN_MCP,
-    PLUGIN_COMMAND
+    PLUGIN_COMMAND,
+    PLUGIN_LLM_PROVIDER
 } PluginType;
 
 // Forward declarations
@@ -70,6 +71,17 @@ struct CommandPluginDef {
     char* description;
     CommandFunc handler;
 };
+
+// =============================================================================
+// LLM Provider Plugin Interface
+// =============================================================================
+
+#include "../providers/llm_provider.h"
+
+typedef struct {
+    const char* name;
+    const LLMProviderInterface* iface;
+} LLMProviderPluginDef;
 
 // =============================================================================
 // Plugin Information Structure
@@ -157,6 +169,7 @@ int plugin_manager_reload_plugin(PluginManager* manager, const char* plugin_id);
 // Plugin discovery
 LoadedPlugin* plugin_manager_find_plugin(PluginManager* manager, const char* plugin_id);
 LoadedPlugin* plugin_manager_find_plugin_by_name(PluginManager* manager, const char* name);
+LoadedPlugin* plugin_manager_get_loaded_plugin(PluginManager* manager, const char* plugin_id);
 void plugin_manager_free_plugin_snapshot(LoadedPlugin* plugin);
 
 // Registration helpers (for plugins to register themselves)
@@ -228,6 +241,22 @@ void plugin_manager_unload_plugin(PluginManager* manager, LoadedPlugin* plugin);
         .description = desc, \
         .plugin_id = "command_" #name, \
         .metadata = &cmd_def_##name \
+    }; \
+    PluginInfo* plugin_get_info(void) { return &plugin_info; }
+
+// Macro to define plugin info for LLM provider plugins
+#define DEFINE_LLM_PROVIDER_PLUGIN(name, desc, iface_ptr) \
+    static LLMProviderPluginDef provider_def_##name = { \
+        .name = #name, \
+        .iface = iface_ptr \
+    }; \
+    static PluginInfo plugin_info = { \
+        .version = 1, \
+        .type = PLUGIN_LLM_PROVIDER, \
+        .name = #name, \
+        .description = desc, \
+        .plugin_id = "provider_" #name, \
+        .metadata = &provider_def_##name \
     }; \
     PluginInfo* plugin_get_info(void) { return &plugin_info; }
 

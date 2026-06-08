@@ -6,18 +6,28 @@
 #include "common.h"
 
 typedef struct {
+    char* provider;
+    int max_tool_iterations;
+    int memory_window;
+    int memory_max_tokens;
+    double memory_consolidation_threshold;
+} AgentConfig;
+
+typedef struct {
+    char* name;
     char* model;
     char* api_key;
     char* api_base;
     double temperature;
     int max_tokens;
-    int max_tool_iterations;
-    int memory_window;
     char* reasoning_effort;
-    // Memory settings
-    int memory_max_tokens;
-    double memory_consolidation_threshold;
-} AgentConfig;
+} ProviderConfig;
+
+typedef struct {
+    ProviderConfig* items;
+    size_t count;
+    size_t capacity;
+} ProvidersConfig;
 
 typedef struct {
     bool enabled;
@@ -54,26 +64,26 @@ typedef struct {
     bool use_system_resolver;
 } DNSConfig;
 
-// Plugin configuration structures
 typedef struct {
-    char* plugin_id;      // Plugin unique identifier
+    char* plugin_id;
     bool enabled;
-    cJSON* config;        // Plugin configuration JSON object
+    cJSON* config;
 } PluginConfig;
 
 typedef struct {
-    PluginConfig* items;  // Plugin configuration array
-    size_t count;         // Current count
-    size_t capacity;      // Capacity
+    PluginConfig* items;
+    size_t count;
+    size_t capacity;
 } PluginsConfig;
 
 typedef struct Config {
     AgentConfig agent;
+    ProvidersConfig providers;
     ToolConfig tools;
     DNSConfig dns;
     HeartbeatConfig heartbeat;
     LogConfig log;
-    PluginsConfig plugins;  // New: plugin configuration
+    PluginsConfig plugins;
 } Config;
 
 Config* config_create();
@@ -84,13 +94,15 @@ ToolConfig* config_get_tool_config(Config* cfg);
 DNSConfig* config_get_dns_config(Config* cfg);
 HeartbeatConfig* config_get_heartbeat_config(Config* cfg);
 
+ProviderConfig* config_add_provider(Config* cfg, const char* name);
+ProviderConfig* config_get_provider(Config* cfg, const char* name);
+ProviderConfig* config_get_active_provider(Config* cfg);
+void config_provider_config_free(ProviderConfig* item);
+
 bool config_load_from_file(Config* cfg, const char* filepath);
 bool config_save_to_file(Config* cfg, const char* filepath);
-
-// Environment variable overrides (env takes precedence over file)
 void config_load_from_env(Config* cfg);
 
-// Plugin configuration functions
 PluginConfig* config_add_plugin_config(Config* cfg, const char* plugin_id);
 PluginConfig* config_get_plugin_config(Config* cfg, const char* plugin_id);
 void config_plugin_config_free(PluginConfig* item);
