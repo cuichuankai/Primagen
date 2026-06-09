@@ -12,6 +12,7 @@ typedef struct {
     size_t max_tokens; // Maximum tokens before consolidation
     size_t current_tokens; // Current estimated token count
     double consolidation_threshold; // Threshold ratio for consolidation
+    unsigned long version; // Incremented whenever in-memory memory content changes
     pthread_mutex_t mutex;
 } Memory;
 
@@ -25,6 +26,7 @@ void memory_add_fact(Memory* mem, const char* fact);
 void memory_add_history(Memory* mem, const char* entry);
 Error memory_append_history(Memory* mem, const char* workspace_path, const char* entry);
 Error memory_set_facts(Memory* mem, const char* memory_update);
+unsigned long memory_get_version(Memory* mem);
 
 // Token estimation and consolidation
 size_t memory_estimate_tokens(Memory* mem);

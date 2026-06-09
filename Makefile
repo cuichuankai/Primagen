@@ -59,6 +59,7 @@ OBJ = $(OBJDIR)/common/common.o \
       $(OBJDIR)/bus/message_bus.o \
       $(OBJDIR)/agent/agent_loop.o \
       $(OBJDIR)/agent/command_dispatcher.o \
+      $(OBJDIR)/agent/reminder_parser.o \
       $(OBJDIR)/agent/tool_router.o \
       $(OBJDIR)/agent/session_orchestrator.o \
       $(OBJDIR)/providers/llm_provider.o \

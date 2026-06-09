@@ -22,6 +22,7 @@ typedef struct {
     char* cached_skills_summary;
     time_t memory_mtime;
     time_t skills_mtime;
+    unsigned long memory_version;
     
     size_t context_window;
     size_t max_history_tokens;

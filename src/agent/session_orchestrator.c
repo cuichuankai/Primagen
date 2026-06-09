@@ -213,6 +213,7 @@ TaskSnapshot session_orchestrator_get_task(SessionOrchestrator* orchestrator, co
             snap.cancelled = current->task->cancelled;
             snap.no_session_record = current->task->ctx.no_session_record;
             snap.session_msg_count_before = current->task->ctx.session_msg_count_before;
+            strncpy(snap.latest_user_content, current->task->ctx.latest_user_content, sizeof(snap.latest_user_content) - 1);
             snap.valid = true;
             pthread_mutex_unlock(&orchestrator->task_mutex);
             return snap;
@@ -248,6 +249,7 @@ TaskSnapshot session_orchestrator_snapshot_task(SessionOrchestrator* orchestrato
             snap.valid = true;
             snap.no_session_record = current->task->ctx.no_session_record;
             snap.session_msg_count_before = current->task->ctx.session_msg_count_before;
+            strncpy(snap.latest_user_content, current->task->ctx.latest_user_content, sizeof(snap.latest_user_content) - 1);
             pthread_mutex_unlock(&orchestrator->task_mutex);
             return snap;
         }

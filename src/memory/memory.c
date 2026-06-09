@@ -107,6 +107,7 @@ Memory* memory_new_with_config(Config* config) {
     mem->current_tokens = 0;
     mem->consolidation_threshold = config && config->agent.memory_consolidation_threshold > 0
                                    ? config->agent.memory_consolidation_threshold : CONSOLIDATION_THRESHOLD;
+    mem->version = 1;
     pthread_mutex_init(&mem->mutex, NULL);
     return mem;
 }
@@ -182,6 +183,7 @@ Error memory_load(Memory* mem, const char* workspace_path) {
         mem->history_md = string_new("");
     }
     mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    mem->version++;
     pthread_mutex_unlock(&mem->mutex);
     return error_new(ERR_NONE, "");
 }
@@ -224,6 +226,7 @@ void memory_add_fact(Memory* mem, const char* fact) {
     pthread_mutex_lock(&mem->mutex);
     add_fact_unlocked(mem, fact);
     mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    mem->version++;
     pthread_mutex_unlock(&mem->mutex);
 }
 
@@ -231,6 +234,7 @@ void memory_add_history(Memory* mem, const char* entry) {
     if (!mem || !entry) return;
     pthread_mutex_lock(&mem->mutex);
     append_history_buffer_unlocked(mem, entry);
+    mem->version++;
     pthread_mutex_unlock(&mem->mutex);
 }
 
@@ -256,6 +260,7 @@ Error memory_append_history(Memory* mem, const char* workspace_path, const char*
     fclose(f);
 
     append_history_buffer_unlocked(mem, entry);
+    mem->version++;
     pthread_mutex_unlock(&mem->mutex);
     return error_new(ERR_NONE, "");
 }
@@ -277,8 +282,17 @@ Error memory_set_facts(Memory* mem, const char* memory_update) {
     string_free(&mem->memory_md);
     mem->memory_md = string_new(memory_update);
     mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    mem->version++;
     pthread_mutex_unlock(&mem->mutex);
     return error_new(ERR_NONE, "");
+}
+
+unsigned long memory_get_version(Memory* mem) {
+    if (!mem) return 0;
+    pthread_mutex_lock(&mem->mutex);
+    unsigned long version = mem->version;
+    pthread_mutex_unlock(&mem->mutex);
+    return version;
 }
 
 /**
@@ -389,6 +403,7 @@ Error memory_consolidate(Memory* mem, const char* workspace_path) {
         free(old_part);
     }
     mem->current_tokens = estimate_tokens(mem->memory_md.data) + estimate_tokens(mem->history_md.data);
+    mem->version++;
     char mem_copy[FILE_PATH_MAX];
     snprintf(mem_copy, sizeof(mem_copy), "%s/memory", workspace_path);
     mkdir(mem_copy, 0755);

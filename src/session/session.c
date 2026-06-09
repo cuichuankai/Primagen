@@ -234,7 +234,8 @@ static void serialize_metadata_to_fp(FILE* f, Session* session, size_t save_coun
     cJSON_AddStringToObject(meta, "key", session->key.data);
     cJSON_AddNumberToObject(meta, "created_at", (double)session->created_at);
     cJSON_AddNumberToObject(meta, "updated_at", (double)session->updated_at);
-    cJSON_AddNumberToObject(meta, "last_consolidated", (double)save_count);
+    cJSON_AddNumberToObject(meta, "last_consolidated", (double)session->last_consolidated);
+    cJSON_AddNumberToObject(meta, "saved_count", (double)save_count);
     char* meta_json = cJSON_PrintUnformatted(meta);
     if (meta_json) {
         fprintf(f, "%s\n", meta_json);
@@ -276,7 +277,6 @@ Error session_manager_save(SessionManager* mgr, Session* session) {
             serialize_message_to_fp(f, msg);
         }
         session->last_saved_count = total_count;
-        session->last_consolidated = total_count;
         session->needs_full_save = false;
         pthread_mutex_unlock(&session->mutex);
         fclose(f);
@@ -456,6 +456,137 @@ void session_rollback_messages(Session* session, size_t to_count) {
     }
     session->updated_at = time(NULL);
     pthread_mutex_unlock(&session->mutex);
+}
+
+static Message* message_clone(const Message* src) {
+    if (!src) return NULL;
+    Message* clone = message_new(src->role, src->content.data ? src->content.data : "");
+    if (!clone) return NULL;
+
+    string_free(&clone->timestamp);
+    clone->timestamp = string_copy(&src->timestamp);
+    string_free(&clone->tool_call_id);
+    clone->tool_call_id = string_copy(&src->tool_call_id);
+    string_free(&clone->name);
+    clone->name = string_copy(&src->name);
+
+    for (size_t i = 0; i < src->tool_calls_count; i++) {
+        message_add_tool_call(clone,
+                              src->tool_calls[i].id.data,
+                              src->tool_calls[i].name.data,
+                              src->tool_calls[i].arguments.data);
+    }
+    return clone;
+}
+
+static bool assistant_has_tool_call_id(Message* msg, const char* tool_call_id) {
+    if (!msg || msg->role != ROLE_ASSISTANT || !tool_call_id || tool_call_id[0] == '\0') {
+        return false;
+    }
+    for (size_t i = 0; i < msg->tool_calls_count; i++) {
+        if (strcmp(msg->tool_calls[i].id.data, tool_call_id) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static size_t adjust_context_start_for_tool_chain(Message** messages, size_t count, size_t start_idx) {
+    if (!messages || start_idx == 0 || start_idx >= count) return start_idx;
+
+    size_t adjusted = start_idx;
+    bool changed;
+    do {
+        changed = false;
+        if (adjusted == 0) break;
+
+        Message* first = messages[adjusted];
+        if (first && first->role == ROLE_TOOL) {
+            for (size_t j = adjusted; j > 0; j--) {
+                Message* candidate = messages[j - 1];
+                if (assistant_has_tool_call_id(candidate, first->tool_call_id.data)) {
+                    adjusted = j - 1;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+
+        if (adjusted > 0) {
+            Message* prev = messages[adjusted - 1];
+            if (prev && prev->role == ROLE_ASSISTANT && prev->tool_calls_count > 0) {
+                adjusted--;
+                changed = true;
+            }
+        }
+    } while (changed);
+
+    return adjusted;
+}
+
+SessionSnapshot session_snapshot_for_context(Session* session, size_t max_messages) {
+    SessionSnapshot snapshot = {0};
+    if (!session) return snapshot;
+
+    pthread_mutex_lock(&session->mutex);
+    size_t total = session->messages.count;
+    if (total == 0) {
+        pthread_mutex_unlock(&session->mutex);
+        return snapshot;
+    }
+
+    Message** all = calloc(total, sizeof(Message*));
+    if (!all) {
+        pthread_mutex_unlock(&session->mutex);
+        return snapshot;
+    }
+
+    for (size_t i = 0; i < total; i++) {
+        Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
+        all[i] = message_clone(msg);
+        if (!all[i]) {
+            for (size_t j = 0; j < i; j++) message_free(all[j]);
+            free(all);
+            pthread_mutex_unlock(&session->mutex);
+            return snapshot;
+        }
+    }
+    pthread_mutex_unlock(&session->mutex);
+
+    size_t start_idx = 0;
+    if (max_messages > 0 && total > max_messages) {
+        start_idx = total - max_messages;
+        start_idx = adjust_context_start_for_tool_chain(all, total, start_idx);
+    }
+
+    snapshot.count = total - start_idx;
+    snapshot.truncated = start_idx > 0;
+    snapshot.messages = calloc(snapshot.count, sizeof(Message*));
+    if (!snapshot.messages) {
+        for (size_t i = 0; i < total; i++) message_free(all[i]);
+        free(all);
+        snapshot.count = 0;
+        return snapshot;
+    }
+
+    for (size_t i = 0; i < start_idx; i++) {
+        message_free(all[i]);
+    }
+    for (size_t i = start_idx; i < total; i++) {
+        snapshot.messages[i - start_idx] = all[i];
+    }
+    free(all);
+    return snapshot;
+}
+
+void session_snapshot_free(SessionSnapshot* snapshot) {
+    if (!snapshot) return;
+    for (size_t i = 0; i < snapshot->count; i++) {
+        message_free(snapshot->messages[i]);
+    }
+    free(snapshot->messages);
+    snapshot->messages = NULL;
+    snapshot->count = 0;
 }
 
 Session* session_ref(Session* session) {

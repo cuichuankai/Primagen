@@ -24,6 +24,12 @@
 
 typedef struct Session Session;
 
+typedef struct {
+    Message** messages;
+    size_t count;
+    bool truncated;
+} SessionSnapshot;
+
 typedef struct SessionEntry {
     Session* session;
     struct SessionEntry* next;
@@ -57,6 +63,8 @@ Error session_manager_save(SessionManager* mgr, Session* session);
 Error session_manager_load(SessionManager* mgr, const char* key, Session** session);
 void session_add_message(Session* session, Message* msg);
 void session_rollback_messages(Session* session, size_t to_count);
+SessionSnapshot session_snapshot_for_context(Session* session, size_t max_messages);
+void session_snapshot_free(SessionSnapshot* snapshot);
 Session* session_ref(Session* session);
 void session_unref(Session* session);
 

@@ -1,4 +1,5 @@
 #include "agent_loop.h"
+#include "reminder_parser.h"
 #include "../include/common.h"
 #include "../include/logger.h"
 #include "../tools/tools_impl.h"
@@ -55,11 +56,15 @@ static void maybe_auto_consolidate_memory(AgentLoop* loop, Session* session, con
         memory_window = (size_t) loop->config->agent.memory_window;
     }
 
+    pthread_mutex_lock(&session->mutex);
     if (session->messages.count < session->last_consolidated) {
         session->last_consolidated = session->messages.count;
     }
+    size_t message_count = session->messages.count;
+    size_t consolidated_cursor = session->last_consolidated;
+    size_t delta = message_count - consolidated_cursor;
+    pthread_mutex_unlock(&session->mutex);
 
-    size_t delta = session->messages.count - session->last_consolidated;
     if (delta < memory_window) return;
 
     time_t now = time(NULL);
@@ -84,7 +89,7 @@ static void maybe_auto_consolidate_memory(AgentLoop* loop, Session* session, con
     char history_entry[1024];
     snprintf(history_entry, sizeof(history_entry),
              "[%s] Auto consolidation for session %s: archived %zu messages since index %zu. Latest user message: %s",
-             ts, session_key, delta, session->last_consolidated, latest_excerpt);
+             ts, session_key, delta, consolidated_cursor, latest_excerpt);
 
     Error append_err = memory_append_history(loop->ctx_builder->memory, loop->workspace_path, history_entry);
     if (append_err.code != ERR_NONE) {
@@ -98,12 +103,76 @@ static void maybe_auto_consolidate_memory(AgentLoop* loop, Session* session, con
         return;
     }
 
-    session->last_consolidated = session->messages.count;
-    session->needs_full_save = true;  // Force full rewrite after consolidation
+    pthread_mutex_lock(&session->mutex);
+    session->last_consolidated = message_count;
+    session->needs_full_save = true;  // Force metadata rewrite after consolidation
+    pthread_mutex_unlock(&session->mutex);
     Error save_err = session_manager_save(loop->session_mgr, session);
     if (save_err.code != ERR_NONE) {
         log_error("[AgentLoop] Failed to persist session consolidation cursor: %s", save_err.message);
     }
+}
+
+static void json_escape_string(const char* in, char* out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    size_t n = 0;
+    for (size_t i = 0; in && in[i] && n + 1 < out_size; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if ((c == '"' || c == '\\') && n + 2 < out_size) {
+            out[n++] = '\\';
+            out[n++] = (char)c;
+        } else if (c == '\n' && n + 2 < out_size) {
+            out[n++] = '\\';
+            out[n++] = 'n';
+        } else if (c == '\r' || c == '\t') {
+            out[n++] = ' ';
+        } else {
+            out[n++] = (char)c;
+        }
+    }
+    out[n] = '\0';
+}
+
+static bool maybe_schedule_reminder_fallback(AgentLoop* loop, const char* user_content, const char* channel, const char* chat_id, String* response) {
+    if (!loop || !loop->tool_registry || !user_content || !response) return false;
+    ReminderParseResult parsed = reminder_parse_simple(user_content);
+    if (!parsed.valid) return false;
+
+    Tool* cron_tool = tool_registry_get(loop->tool_registry, "cron");
+    if (!cron_tool || !cron_tool->execute || !cron_tool->user_data) return false;
+
+    char escaped_name[256];
+    char escaped_payload[768];
+    char escaped_channel[192];
+    char escaped_chat_id[768];
+    json_escape_string(parsed.name[0] ? parsed.name : "reminder", escaped_name, sizeof(escaped_name));
+    json_escape_string(parsed.payload, escaped_payload, sizeof(escaped_payload));
+    json_escape_string(channel ? channel : "cli", escaped_channel, sizeof(escaped_channel));
+    json_escape_string(chat_id ? chat_id : "current", escaped_chat_id, sizeof(escaped_chat_id));
+
+    char args[1400];
+    snprintf(args, sizeof(args),
+             "{\"name\":\"%s\",\"payload\":\"%s\",\"schedule\":\"@in %d\",\"channel\":\"%s\",\"chat_id\":\"%s\"}",
+             escaped_name,
+             escaped_payload,
+             parsed.delay_seconds,
+             escaped_channel,
+             escaped_chat_id);
+
+    String tool_result = string_new("");
+    Error err = cron_tool->execute(cron_tool->user_data, args, &tool_result);
+    if (err.code != ERR_NONE || strstr(tool_result.data ? tool_result.data : "", "Failed to schedule") != NULL) {
+        log_error("[AgentLoop] Reminder fallback failed: %s", err.message);
+        string_free(&tool_result);
+        return false;
+    }
+    string_free(&tool_result);
+
+    char confirm[256];
+    snprintf(confirm, sizeof(confirm), "已设置提醒，%d 秒后提醒你。", parsed.delay_seconds);
+    string_free(response);
+    *response = string_new(confirm);
+    return true;
 }
 
 /* =============================================================================
@@ -516,7 +585,26 @@ static void tool_executor_callback(Error err, const char* result, void* user_dat
 }
 
 static void handle_llm_text_response(AgentLoop* loop, InternalEvent* event, Session* session, TaskSnapshot* snap, char* clean_content, bool clean_content_owned) {
-    const char* assistant_content = (clean_content && strlen(clean_content) > 0) ? clean_content : event->llm_response.data;
+    String fallback_content = string_new("");
+    const char* raw_assistant_content = (clean_content && strlen(clean_content) > 0) ? clean_content : event->llm_response.data;
+    if (raw_assistant_content) {
+        string_append(&fallback_content, raw_assistant_content);
+    }
+
+    bool fallback_scheduled = false;
+    if (reminder_should_fallback_schedule(snap->turn, snap->pending_tool_count)) {
+        fallback_scheduled = maybe_schedule_reminder_fallback(
+            loop,
+            snap->latest_user_content,
+            snap->channel,
+            snap->chat_id,
+            &fallback_content
+        );
+    }
+
+    const char* assistant_content = fallback_scheduled
+        ? fallback_content.data
+        : ((clean_content && strlen(clean_content) > 0) ? clean_content : event->llm_response.data);
     if (assistant_content && strlen(assistant_content) > 0) {
         Message* assistant_msg = message_new(ROLE_ASSISTANT, assistant_content);
         session_add_message(session, assistant_msg);
@@ -532,6 +620,7 @@ static void handle_llm_text_response(AgentLoop* loop, InternalEvent* event, Sess
     message_bus_send_outbound(loop->bus, outbound);
 
     if (clean_content_owned) free(clean_content);
+    string_free(&fallback_content);
     remove_active_task(loop, snap->task_id);
 }
 

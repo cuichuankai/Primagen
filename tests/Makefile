@@ -17,6 +17,7 @@ COMMON_OBJS = $(BUILD_DIR)/common/common.o \
               $(BUILD_DIR)/vendor/cJSON/cJSON.o \
               $(BUILD_DIR)/vendor/mongoose/mongoose.o \
               $(BUILD_DIR)/config/config.o \
+              $(BUILD_DIR)/session/session.o \
               $(BUILD_DIR)/providers/llm_provider.o \
               $(BUILD_DIR)/providers/openai_provider.o
 
@@ -45,15 +46,19 @@ test_ft_integration: test_ft_integration.c $(COMMON_OBJS)
 	$(CC) $(BASE_CFLAGS) -o $@ test_ft_integration.c $(COMMON_OBJS) $(LDFLAGS)
 
 test_runtime_fixes: test_runtime_fixes.c $(COMMON_OBJS) \
-                    $(BUILD_DIR)/session/session.o $(BUILD_DIR)/tools/tools_impl.o \
+                    $(BUILD_DIR)/tools/tools_impl.o \
                     $(BUILD_DIR)/tools/tool_validation.o $(BUILD_DIR)/tools/tool.o \
                     $(BUILD_DIR)/memory/memory.o $(BUILD_DIR)/skills/skills.o \
+                    $(BUILD_DIR)/context/context_builder.o \
+                    $(BUILD_DIR)/agent/reminder_parser.o \
                     $(BUILD_DIR)/cron/cron.o $(BUILD_DIR)/subagent/subagent.o \
                     $(BUILD_DIR)/plugin/plugin_manager.o $(BUILD_DIR)/bus/message_bus.o
 	$(CC) $(BASE_CFLAGS) -o $@ test_runtime_fixes.c $(COMMON_OBJS) \
-	      $(BUILD_DIR)/session/session.o $(BUILD_DIR)/tools/tools_impl.o \
+	      $(BUILD_DIR)/tools/tools_impl.o \
 	      $(BUILD_DIR)/tools/tool_validation.o $(BUILD_DIR)/tools/tool.o \
 	      $(BUILD_DIR)/memory/memory.o $(BUILD_DIR)/skills/skills.o \
+	      $(BUILD_DIR)/context/context_builder.o \
+	      $(BUILD_DIR)/agent/reminder_parser.o \
 	      $(BUILD_DIR)/cron/cron.o $(BUILD_DIR)/subagent/subagent.o \
 	      $(BUILD_DIR)/plugin/plugin_manager.o $(BUILD_DIR)/bus/message_bus.o $(LDFLAGS)
 

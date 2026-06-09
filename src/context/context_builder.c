@@ -89,6 +89,7 @@ ContextBuilder* context_builder_new(const char* workspace) {
     cb->cached_skills_summary = NULL;
     cb->memory_mtime = 0;
     cb->skills_mtime = 0;
+    cb->memory_version = 0;
     cb->context_window = DEFAULT_CONTEXT_WINDOW;
     cb->max_history_tokens = DEFAULT_CONTEXT_WINDOW - CONTEXT_RESERVE_TOKENS;
     return cb;
@@ -160,12 +161,22 @@ String context_builder_build_with_channel(ContextBuilder* cb, Session* session, 
             new_mtime = st.st_mtime;
         }
 
-        // Reload only if file changed or not cached
-        if (!cb->cached_memory_content || new_mtime > cb->memory_mtime) {
+        unsigned long current_version = memory_get_version(cb->memory);
+
+        bool file_changed = new_mtime > cb->memory_mtime;
+        if (file_changed) {
             memory_load(cb->memory, cb->workspace);
+            current_version = memory_get_version(cb->memory);
+        }
+
+        // Rebuild cache if file changed, memory tool updated it, or not cached.
+        if (!cb->cached_memory_content || file_changed || current_version != cb->memory_version) {
             free(cb->cached_memory_content);
-            cb->cached_memory_content = strdup(cb->memory->memory_md.data);
+            pthread_mutex_lock(&cb->memory->mutex);
+            cb->cached_memory_content = strdup(cb->memory->memory_md.data ? cb->memory->memory_md.data : "");
+            pthread_mutex_unlock(&cb->memory->mutex);
             cb->memory_mtime = new_mtime;
+            cb->memory_version = current_version;
         }
 
         if (cb->cached_memory_content) {

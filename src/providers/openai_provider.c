@@ -156,17 +156,16 @@ static cJSON* build_messages_json(const char* system_prompt, Session* session, C
         cJSON_AddItemToArray(messages, sys_msg);
     }
     if (session) {
-        size_t start_idx = 0;
         size_t max_history = config && config->agent.memory_window > 0 ? (size_t)config->agent.memory_window : 30;
-        if (session->messages.count > max_history) {
-            start_idx = session->messages.count - max_history;
+        SessionSnapshot snapshot = session_snapshot_for_context(session, max_history);
+        if (snapshot.truncated) {
             cJSON *note = cJSON_CreateObject();
             cJSON_AddStringToObject(note, "role", "system");
             cJSON_AddStringToObject(note, "content", "(Note: Older conversation history has been truncated.)");
             cJSON_AddItemToArray(messages, note);
         }
-        for (size_t i = start_idx; i < session->messages.count; i++) {
-            Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
+        for (size_t i = 0; i < snapshot.count; i++) {
+            Message* msg = snapshot.messages[i];
             cJSON *json_msg = cJSON_CreateObject();
             if (msg->role == ROLE_USER) {
                 cJSON_AddStringToObject(json_msg, "role", "user");
@@ -197,6 +196,7 @@ static cJSON* build_messages_json(const char* system_prompt, Session* session, C
             }
             cJSON_AddItemToArray(messages, json_msg);
         }
+        session_snapshot_free(&snapshot);
     }
     return messages;
 }
@@ -227,10 +227,12 @@ static char* build_llm_request_json(const char* system_prompt, Session* session,
     cJSON_AddStringToObject(root, "model", model);
     bool in_tool_chain = false;
     if (session) {
-        for (size_t i = 0; i < session->messages.count; i++) {
-            Message* msg = *(Message**)dynamic_array_get(&session->messages, i);
+        SessionSnapshot snapshot = session_snapshot_for_context(session, 0);
+        for (size_t i = 0; i < snapshot.count; i++) {
+            Message* msg = snapshot.messages[i];
             if (msg->role == ROLE_TOOL) { in_tool_chain = true; break; }
         }
+        session_snapshot_free(&snapshot);
     }
     if (pc) {
         cJSON_AddNumberToObject(root, "temperature", pc->temperature);
